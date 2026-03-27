@@ -1,0 +1,1298 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NODAQ — L'IA qui récupère votre argent</title>
+<meta name="description" content="NODAQ automatise le recouvrement de vos factures impayées grâce à l'IA. Du premier rappel au contentieux, votre trésorerie est entre de bonnes mains.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+/* ===== RESET & TOKENS ===== */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --noir: #0D0D0D;
+  --noir-surface: #111318;
+  --noir-card: #161920;
+  --noir-border: #1e2230;
+  --bleu: #2563EB;
+  --bleu-hover: #3b82f6;
+  --bleu-glow: rgba(37, 99, 235, 0.15);
+  --bleu-glow-strong: rgba(37, 99, 235, 0.3);
+  --blanc: #FFFFFF;
+  --gris: #64748B;
+  --gris-clair: #94a3b8;
+  --gris-tres-clair: #cbd5e1;
+  --vert: #10B981;
+  --vert-glow: rgba(16, 185, 129, 0.15);
+  --rouge: #ef4444;
+
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.3), 0 8px 32px rgba(0,0,0,0.2);
+  --shadow-glow: 0 0 40px var(--bleu-glow), 0 0 80px rgba(37,99,235,0.05);
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-body);
+  background: var(--noir);
+  color: var(--blanc);
+  line-height: 1.6;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: inherit; text-decoration: none; }
+
+/* ===== NOISE TEXTURE OVERLAY ===== */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.4;
+}
+
+/* ===== NAVIGATION ===== */
+nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  padding: 16px 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(13, 13, 13, 0.8);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--noir-border);
+  transition: all 0.3s ease;
+}
+
+.nav-logo {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  list-style: none;
+}
+
+.nav-links a {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--gris-clair);
+  transition: color 0.2s;
+}
+
+.nav-links a:hover { color: var(--blanc); }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 14px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+
+.btn-primary {
+  background: var(--bleu);
+  color: var(--blanc);
+  padding: 10px 24px;
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 20px var(--bleu-glow);
+}
+
+.btn-primary:hover {
+  background: var(--bleu-hover);
+  box-shadow: 0 0 30px var(--bleu-glow-strong);
+  transform: translateY(-1px);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--gris-clair);
+  padding: 10px 20px;
+  border: 1px solid var(--noir-border);
+  border-radius: var(--radius-sm);
+}
+
+.btn-ghost:hover {
+  color: var(--blanc);
+  border-color: var(--gris);
+}
+
+/* ===== HERO ===== */
+.hero {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 120px 24px 80px;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Gradient orb behind hero */
+.hero::before {
+  content: '';
+  position: absolute;
+  top: -20%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 800px;
+  height: 800px;
+  background: radial-gradient(circle, var(--bleu-glow) 0%, transparent 70%);
+  pointer-events: none;
+  animation: pulse-glow 6s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.6; transform: translateX(-50%) scale(1); }
+  50% { opacity: 1; transform: translateX(-50%) scale(1.1); }
+}
+
+/* Grid lines background */
+.hero::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-image:
+    linear-gradient(rgba(37, 99, 235, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(37, 99, 235, 0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+  pointer-events: none;
+}
+
+.hero-content {
+  position: relative;
+  z-index: 2;
+  max-width: 800px;
+}
+
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: var(--bleu-glow);
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  border-radius: 100px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bleu-hover);
+  margin-bottom: 32px;
+  animation: fadeInUp 0.6s ease-out;
+}
+
+.hero-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  background: var(--vert);
+  border-radius: 50%;
+  animation: blink 2s ease-in-out infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.hero h1 {
+  font-size: clamp(40px, 6vw, 72px);
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  margin-bottom: 24px;
+  animation: fadeInUp 0.6s ease-out 0.1s both;
+}
+
+.hero h1 .accent {
+  background: linear-gradient(135deg, var(--bleu) 0%, #60a5fa 50%, var(--vert) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero-sub {
+  font-size: 18px;
+  line-height: 1.7;
+  color: var(--gris-clair);
+  max-width: 560px;
+  margin: 0 auto 40px;
+  animation: fadeInUp 0.6s ease-out 0.2s both;
+}
+
+.hero-ctas {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  animation: fadeInUp 0.6s ease-out 0.3s both;
+}
+
+.hero-ctas .btn-primary {
+  padding: 14px 32px;
+  font-size: 15px;
+  border-radius: var(--radius-md);
+}
+
+.hero-ctas .btn-ghost {
+  padding: 14px 28px;
+  font-size: 15px;
+  border-radius: var(--radius-md);
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Hero metrics bar */
+.hero-metrics {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 48px;
+  margin-top: 80px;
+  padding-top: 40px;
+  border-top: 1px solid var(--noir-border);
+  animation: fadeInUp 0.6s ease-out 0.5s both;
+}
+
+.hero-metric {
+  text-align: center;
+}
+
+.hero-metric .number {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--blanc);
+}
+
+.hero-metric .number .unit {
+  color: var(--bleu);
+}
+
+.hero-metric .label {
+  font-size: 13px;
+  color: var(--gris);
+  margin-top: 4px;
+}
+
+/* ===== SECTIONS COMMON ===== */
+section {
+  padding: 120px 24px;
+  position: relative;
+}
+
+.container {
+  max-width: 1140px;
+  margin: 0 auto;
+}
+
+.section-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--bleu);
+  margin-bottom: 16px;
+}
+
+.section-label::before {
+  content: '';
+  width: 24px;
+  height: 1px;
+  background: var(--bleu);
+}
+
+.section-title {
+  font-size: clamp(28px, 4vw, 44px);
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  margin-bottom: 16px;
+}
+
+.section-desc {
+  font-size: 17px;
+  color: var(--gris-clair);
+  line-height: 1.7;
+  max-width: 560px;
+}
+
+/* ===== PROBLEM SECTION ===== */
+.problem {
+  background: var(--noir-surface);
+  border-top: 1px solid var(--noir-border);
+  border-bottom: 1px solid var(--noir-border);
+}
+
+.problem-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 80px;
+  align-items: center;
+}
+
+.problem-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.stat-card {
+  background: var(--noir-card);
+  border: 1px solid var(--noir-border);
+  border-radius: var(--radius-lg);
+  padding: 28px;
+  transition: all 0.3s ease;
+}
+
+.stat-card:hover {
+  border-color: rgba(37, 99, 235, 0.3);
+  box-shadow: 0 0 30px var(--bleu-glow);
+}
+
+.stat-card .stat-number {
+  font-family: var(--font-mono);
+  font-size: 32px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.stat-card .stat-number.red { color: var(--rouge); }
+.stat-card .stat-number.blue { color: var(--bleu); }
+
+.stat-card .stat-text {
+  font-size: 14px;
+  color: var(--gris);
+  line-height: 1.5;
+}
+
+/* ===== ESCALATION / HOW IT WORKS ===== */
+.escalation-timeline {
+  margin-top: 64px;
+  position: relative;
+}
+
+/* Vertical line */
+.escalation-timeline::before {
+  content: '';
+  position: absolute;
+  left: 28px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: linear-gradient(to bottom, var(--bleu), var(--vert), var(--rouge));
+  border-radius: 2px;
+}
+
+.esc-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 32px;
+  padding: 24px 0;
+  position: relative;
+}
+
+.esc-dot {
+  width: 56px;
+  height: 56px;
+  min-width: 56px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 14px;
+  position: relative;
+  z-index: 2;
+}
+
+.esc-step:nth-child(1) .esc-dot { background: rgba(37,99,235,0.15); border: 2px solid var(--bleu); color: var(--bleu); }
+.esc-step:nth-child(2) .esc-dot { background: rgba(37,99,235,0.15); border: 2px solid var(--bleu); color: var(--bleu); }
+.esc-step:nth-child(3) .esc-dot { background: rgba(16,185,129,0.15); border: 2px solid var(--vert); color: var(--vert); }
+.esc-step:nth-child(4) .esc-dot { background: rgba(234,179,8,0.15); border: 2px solid #eab308; color: #eab308; }
+.esc-step:nth-child(5) .esc-dot { background: rgba(239,68,68,0.15); border: 2px solid var(--rouge); color: var(--rouge); }
+
+.esc-content {
+  background: var(--noir-card);
+  border: 1px solid var(--noir-border);
+  border-radius: var(--radius-lg);
+  padding: 28px 32px;
+  flex: 1;
+  transition: all 0.3s ease;
+}
+
+.esc-content:hover {
+  border-color: var(--noir-border);
+  box-shadow: var(--shadow-card);
+  transform: translateX(4px);
+}
+
+.esc-content .esc-day {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gris);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.esc-content h4 {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.esc-content p {
+  font-size: 14px;
+  color: var(--gris-clair);
+  line-height: 1.6;
+}
+
+.esc-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 100px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-top: 12px;
+}
+
+.esc-tag.auto { background: var(--bleu-glow); color: var(--bleu); }
+.esc-tag.ia { background: var(--vert-glow); color: var(--vert); }
+.esc-tag.legal { background: rgba(234,179,8,0.15); color: #eab308; }
+
+/* ===== PRICING ===== */
+.pricing {
+  background: var(--noir);
+}
+
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 20px;
+  margin-top: 64px;
+}
+
+.price-card {
+  background: var(--noir-card);
+  border: 1px solid var(--noir-border);
+  border-radius: var(--radius-xl);
+  padding: 36px 28px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  transition: all 0.3s ease;
+}
+
+.price-card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-card);
+}
+
+.price-card.featured {
+  border-color: var(--bleu);
+  box-shadow: var(--shadow-glow);
+  background: linear-gradient(180deg, rgba(37,99,235,0.08) 0%, var(--noir-card) 40%);
+}
+
+.price-card.featured::before {
+  content: 'POPULAIRE';
+  position: absolute;
+  top: -12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bleu);
+  color: var(--blanc);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  padding: 4px 16px;
+  border-radius: 100px;
+}
+
+.price-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--gris-clair);
+  margin-bottom: 8px;
+}
+
+.price-amount {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.price-amount .value {
+  font-family: var(--font-mono);
+  font-size: 40px;
+  font-weight: 700;
+}
+
+.price-amount .currency {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--gris);
+}
+
+.price-amount .period {
+  font-size: 14px;
+  color: var(--gris);
+}
+
+.price-desc {
+  font-size: 13px;
+  color: var(--gris);
+  margin-bottom: 28px;
+  padding-bottom: 28px;
+  border-bottom: 1px solid var(--noir-border);
+  line-height: 1.5;
+}
+
+.price-features {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex: 1;
+  margin-bottom: 32px;
+}
+
+.price-features li {
+  font-size: 14px;
+  color: var(--gris-tres-clair);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  line-height: 1.4;
+}
+
+.price-features li::before {
+  content: '✓';
+  color: var(--vert);
+  font-weight: 700;
+  font-size: 13px;
+  margin-top: 1px;
+  min-width: 16px;
+}
+
+.price-card .btn {
+  width: 100%;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+}
+
+.price-card .price-commission {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--gris);
+  margin-top: 8px;
+  text-align: center;
+}
+
+/* ===== INTEGRATIONS ===== */
+.integrations {
+  background: var(--noir-surface);
+  border-top: 1px solid var(--noir-border);
+  text-align: center;
+}
+
+.integrations-logos {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 48px;
+  margin-top: 48px;
+  flex-wrap: wrap;
+}
+
+.int-logo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  opacity: 0.5;
+  transition: opacity 0.3s;
+}
+
+.int-logo:hover { opacity: 1; }
+
+.int-logo .icon-box {
+  width: 64px;
+  height: 64px;
+  background: var(--noir-card);
+  border: 1px solid var(--noir-border);
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+}
+
+.int-logo .name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gris);
+  letter-spacing: 0.5px;
+}
+
+/* ===== CTA / EARLY ACCESS ===== */
+.cta-section {
+  position: relative;
+  overflow: hidden;
+}
+
+.cta-section::before {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 600px;
+  height: 400px;
+  background: radial-gradient(circle, var(--bleu-glow-strong) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.cta-box {
+  position: relative;
+  z-index: 2;
+  max-width: 640px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.cta-box h2 {
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  margin-bottom: 16px;
+}
+
+.cta-box p {
+  font-size: 17px;
+  color: var(--gris-clair);
+  margin-bottom: 36px;
+  line-height: 1.7;
+}
+
+.email-form {
+  display: flex;
+  gap: 12px;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.email-form input {
+  flex: 1;
+  padding: 14px 20px;
+  background: var(--noir-card);
+  border: 1px solid var(--noir-border);
+  border-radius: var(--radius-md);
+  color: var(--blanc);
+  font-family: var(--font-body);
+  font-size: 15px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.email-form input::placeholder {
+  color: var(--gris);
+}
+
+.email-form input:focus {
+  border-color: var(--bleu);
+  box-shadow: 0 0 0 3px var(--bleu-glow);
+}
+
+.email-form .btn-primary {
+  padding: 14px 28px;
+  border-radius: var(--radius-md);
+  white-space: nowrap;
+}
+
+.cta-trust {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  margin-top: 24px;
+}
+
+.cta-trust span {
+  font-size: 12px;
+  color: var(--gris);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cta-trust span::before {
+  content: '✓';
+  color: var(--vert);
+  font-weight: 700;
+}
+
+/* ===== FOOTER ===== */
+footer {
+  padding: 48px 24px;
+  border-top: 1px solid var(--noir-border);
+}
+
+.footer-inner {
+  max-width: 1140px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.footer-copy {
+  font-size: 13px;
+  color: var(--gris);
+}
+
+.footer-links {
+  display: flex;
+  gap: 24px;
+  list-style: none;
+}
+
+.footer-links a {
+  font-size: 13px;
+  color: var(--gris);
+  transition: color 0.2s;
+}
+
+.footer-links a:hover { color: var(--blanc); }
+
+/* ===== SECURITY BADGES ===== */
+.security-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 40px;
+  padding: 40px 24px;
+  border-top: 1px solid var(--noir-border);
+  background: var(--noir-surface);
+}
+
+.sec-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--gris);
+}
+
+.sec-badge .sec-icon {
+  width: 36px;
+  height: 36px;
+  background: var(--noir-card);
+  border: 1px solid var(--noir-border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+/* ===== RESPONSIVE ===== */
+@media (max-width: 960px) {
+  .pricing-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .problem-grid {
+    grid-template-columns: 1fr;
+    gap: 48px;
+  }
+
+  .hero-metrics {
+    gap: 32px;
+    flex-wrap: wrap;
+  }
+
+  nav {
+    padding: 12px 20px;
+  }
+
+  .nav-links { display: none; }
+}
+
+@media (max-width: 640px) {
+  .pricing-grid {
+    grid-template-columns: 1fr;
+    max-width: 400px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .email-form {
+    flex-direction: column;
+  }
+
+  .hero-metrics {
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .security-bar {
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .cta-trust {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .footer-inner {
+    flex-direction: column;
+    gap: 20px;
+    text-align: center;
+  }
+
+  .integrations-logos {
+    gap: 24px;
+  }
+}
+
+/* ===== ANIMATIONS ON SCROLL ===== */
+.reveal {
+  opacity: 0;
+  transform: translateY(30px);
+  transition: opacity 0.7s ease, transform 0.7s ease;
+}
+
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+</style>
+</head>
+<body>
+
+<!-- ===== NAV ===== -->
+<nav>
+  <a href="#" class="nav-logo">
+    <svg width="120" height="36" viewBox="0 0 260 80">
+      <path d="M 18 68 L 18 16 L 52 68 L 52 16" fill="none" stroke="#FFFFFF" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <line x1="52" y1="10" x2="52" y2="2" stroke="#2563EB" stroke-width="3.8" stroke-linecap="round"/>
+      <polyline points="45,7 52,0 59,7" fill="none" stroke="#2563EB" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="74" y="50" font-family="Inter, sans-serif" font-weight="700" font-size="34" fill="#FFFFFF" letter-spacing="1.5">NODAQ</text>
+    </svg>
+  </a>
+  <ul class="nav-links">
+    <li><a href="#probleme">Le problème</a></li>
+    <li><a href="#solution">Comment ça marche</a></li>
+    <li><a href="#tarifs">Tarifs</a></li>
+  </ul>
+  <a href="#acces" class="btn btn-primary">Accès anticipé</a>
+</nav>
+
+<!-- ===== HERO ===== -->
+<section class="hero">
+  <div class="hero-content">
+    <div class="hero-badge">Early Access — Places limitées</div>
+    <h1>Vos factures impayées&nbsp;?<br><span class="accent">L'IA s'en charge.</span></h1>
+    <p class="hero-sub">NODAQ automatise le recouvrement de vos créances du premier rappel jusqu'au contentieux. Votre trésorerie reprend vie, sans effort.</p>
+    <div class="hero-ctas">
+      <a href="#acces" class="btn btn-primary">Demander l'accès</a>
+      <a href="#solution" class="btn btn-ghost">Voir la démo</a>
+    </div>
+    <div class="hero-metrics">
+      <div class="hero-metric">
+        <div class="number"><span class="unit">72</span>%</div>
+        <div class="label">de factures récupérées</div>
+      </div>
+      <div class="hero-metric">
+        <div class="number"><span class="unit">-85</span>%</div>
+        <div class="label">de temps passé en relances</div>
+      </div>
+      <div class="hero-metric">
+        <div class="number"><span class="unit">J+1</span></div>
+        <div class="label">première relance automatique</div>
+      </div>
+      <div class="hero-metric">
+        <div class="number"><span class="unit">100</span>%</div>
+        <div class="label">données hébergées en UE</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== PROBLÈME ===== -->
+<section class="problem" id="probleme">
+  <div class="container">
+    <div class="problem-grid">
+      <div class="reveal">
+        <div class="section-label">Le problème</div>
+        <h2 class="section-title">Les PME françaises perdent en moyenne <span style="color: var(--rouge);">56 jours</span> de trésorerie</h2>
+        <p class="section-desc">Les retards de paiement coûtent 19 milliards d'euros par an aux entreprises françaises. Un quart des faillites sont directement causées par des impayés. Pourtant, 68% des PME relancent encore manuellement.</p>
+      </div>
+      <div class="problem-stats reveal">
+        <div class="stat-card">
+          <div class="stat-number red">19 Md€</div>
+          <div class="stat-text">Coût annuel des retards de paiement pour les PME françaises</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-number red">25%</div>
+          <div class="stat-text">des faillites de PME causées par des impayés</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-number blue">56 j</div>
+          <div class="stat-text">Délai moyen de paiement constaté (DSO)</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-number blue">68%</div>
+          <div class="stat-text">des PME relancent encore manuellement par email</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== SOLUTION / ESCALATION ===== -->
+<section id="solution">
+  <div class="container">
+    <div class="reveal">
+      <div class="section-label">Comment ça marche</div>
+      <h2 class="section-title">5 niveaux d'escalade intelligente</h2>
+      <p class="section-desc">NODAQ adapte automatiquement la pression selon le comportement du débiteur. Du rappel amical au contentieux, chaque étape est calibrée par l'IA pour maximiser le taux de récupération.</p>
+    </div>
+
+    <div class="escalation-timeline">
+      <div class="esc-step reveal">
+        <div class="esc-dot">J+1</div>
+        <div class="esc-content">
+          <div class="esc-day">Jour +1 après échéance</div>
+          <h4>Rappel amical par email</h4>
+          <p>Un email personnalisé et bienveillant rappelle la facture échue. Le ton est professionnel et préserve la relation commerciale.</p>
+          <span class="esc-tag auto">100% automatique</span>
+        </div>
+      </div>
+      <div class="esc-step reveal">
+        <div class="esc-dot">J+7</div>
+        <div class="esc-content">
+          <div class="esc-day">Jour +7</div>
+          <h4>Relance ferme + SMS</h4>
+          <p>Email plus direct avec mention des pénalités de retard (article L441-10 Code de commerce) et indemnité forfaitaire de 40€. SMS de suivi envoyé.</p>
+          <span class="esc-tag auto">100% automatique</span>
+        </div>
+      </div>
+      <div class="esc-step reveal">
+        <div class="esc-dot">J+15</div>
+        <div class="esc-content">
+          <div class="esc-day">Jour +15</div>
+          <h4>Appel vocal par IA</h4>
+          <p>L'assistant vocal NODAQ contacte le débiteur pour négocier un échéancier ou obtenir un engagement de paiement. Conforme AI Act — identification transparente.</p>
+          <span class="esc-tag ia">Intelligence artificielle</span>
+        </div>
+      </div>
+      <div class="esc-step reveal">
+        <div class="esc-dot">J+30</div>
+        <div class="esc-content">
+          <div class="esc-day">Jour +30</div>
+          <h4>Mise en demeure LRAR</h4>
+          <p>Envoi automatique d'une mise en demeure par lettre recommandée avec accusé de réception (AR24 / La Poste). Valeur juridique pleine.</p>
+          <span class="esc-tag legal">Pré-contentieux</span>
+        </div>
+      </div>
+      <div class="esc-step reveal">
+        <div class="esc-dot">J+45</div>
+        <div class="esc-content">
+          <div class="esc-day">Jour +45+</div>
+          <h4>Contentieux partenaire</h4>
+          <p>Transfert du dossier à un huissier de justice ou cabinet de recouvrement agréé partenaire. Suivi en temps réel sur votre tableau de bord.</p>
+          <span class="esc-tag legal">Partenaire agréé</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== PRICING ===== -->
+<section class="pricing" id="tarifs">
+  <div class="container">
+    <div style="text-align: center;" class="reveal">
+      <div class="section-label" style="justify-content: center;">Tarifs</div>
+      <h2 class="section-title" style="margin-left: auto; margin-right: auto;">Un plan pour chaque PME</h2>
+      <p class="section-desc" style="margin-left: auto; margin-right: auto;">Commencez gratuitement. Passez à la vitesse supérieure quand votre trésorerie le demande.</p>
+    </div>
+
+    <div class="pricing-grid">
+      <!-- DÉCOUVERTE -->
+      <div class="price-card reveal">
+        <div class="price-name">Découverte</div>
+        <div class="price-amount">
+          <span class="value">0</span>
+          <span class="currency">€</span>
+        </div>
+        <div class="price-desc">Pour tester NODAQ sur vos premières factures. Jusqu'à 5 clients suivis.</div>
+        <ul class="price-features">
+          <li>5 clients maximum</li>
+          <li>Relance email automatique (niveau 1)</li>
+          <li>Tableau de bord basique</li>
+          <li>Connexion 1 outil comptable</li>
+        </ul>
+        <a href="#acces" class="btn btn-ghost">Commencer gratuitement</a>
+      </div>
+
+      <!-- RELANCE -->
+      <div class="price-card reveal">
+        <div class="price-name">Relance</div>
+        <div class="price-amount">
+          <span class="value">79</span>
+          <span class="currency">€</span>
+          <span class="period">/mois</span>
+        </div>
+        <div class="price-desc">Automatisez vos relances email et SMS. Idéal pour les TPE et indépendants.</div>
+        <ul class="price-features">
+          <li>Clients illimités</li>
+          <li>Relance email + SMS (niveaux 1-2)</li>
+          <li>Personnalisation du ton IA</li>
+          <li>Tableau de bord avancé</li>
+          <li>Intégrations comptables</li>
+        </ul>
+        <a href="#acces" class="btn btn-ghost">Demander l'accès</a>
+      </div>
+
+      <!-- RECOUVREMENT -->
+      <div class="price-card featured reveal">
+        <div class="price-name">Recouvrement</div>
+        <div class="price-amount">
+          <span class="value">199</span>
+          <span class="currency">€</span>
+          <span class="period">/mois</span>
+        </div>
+        <div class="price-desc">L'arsenal complet : email, SMS, appels IA et mise en demeure automatiques.</div>
+        <ul class="price-features">
+          <li>Tout de Relance, plus :</li>
+          <li>Appels vocaux IA (niveau 3)</li>
+          <li>Mise en demeure LRAR auto (niveau 4)</li>
+          <li>Analytics prédictifs de paiement</li>
+          <li>API & webhooks</li>
+          <li>Support prioritaire</li>
+        </ul>
+        <a href="#acces" class="btn btn-primary">Demander l'accès</a>
+      </div>
+
+      <!-- CONTENTIEUX -->
+      <div class="price-card reveal">
+        <div class="price-name">Contentieux</div>
+        <div class="price-amount">
+          <span class="value">349</span>
+          <span class="currency">€</span>
+          <span class="period">/mois</span>
+        </div>
+        <div class="price-desc">Du premier rappel au recouvrement judiciaire. Pour les PME avec un volume important d'impayés.</div>
+        <ul class="price-features">
+          <li>Tout de Recouvrement, plus :</li>
+          <li>Contentieux via partenaire agréé</li>
+          <li>Suivi judiciaire en temps réel</li>
+          <li>Gestionnaire de compte dédié</li>
+          <li>Reporting CFO mensuel</li>
+          <li>SLA garanti 99.9%</li>
+        </ul>
+        <a href="#acces" class="btn btn-ghost">Contacter l'équipe</a>
+        <div class="price-commission">+ 8% commission sur montants recouvrés</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== INTEGRATIONS ===== -->
+<section class="integrations">
+  <div class="container reveal">
+    <div class="section-label" style="justify-content: center;">Intégrations</div>
+    <h2 class="section-title">Se connecte à vos outils existants</h2>
+    <div class="integrations-logos">
+      <div class="int-logo">
+        <div class="icon-box">📊</div>
+        <span class="name">Pennylane</span>
+      </div>
+      <div class="int-logo">
+        <div class="icon-box">📋</div>
+        <span class="name">QuickBooks</span>
+      </div>
+      <div class="int-logo">
+        <div class="icon-box">💼</div>
+        <span class="name">Sage</span>
+      </div>
+      <div class="int-logo">
+        <div class="icon-box">🏦</div>
+        <span class="name">Cegid</span>
+      </div>
+      <div class="int-logo">
+        <div class="icon-box">📑</div>
+        <span class="name">FreshBooks</span>
+      </div>
+      <div class="int-logo">
+        <div class="icon-box">⚡</div>
+        <span class="name">Stripe</span>
+      </div>
+      <div class="int-logo">
+        <div class="icon-box">🔗</div>
+        <span class="name">API REST</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== SECURITY ===== -->
+<div class="security-bar">
+  <div class="sec-badge">
+    <div class="sec-icon">🔒</div>
+    <span>Chiffrement AES-256</span>
+  </div>
+  <div class="sec-badge">
+    <div class="sec-icon">🇪🇺</div>
+    <span>Données 100% en UE</span>
+  </div>
+  <div class="sec-badge">
+    <div class="sec-icon">✅</div>
+    <span>Conforme RGPD</span>
+  </div>
+  <div class="sec-badge">
+    <div class="sec-icon">🤖</div>
+    <span>Conforme AI Act 2026</span>
+  </div>
+</div>
+
+<!-- ===== CTA ===== -->
+<section class="cta-section" id="acces">
+  <div class="container">
+    <div class="cta-box reveal">
+      <h2>Récupérez votre trésorerie<br>dès <span style="color: var(--bleu);">demain</span></h2>
+      <p>Rejoignez les premières PME qui automatisent leur recouvrement avec l'IA. Accès anticipé gratuit — places limitées.</p>
+      <form class="email-form" onsubmit="handleSubmit(event)">
+        <input type="email" id="email-input" placeholder="votre@email.fr" required>
+        <button type="submit" class="btn btn-primary" id="submit-btn">Rejoindre</button>
+      </form>
+      <div class="cta-trust">
+        <span>Sans engagement</span>
+        <span>Setup en 5 minutes</span>
+        <span>Données protégées</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== FOOTER ===== -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-copy">
+      <svg width="80" height="24" viewBox="0 0 260 80" style="vertical-align: middle; margin-right: 12px;">
+        <path d="M 18 68 L 18 16 L 52 68 L 52 16" fill="none" stroke="#64748B" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+        <line x1="52" y1="10" x2="52" y2="2" stroke="#2563EB" stroke-width="3.8" stroke-linecap="round"/>
+        <polyline points="45,7 52,0 59,7" fill="none" stroke="#2563EB" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="74" y="50" font-family="Inter, sans-serif" font-weight="700" font-size="34" fill="#64748B" letter-spacing="1.5">NODAQ</text>
+      </svg>
+      © 2026 NODAQ SAS. Tous droits réservés.
+    </div>
+    <ul class="footer-links">
+      <li><a href="#">Mentions légales</a></li>
+      <li><a href="#">Politique de confidentialité</a></li>
+      <li><a href="#">CGV</a></li>
+      <li><a href="#">Contact</a></li>
+    </ul>
+  </div>
+</footer>
+
+<!-- ===== SCRIPTS ===== -->
+<script>
+// Scroll reveal animation
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('visible');
+    }
+  });
+}, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+// Form submission
+function handleSubmit(e) {
+  e.preventDefault();
+  const input = document.getElementById('email-input');
+  const btn = document.getElementById('submit-btn');
+  const email = input.value;
+
+  btn.textContent = '...';
+  btn.style.pointerEvents = 'none';
+
+  setTimeout(() => {
+    btn.textContent = 'Inscrit ✓';
+    btn.style.background = '#10B981';
+    btn.style.boxShadow = '0 0 20px rgba(16,185,129,0.3)';
+    input.value = '';
+    input.placeholder = 'Merci ! On vous contacte très vite.';
+
+    setTimeout(() => {
+      btn.textContent = 'Rejoindre';
+      btn.style.background = '';
+      btn.style.boxShadow = '';
+      btn.style.pointerEvents = '';
+      input.placeholder = 'votre@email.fr';
+    }, 4000);
+  }, 800);
+}
+
+// Nav background on scroll
+window.addEventListener('scroll', () => {
+  const nav = document.querySelector('nav');
+  if (window.scrollY > 40) {
+    nav.style.borderBottomColor = 'rgba(30,34,48,0.8)';
+  } else {
+    nav.style.borderBottomColor = 'var(--noir-border)';
+  }
+});
+</script>
+
+</body>
+</html>
