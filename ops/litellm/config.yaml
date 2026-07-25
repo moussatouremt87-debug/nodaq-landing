@@ -42,6 +42,14 @@ model_list:
   #     api_base: https://<ton-endpoint-managed-inference>/v1
   #     api_key: os.environ/SCW_MANAGED_INFERENCE_KEY
 
+  # ── Tier « frontier » (NON souverain) — OPT-IN par tenant, catégorie
+  #    non_sensible UNIQUEMENT (garde dure dans packages/llm). Laisser commenté
+  #    tant qu'aucun tenant ne l'a activé.
+  # - model_name: frontier
+  #   litellm_params:
+  #     model: openai/gpt-4o-mini
+  #     api_key: os.environ/OPENAI_API_KEY
+
 router_settings:
   routing_strategy: simple-shuffle
   num_retries: 2
