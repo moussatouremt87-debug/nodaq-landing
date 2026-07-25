@@ -10,14 +10,27 @@ locals {
 
 # ── Secrets générés (state-persisted, stables entre applies) ──────────────────
 
+# Contraintes RDB Scaleway : au moins un chiffre, une majuscule, une minuscule
+# et un caractère spécial. override_special évite les caractères qui piègent
+# les DSN/shell ; les mots de passe sont urlencodés dans les URLs de connexion.
 resource "random_password" "db_admin" {
-  length  = 32
-  special = false
+  length           = 32
+  special          = true
+  override_special = "!#*()-_=+"
+  min_special      = 1
+  min_upper        = 1
+  min_lower        = 1
+  min_numeric      = 1
 }
 
 resource "random_password" "db_app" {
-  length  = 32
-  special = false
+  length           = 32
+  special          = true
+  override_special = "!#*()-_=+"
+  min_special      = 1
+  min_upper        = 1
+  min_lower        = 1
+  min_numeric      = 1
 }
 
 resource "random_password" "auth_secret" {
@@ -73,10 +86,12 @@ resource "scaleway_rdb_acl" "main" {
 # pour que les DSN soient toujours calculés sur un load balancer réel avant
 # que les secrets/conteneurs ne soient planifiés.
 locals {
-  db_host          = try(scaleway_rdb_instance.main.load_balancer[0].ip, null)
-  db_port          = try(scaleway_rdb_instance.main.load_balancer[0].port, null)
-  database_url     = local.db_host == null ? null : "postgresql://nodaq_admin:${random_password.db_admin.result}@${local.db_host}:${local.db_port}/appdb"
-  app_database_url = local.db_host == null ? null : "postgresql://app_user:${random_password.db_app.result}@${local.db_host}:${local.db_port}/appdb"
+  db_host = try(scaleway_rdb_instance.main.load_balancer[0].ip, null)
+  db_port = try(scaleway_rdb_instance.main.load_balancer[0].port, null)
+  # Mots de passe URL-encodés : un caractère spécial ne doit jamais casser la
+  # connection string (Prisma, psql).
+  database_url     = local.db_host == null ? null : "postgresql://nodaq_admin:${urlencode(random_password.db_admin.result)}@${local.db_host}:${local.db_port}/appdb"
+  app_database_url = local.db_host == null ? null : "postgresql://app_user:${urlencode(random_password.db_app.result)}@${local.db_host}:${local.db_port}/appdb"
 }
 
 # ── Secret Manager : les secrets lus au boot de l'API ─────────────────────────
@@ -116,7 +131,6 @@ resource "scaleway_container" "litellm" {
   min_scale          = 1
   max_scale          = 1
   privacy            = "public" # protégé par LITELLM_MASTER_KEY ; réseau privé = suivi
-  deploy             = true
 
   environment_variables = {
     # Fallback Mistral La Plateforme non provisionné en staging : la config
@@ -147,7 +161,6 @@ resource "scaleway_container" "api" {
   min_scale          = 1
   max_scale          = 2
   privacy            = "public"
-  deploy             = true
 
   environment_variables = {
     NODE_ENV               = "production"
@@ -184,7 +197,6 @@ resource "scaleway_container" "web" {
   min_scale          = 1
   max_scale          = 2
   privacy            = "public"
-  deploy             = true
   # API_URL est figé DANS l'image (rewrites Next au build) — voir le workflow.
 }
 

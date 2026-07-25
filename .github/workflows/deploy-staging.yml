@@ -21,7 +21,6 @@ env:
   SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
   SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
   SCW_DEFAULT_PROJECT_ID: ${{ vars.SCW_DEFAULT_PROJECT_ID || '955f9c20-9d60-4943-a810-71c737a42a45' }}
-  SCW_DEFAULT_REGION: fr-par
   TF_VAR_scw_access_key: ${{ secrets.SCW_ACCESS_KEY }}
   TF_VAR_scw_secret_key: ${{ secrets.SCW_SECRET_KEY }}
   # Backend S3 (Object Storage Scaleway)
@@ -107,7 +106,6 @@ jobs:
           terraform apply -auto-approve \
             -target=scaleway_rdb_database.appdb \
             -target=scaleway_secret_version.auth_secret \
-            -target=scaleway_secret_version.database_url \
             -target=scaleway_secret_version.app_database_url \
             -target=scaleway_container.litellm \
             -target=scaleway_container.api \
