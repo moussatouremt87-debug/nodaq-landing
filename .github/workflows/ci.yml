@@ -52,3 +52,55 @@ jobs:
 
       - name: Tests (dont isolation multi-tenant — bloquants)
         run: pnpm test
+
+  python:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: appdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d appdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/appdb
+      APP_DATABASE_URL: postgresql://app_user:app_password@localhost:5432/appdb
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Activer pgvector
+        run: psql "$DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+      - name: Installer les dépendances Node (migrations Prisma)
+        run: pnpm install --frozen-lockfile
+
+      - name: Appliquer les migrations (schéma + RLS — Prisma est LA source du schéma)
+        run: pnpm db:migrate:deploy
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Lint Python (ruff)
+        working-directory: services/rag
+        run: uv run ruff check
+
+      - name: Types Python (mypy strict)
+        working-directory: services/rag
+        run: uv run mypy
+
+      - name: Tests Python (dont isolation tenant — bloquants)
+        working-directory: services/rag
+        run: uv run pytest

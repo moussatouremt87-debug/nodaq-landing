@@ -19,6 +19,10 @@ let policyAId: string;
 let policyBId: string;
 let connectorAId: string;
 let connectorBId: string;
+let documentAId: string;
+let documentBId: string;
+let documentChunkAId: string;
+let documentChunkBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -26,6 +30,9 @@ beforeAll(async () => {
   await admin.classification.deleteMany();
   await admin.tenantPolicy.deleteMany();
   await admin.connector.deleteMany();
+  // FK order: chunks before documents.
+  await admin.documentChunk.deleteMany();
+  await admin.document.deleteMany();
   await admin.membership.deleteMany();
   await admin.user.deleteMany();
   await admin.tenant.deleteMany();
@@ -97,6 +104,47 @@ beforeAll(async () => {
   );
   connectorAId = connectorA.id;
   connectorBId = connectorB.id;
+
+  // documents/document_chunks : embedding reste NULL ici (Prisma exclut les colonnes
+  // Unsupported des types create/select — pas de raw SQL nécessaire pour ces tests
+  // d'isolation, qui ne portent pas sur le contenu vectoriel).
+  const documentA = await withTenant(tenantA, (tx) =>
+    tx.document.create({
+      data: { tenantId: tenantA, dept: "rh", hash: "hash-doc-a" },
+    }),
+  );
+  const documentB = await withTenant(tenantB, (tx) =>
+    tx.document.create({
+      data: { tenantId: tenantB, dept: "compta", hash: "hash-doc-b" },
+    }),
+  );
+  documentAId = documentA.id;
+  documentBId = documentB.id;
+
+  const documentChunkA = await withTenant(tenantA, (tx) =>
+    tx.documentChunk.create({
+      data: {
+        tenantId: tenantA,
+        documentId: documentAId,
+        chunkIndex: 0,
+        content: "chunk secret de A",
+        dept: "rh",
+      },
+    }),
+  );
+  const documentChunkB = await withTenant(tenantB, (tx) =>
+    tx.documentChunk.create({
+      data: {
+        tenantId: tenantB,
+        documentId: documentBId,
+        chunkIndex: 0,
+        content: "chunk secret de B",
+        dept: "compta",
+      },
+    }),
+  );
+  documentChunkAId = documentChunkA.id;
+  documentChunkBId = documentChunkB.id;
 });
 
 afterAll(async () => {
@@ -140,6 +188,22 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur connectors", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'connectors'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur documents", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'documents'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur document_chunks", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'document_chunks'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -265,6 +329,70 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (documents) — withTenant(A) ne voit QUE les documents de A", async () => {
+    const documents = await withTenant(tenantA, (tx) => tx.document.findMany());
+    expect(documents).toHaveLength(1);
+    expect(documents[0]?.id).toBe(documentAId);
+    expect(documents.some((d) => d.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (documents) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const documents = await prisma.document.findMany();
+    expect(documents).toHaveLength(0);
+  });
+
+  it("test 3 (documents) — lire le document de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.document.findUnique({ where: { id: documentBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (documents) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.document.create({
+          data: { tenantId: tenantB, dept: "rh", hash: "hash-intrusion" },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 1 (document_chunks) — withTenant(A) ne voit QUE les chunks de A", async () => {
+    const chunks = await withTenant(tenantA, (tx) => tx.documentChunk.findMany());
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.id).toBe(documentChunkAId);
+    expect(chunks.some((c) => c.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (document_chunks) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const chunks = await prisma.documentChunk.findMany();
+    expect(chunks).toHaveLength(0);
+  });
+
+  it("test 3 (document_chunks) — lire le chunk de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.documentChunk.findUnique({ where: { id: documentChunkBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (document_chunks) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.documentChunk.create({
+          data: {
+            tenantId: tenantB,
+            documentId: documentBId,
+            chunkIndex: 99,
+            content: "intrusion",
+            dept: "rh",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -344,5 +472,45 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const connectors = await withTenant(tenantA, (tx) => tx.connector.findMany());
     expect(connectors).toHaveLength(1);
+  });
+
+  it("policy désactivée sur documents => la fuite se produit aussi", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "documents" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.document.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((d) => d.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.document.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "documents" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "documents" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const documents = await withTenant(tenantA, (tx) => tx.document.findMany());
+    expect(documents).toHaveLength(1);
+  });
+
+  it("policy désactivée sur document_chunks => la fuite se produit aussi (le contenu vectorisé des deux tenants devient visible)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "document_chunks" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.documentChunk.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((c) => c.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.documentChunk.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "document_chunks" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "document_chunks" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const chunks = await withTenant(tenantA, (tx) => tx.documentChunk.findMany());
+    expect(chunks).toHaveLength(1);
   });
 });
