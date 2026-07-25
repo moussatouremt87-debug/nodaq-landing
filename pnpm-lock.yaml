@@ -72,6 +72,9 @@ importers:
       '@nodaq/llm':
         specifier: workspace:*
         version: link:../../packages/llm
+      '@nodaq/mcp-connectors':
+        specifier: workspace:*
+        version: link:../connectors
       '@nodaq/shared':
         specifier: workspace:*
         version: link:../../packages/shared

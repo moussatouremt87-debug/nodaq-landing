@@ -218,6 +218,138 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
     expect(me2.json().activeOrganizationId).toBe(orgB);
   });
 
+  it("validation queue: human 1-click approval with role gate and state machine", async () => {
+    const { withTenant } = await import("@nodaq/db");
+
+    // A member (non-owner) inside Alice's org.
+    const cookieM = await signup("membre@example.com", "Membre");
+    const memberId = (
+      await app.inject({ method: "GET", url: "/me", headers: { cookie: cookieM } })
+    ).json().userId as string;
+    await admin.membership.create({ data: { tenantId: orgA, userId: memberId, role: "member" } });
+    await app.inject({
+      method: "POST",
+      url: "/api/auth/organization/set-active",
+      headers: { cookie: cookieM },
+      payload: { organizationId: orgA },
+    });
+
+    // An agent prepared two pending actions (simulated).
+    const [pa1, pa2] = await withTenant(orgA, async (tx) => [
+      await tx.pendingAction.create({
+        data: { tenantId: orgA, type: "send_dunning", payload: { draft: "..." } },
+      }),
+      await tx.pendingAction.create({
+        data: { tenantId: orgA, type: "book_invoice", payload: { invoice: {} } },
+      }),
+    ]);
+
+    // Unauthenticated => 401 on every queue route.
+    for (const [method, url] of [
+      ["GET", "/pending-actions"],
+      ["GET", `/pending-actions/${pa1!.id}`],
+      ["POST", `/pending-actions/${pa1!.id}/approve`],
+    ] as const) {
+      expect((await app.inject({ method, url })).statusCode).toBe(401);
+    }
+
+    // Listing: any member of the tenant sees the queue — METADATA ONLY
+    // (payloads carry confidential drafts, reserved to the owner detail).
+    const list = await app.inject({
+      method: "GET",
+      url: "/pending-actions",
+      headers: { cookie: cookieM },
+    });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().map((a: { id: string }) => a.id)).toEqual(
+      expect.arrayContaining([pa1!.id, pa2!.id]),
+    );
+    expect(JSON.stringify(list.json())).not.toContain("payload");
+
+    // Detail with payload: OWNER only.
+    const memberDetail = await app.inject({
+      method: "GET",
+      url: `/pending-actions/${pa1!.id}`,
+      headers: { cookie: cookieM },
+    });
+    expect(memberDetail.statusCode).toBe(403);
+    const ownerDetail = await app.inject({
+      method: "GET",
+      url: `/pending-actions/${pa1!.id}`,
+      headers: { cookie: cookieA },
+    });
+    expect(ownerDetail.statusCode).toBe(200);
+    expect(ownerDetail.json().payload).toEqual({ draft: "..." });
+
+    // Cross-tenant: Bob's list never contains Alice's queue (RLS).
+    const bobList = await app.inject({
+      method: "GET",
+      url: "/pending-actions",
+      headers: { cookie: cookieB },
+    });
+    expect(bobList.json().map((a: { id: string }) => a.id)).not.toEqual(
+      expect.arrayContaining([pa1!.id]),
+    );
+
+    // A MEMBER cannot approve (owner-only sensitive action).
+    const memberApprove = await app.inject({
+      method: "POST",
+      url: `/pending-actions/${pa1!.id}/approve`,
+      headers: { cookie: cookieM },
+    });
+    expect(memberApprove.statusCode).toBe(403);
+
+    // The OWNER approves: state machine + human attribution.
+    const aliceId = (
+      await app.inject({ method: "GET", url: "/me", headers: { cookie: cookieA } })
+    ).json().userId as string;
+    const approve = await app.inject({
+      method: "POST",
+      url: `/pending-actions/${pa1!.id}/approve`,
+      headers: { cookie: cookieA },
+    });
+    expect(approve.statusCode).toBe(200);
+    expect(approve.json()).toMatchObject({ status: "approved", validatedBy: aliceId });
+    expect(approve.json().validatedAt).toBeTruthy();
+
+    // Double-approve => conflict, the first decision stands.
+    const again = await app.inject({
+      method: "POST",
+      url: `/pending-actions/${pa1!.id}/approve`,
+      headers: { cookie: cookieA },
+    });
+    expect(again.statusCode).toBe(409);
+
+    // Reject path.
+    const reject = await app.inject({
+      method: "POST",
+      url: `/pending-actions/${pa2!.id}/reject`,
+      headers: { cookie: cookieA },
+    });
+    expect(reject.json()).toMatchObject({ status: "rejected", validatedBy: aliceId });
+
+    // Cross-tenant id (Bob's org) => indistinguishable from missing (404, RLS).
+    const paB = await withTenant(orgB, (tx) =>
+      tx.pendingAction.create({
+        data: { tenantId: orgB, type: "send_dunning", payload: {} },
+      }),
+    );
+    const cross = await app.inject({
+      method: "POST",
+      url: `/pending-actions/${paB.id}/approve`,
+      headers: { cookie: cookieA },
+    });
+    expect(cross.statusCode).toBe(404);
+
+    // Malformed id => 400.
+    const bad = await app.inject({
+      method: "POST",
+      url: "/pending-actions/not-a-uuid/approve",
+      headers: { cookie: cookieA },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
   it("rejects an invalid note payload (400)", async () => {
     const res = await app.inject({
       method: "POST",
