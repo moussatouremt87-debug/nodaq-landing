@@ -6,18 +6,20 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 
 > **Langue** : code, identifiants et commentaires techniques en anglais ; docs produit en français.
 
-> **État du repo** : tickets 0.1→0.3, 0.5 et 1.1→1.7 livrés. Auth : better-auth + plugin
-> organization (`organization` = `tenants`, `member` = `memberships`, rôles
+> **État du repo** : 0.1→0.3, 0.5 et 1.1→1.8 livrés (MVP démontrable). Auth : better-auth
+> + plugin organization (`organization` = `tenants`, `member` = `memberships`, rôles
 > `owner|member|accountant`) ; tenant = organisation active de la session, chaîne
 > `requireAuth → resolveTenant → requireMembership → withTenant` (`apps/api/src/app.ts`).
-> Secrets : `@nodaq/secrets`. LLM : `packages/llm` (`route()`/`routeChat()`) + classifieur
-> (1.1) ; connecteurs (1.2) ; RAG (1.3) ; OCR + `pending_actions` (1.4) ; trésorerie (1.5).
+> Secrets : `@nodaq/secrets`. LLM : `packages/llm` (`route()`/`routeChat()`), classifieur,
+> connecteurs, RAG, OCR + `pending_actions`, trésorerie/relances (1.1→1.5).
 > **Compta (1.6, ADR-006)** : boucle model-agnostic dans `apps/agent-runtime` — chaque
 > itération passe par `routeChat()`, runtime LIÉ au tenant de session (jamais un input
 > d'outil), écritures → `pending_action`, exécution UNIQUEMENT sur approbation
 > (idempotente), chat SSE `/employees/compta/chat`, Langfuse métadonnées-seulement.
-> **UI (1.7)** : `apps/web` (Next.js 15) — cockpit KPIs (trésorerie owner-only), file de
-> validation 1-clic, chat SSE ; API via le proxy same-origin de `next.config.ts`.
+> **UI (1.7/1.8)** : `apps/web` (Next.js 15) — cockpit KPIs (trésorerie owner-only), file
+> de validation 1-clic, chat SSE, onboarding connecteurs (identifiants Zod + TESTÉS contre
+> le fournisseur puis coffre inscriptible `defaultWritableProvider` — Scaleway en prod,
+> `.dev-vault.json` en dev — jamais renvoyés) ; API via le proxy de `next.config.ts`.
 
 ---
 
@@ -42,8 +44,7 @@ cd ops && cp .env.example .env && docker compose up -d
 
 # Dev
 pnpm install
-pnpm dev                      # tous les services (Turborepo)
-pnpm --filter @nodaq/api dev  # un seul service
+pnpm dev                      # tous les services (ou --filter @nodaq/api pour un seul)
 
 # Qualité (à lancer après chaque étape)
 pnpm lint && pnpm typecheck && pnpm test
@@ -128,8 +129,7 @@ pour les actions sensibles (ex. inviter un membre = OWNER).
 - **Session ≠ autorisation.** Être connecté ne donne aucun droit sur un tenant ;
   `requireMembership` est obligatoire avant `withTenant`.
 - **pgvector déjà activé** par `ops/db/init` — ne pas recréer l'extension.
-- **Port ClickHouse (9000)** laissé interne dans le compose pour ne pas entrer en
-  conflit avec MinIO.
+- **Port ClickHouse (9000)** laissé interne dans le compose (conflit MinIO sinon).
 - **Ne pas appeler les services Python depuis le front** : toujours passer par l'API.
   Les services Python sont INTERNES : jeton d'appel obligatoire (`RAG_INTERNAL_TOKEN`).
 - **Python : migrations = Prisma SEULEMENT.** Les services Python font du DML, jamais

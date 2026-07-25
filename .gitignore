@@ -15,3 +15,6 @@ dist/
 __pycache__/
 .venv/
 *.tsbuildinfo
+
+# Coffre local de dev (FileSecretProvider — jamais un vrai store)
+.dev-vault.json*

@@ -3,8 +3,10 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   EnvSecretProvider,
+  FileSecretProvider,
   ScalewaySecretProvider,
   defaultProvider,
+  defaultWritableProvider,
   injectSecrets,
   loadSecrets,
 } from "../src/index.js";
@@ -117,6 +119,121 @@ describe("ScalewaySecretProvider (fake Secret Manager server)", () => {
     await expect(loadSecrets([{ name: "AUTH_SECRET" }], provider)).resolves.toEqual({
       AUTH_SECRET: "s3cret-from-vault",
     });
+  });
+});
+
+describe("FileSecretProvider (dev vault)", () => {
+  it("set/get/delete round-trip on a 0600 JSON file", async () => {
+    const { mkdtemp, stat } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "vault-"));
+    const path = join(dir, "vault.json");
+    const provider = new FileSecretProvider(path);
+
+    expect(await provider.get("connector/t1/qonto")).toBeUndefined();
+    await provider.set("connector/t1/qonto", JSON.stringify({ secretKey: "sk" }));
+    expect(await provider.get("connector/t1/qonto")).toBe(JSON.stringify({ secretKey: "sk" }));
+
+    // Owner-only file: credentials must not be world-readable, even in dev.
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+
+    await provider.delete("connector/t1/qonto");
+    expect(await provider.get("connector/t1/qonto")).toBeUndefined();
+    await provider.delete("connector/t1/qonto"); // deleting a missing key is a no-op
+  });
+});
+
+describe("ScalewaySecretProvider — writes (fake Secret Manager server)", () => {
+  interface StoredSecret {
+    id: string;
+    name: string;
+    value?: string;
+  }
+  const secrets = new Map<string, StoredSecret>();
+  let nextId = 1;
+  let writeBase: string;
+
+  const writeServer = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    let raw = "";
+    req.on("data", (c: Buffer) => (raw += c.toString()));
+    req.on("end", () => {
+      const json = (code: number, body: unknown): void => {
+        res.writeHead(code, { "content-type": "application/json" }).end(JSON.stringify(body));
+      };
+      const versionMatch = url.pathname.match(/\/secrets\/([^/]+)\/versions$/);
+      const secretMatch = url.pathname.match(/\/secrets\/([^/]+)$/);
+      if (req.method === "GET" && url.pathname.endsWith("/secrets")) {
+        const name = url.searchParams.get("name");
+        const list = [...secrets.values()].filter((s) => s.name === name);
+        json(200, { secrets: list.map(({ id, name: n }) => ({ id, name: n })) });
+      } else if (req.method === "POST" && url.pathname.endsWith("/secrets")) {
+        const body = JSON.parse(raw) as { project_id?: string; name: string };
+        if (!body.project_id) return json(400, { message: "project_id required" });
+        const secret = { id: `id-${nextId++}`, name: body.name };
+        secrets.set(secret.id, secret);
+        json(200, secret);
+      } else if (req.method === "POST" && versionMatch) {
+        const secret = secrets.get(versionMatch[1]!);
+        if (!secret) return json(404, {});
+        secret.value = Buffer.from((JSON.parse(raw) as { data: string }).data, "base64").toString(
+          "utf8",
+        );
+        json(200, { revision: 1 });
+      } else if (req.method === "DELETE" && secretMatch) {
+        secrets.delete(secretMatch[1]!);
+        json(204, {});
+      } else {
+        json(500, { message: "unexpected route" });
+      }
+    });
+  });
+
+  beforeAll(async () => {
+    await new Promise<void>((resolve) => writeServer.listen(0, "127.0.0.1", resolve));
+    writeBase = `http://127.0.0.1:${(writeServer.address() as AddressInfo).port}`;
+  });
+
+  afterAll(() => {
+    writeServer.close();
+  });
+
+  it("set creates the secret then pushes a version; delete removes it", async () => {
+    const provider = new ScalewaySecretProvider({
+      secretKey: "scw-key-ok",
+      prefix: "nodaq-test-",
+      projectId: "proj-1",
+      baseUrl: writeBase,
+    });
+    await provider.set("connector/t1/qonto", "credentials-json");
+    const stored = [...secrets.values()].find((s) => s.name === "nodaq-test-connector/t1/qonto");
+    expect(stored?.value).toBe("credentials-json");
+
+    // Second set = new version on the SAME secret (no duplicate creation).
+    await provider.set("connector/t1/qonto", "rotated");
+    expect([...secrets.values()].filter((s) => s.name === "nodaq-test-connector/t1/qonto")).toHaveLength(1);
+
+    await provider.delete("connector/t1/qonto");
+    expect([...secrets.values()].find((s) => s.name === "nodaq-test-connector/t1/qonto")).toBeUndefined();
+    await provider.delete("connector/t1/qonto"); // missing -> no-op
+  });
+
+  it("refuses to CREATE without projectId (name-only error)", async () => {
+    const provider = new ScalewaySecretProvider({ secretKey: "scw-key-ok", baseUrl: writeBase });
+    await expect(provider.set("brand-new", "v")).rejects.toThrow(/projectId/);
+  });
+});
+
+describe("defaultWritableProvider", () => {
+  it("Scaleway when configured, file vault in dev, refusal in production", () => {
+    expect(
+      defaultWritableProvider({ SCW_SECRET_KEY: "k" } as NodeJS.ProcessEnv),
+    ).toBeInstanceOf(ScalewaySecretProvider);
+    expect(defaultWritableProvider({} as NodeJS.ProcessEnv)).toBeInstanceOf(FileSecretProvider);
+    expect(() =>
+      defaultWritableProvider({ NODE_ENV: "production" } as NodeJS.ProcessEnv),
+    ).toThrow(/Secret Manager/);
   });
 });
 

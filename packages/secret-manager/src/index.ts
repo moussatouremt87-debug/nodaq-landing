@@ -1,8 +1,12 @@
-import { EnvSecretProvider, ScalewaySecretProvider } from "./providers.js";
-import type { SecretProvider } from "./providers.js";
+import { EnvSecretProvider, FileSecretProvider, ScalewaySecretProvider } from "./providers.js";
+import type { SecretProvider, WritableSecretProvider } from "./providers.js";
 
-export { EnvSecretProvider, ScalewaySecretProvider } from "./providers.js";
-export type { SecretProvider, ScalewayProviderOptions } from "./providers.js";
+export { EnvSecretProvider, FileSecretProvider, ScalewaySecretProvider } from "./providers.js";
+export type {
+  SecretProvider,
+  WritableSecretProvider,
+  ScalewayProviderOptions,
+} from "./providers.js";
 
 export interface SecretSpec {
   /** Secret / env variable name, e.g. "AUTH_SECRET". */
@@ -33,6 +37,32 @@ export function defaultProvider(env: NodeJS.ProcessEnv = process.env): SecretPro
     throw new Error("production requires Scaleway Secret Manager (SCW_SECRET_KEY missing)");
   }
   return new EnvSecretProvider(env);
+}
+
+/**
+ * Writable vault for per-tenant connector credentials (ticket 1.8):
+ * - SCW_SECRET_KEY set -> Scaleway Secret Manager (writes need
+ *   SCW_DEFAULT_PROJECT_ID) ;
+ * - production without Scaleway -> refuse to boot (same rule as reads) ;
+ * - dev/CI -> FileSecretProvider on DEV_VAULT_PATH (gitignored JSON, 0600).
+ */
+export function defaultWritableProvider(
+  env: NodeJS.ProcessEnv = process.env,
+): WritableSecretProvider {
+  const scwKey = env.SCW_SECRET_KEY;
+  if (scwKey) {
+    return new ScalewaySecretProvider({
+      secretKey: scwKey,
+      region: env.SCW_DEFAULT_REGION ?? "fr-par",
+      prefix: env.SCW_SECRET_PREFIX ?? "",
+      ...(env.SCW_DEFAULT_PROJECT_ID ? { projectId: env.SCW_DEFAULT_PROJECT_ID } : {}),
+      ...(env.SCW_API_URL ? { baseUrl: env.SCW_API_URL } : {}),
+    });
+  }
+  if (env.NODE_ENV === "production") {
+    throw new Error("production requires Scaleway Secret Manager (SCW_SECRET_KEY missing)");
+  }
+  return new FileSecretProvider(env.DEV_VAULT_PATH ?? ".dev-vault.json");
 }
 
 /** Loads the requested secrets. Throws listing every missing required NAME (never a value). */

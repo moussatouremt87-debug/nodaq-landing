@@ -17,6 +17,7 @@ const LINKS = [
   { href: "/", label: "Cockpit" },
   { href: "/validation", label: "File de validation" },
   { href: "/chat", label: "Employé Compta" },
+  { href: "/connecteurs", label: "Connecteurs" },
 ];
 
 export function Shell({ children }: { children: ReactNode }) {

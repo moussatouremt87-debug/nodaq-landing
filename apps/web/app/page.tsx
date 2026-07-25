@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { formatEuroCents, getKpis, listPendingActions } from "../lib/api";
+import { formatEuroCents, getKpis, listConnectors, listPendingActions } from "../lib/api";
 import type { CockpitKpis, PendingActionSummary } from "../lib/api";
 
 /*
@@ -14,11 +14,15 @@ import type { CockpitKpis, PendingActionSummary } from "../lib/api";
 export default function CockpitPage() {
   const [kpis, setKpis] = useState<CockpitKpis | null>(null);
   const [recent, setRecent] = useState<PendingActionSummary[]>([]);
+  const [connectorCount, setConnectorCount] = useState<number | null>(null);
 
   useEffect(() => {
     getKpis().then(setKpis).catch(() => undefined);
     listPendingActions()
       .then((actions) => setRecent(actions.slice(0, 5)))
+      .catch(() => undefined);
+    listConnectors()
+      .then((connectors) => setConnectorCount(connectors.length))
       .catch(() => undefined);
   }, []);
 
@@ -29,6 +33,19 @@ export default function CockpitPage() {
     <>
       <h1 className="page-title">Cockpit</h1>
       <p className="page-sub">La journée de vos employés virtuels, en un coup d&apos;œil.</p>
+
+      {connectorCount === 0 && (
+        <div className="card signal" style={{ marginBottom: 24 }}>
+          <span className="overline">Bienvenue — dernière étape</span>
+          <p className="hint" style={{ margin: "6px 0 10px" }}>
+            Aucun outil connecté : reliez Qonto et Pennylane pour que l&apos;employé Compta voie
+            votre trésorerie et vos factures.
+          </p>
+          <Link href="/connecteurs" className="btn">
+            → Connecter mes outils
+          </Link>
+        </div>
+      )}
 
       <div className="kpi-grid">
         <div className={pending > 0 ? "card signal" : "card"}>
@@ -62,17 +79,17 @@ export default function CockpitPage() {
       {kpis?.treasury ? (
         <div className="card accent" style={{ marginBottom: 40 }}>
           <span className="overline">Compte {kpis.treasury.account}</span>
-          <div className="big">{formatEuroCents(kpis.treasury.balanceCents)}</div>
+          <div className="big">{formatEuroCents(kpis.treasury.currentBalanceCents)}</div>
           <div className="spark">
             {kpis.treasury.points.map((point) => (
               <div key={point.horizonDays}>
                 <span className="overline">J+{point.horizonDays}</span>
-                {formatEuroCents(point.balanceCents)}
+                {formatEuroCents(point.projectedBalanceCents)}
               </div>
             ))}
           </div>
           <div className="hint">
-            Flux net moyen {formatEuroCents(kpis.treasury.dailyNetCents)}/j, observé sur{" "}
+            Flux net moyen {formatEuroCents(kpis.treasury.avgDailyNetFlowCents)}/j, observé sur{" "}
             {kpis.treasury.observedDays} j.
           </div>
         </div>
