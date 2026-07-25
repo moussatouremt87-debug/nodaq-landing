@@ -7,9 +7,20 @@ import { prisma } from "@nodaq/db";
 
 const AUTH_SECRET = process.env.AUTH_SECRET ?? "dev-secret-change-me";
 const AUTH_BASE_URL = process.env.AUTH_BASE_URL ?? "http://localhost:8080";
+// The web app (apps/web) proxies auth calls same-origin; its public origin must
+// be trusted or better-auth rejects state-changing calls with 403.
+const WEB_ORIGIN = process.env.WEB_ORIGIN ?? "http://localhost:3000";
 
 if (process.env.NODE_ENV === "production" && AUTH_SECRET === "dev-secret-change-me") {
   throw new Error("AUTH_SECRET must be set in production (Secret Manager, ticket 0.3)");
+}
+// Fail fast on a forgotten (or wildcard) origin: trusting localhost in prod
+// would 403 the real front, a wildcard would open CSRF.
+if (process.env.NODE_ENV === "production" && !process.env.WEB_ORIGIN) {
+  throw new Error("WEB_ORIGIN must be set in production (public origin of apps/web)");
+}
+if (WEB_ORIGIN.includes("*")) {
+  throw new Error("WEB_ORIGIN must be a single explicit origin, never a wildcard");
 }
 
 /**
@@ -36,6 +47,7 @@ export const auth = betterAuth({
   database: prismaAdapter(prisma, { provider: "postgresql" }),
   secret: AUTH_SECRET,
   baseURL: AUTH_BASE_URL,
+  trustedOrigins: [WEB_ORIGIN],
   emailAndPassword: {
     enabled: true,
   },
@@ -43,6 +55,9 @@ export const auth = betterAuth({
     database: {
       generateId: false,
     },
+    // Behind the same-origin proxy the API often runs on internal http while
+    // the public front is https: never let that drop the Secure attribute.
+    useSecureCookies: process.env.NODE_ENV === "production",
   },
   plugins: [
     organization({
