@@ -6,7 +6,7 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 
 > **Langue** : code, identifiants et commentaires techniques en anglais ; docs produit en français.
 
-> **État du repo** : 0.1→0.3, 0.5 et 1.1→1.8 livrés (MVP démontrable). Auth : better-auth
+> **État du repo** : 0.1→0.5 et 1.1→1.8 livrés (staging : workflow `deploy-staging` → URL). Auth : better-auth
 > + plugin organization (`organization` = `tenants`, `member` = `memberships`, rôles
 > `owner|member|accountant`) ; tenant = organisation active de la session, chaîne
 > `requireAuth → resolveTenant → requireMembership → withTenant` (`apps/api/src/app.ts`).

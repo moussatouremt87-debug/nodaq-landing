@@ -207,15 +207,15 @@ describe("ScalewaySecretProvider — writes (fake Secret Manager server)", () =>
       baseUrl: writeBase,
     });
     await provider.set("connector/t1/qonto", "credentials-json");
-    const stored = [...secrets.values()].find((s) => s.name === "nodaq-test-connector/t1/qonto");
+    const stored = [...secrets.values()].find((s) => s.name === "nodaq-test-connector-t1-qonto");
     expect(stored?.value).toBe("credentials-json");
 
     // Second set = new version on the SAME secret (no duplicate creation).
     await provider.set("connector/t1/qonto", "rotated");
-    expect([...secrets.values()].filter((s) => s.name === "nodaq-test-connector/t1/qonto")).toHaveLength(1);
+    expect([...secrets.values()].filter((s) => s.name === "nodaq-test-connector-t1-qonto")).toHaveLength(1);
 
     await provider.delete("connector/t1/qonto");
-    expect([...secrets.values()].find((s) => s.name === "nodaq-test-connector/t1/qonto")).toBeUndefined();
+    expect([...secrets.values()].find((s) => s.name === "nodaq-test-connector-t1-qonto")).toBeUndefined();
     await provider.delete("connector/t1/qonto"); // missing -> no-op
   });
 

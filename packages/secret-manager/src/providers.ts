@@ -68,10 +68,20 @@ export class ScalewaySecretProvider implements WritableSecretProvider {
     return { "X-Auth-Token": this.options.secretKey, "content-type": "application/json" };
   }
 
+  /**
+   * Vault name for a logical secret. Scaleway secret NAMES reject `/` (it
+   * belongs to the separate `path` field), but our connector refs are
+   * `connector/<tenantId>/<type>` — normalized to `-` symmetrically across
+   * get/set/delete, so the mapping stays bijective for our name shapes.
+   */
+  private fullName(name: string): string {
+    return (this.prefix + name).replaceAll("/", "-");
+  }
+
   async get(name: string): Promise<string | undefined> {
     const url =
       `${this.root()}/secrets-by-path/versions/latest/access` +
-      `?secret_name=${encodeURIComponent(this.prefix + name)}`;
+      `?secret_name=${encodeURIComponent(this.fullName(name))}`;
     const response = await this.fetchFn(url, {
       headers: { "X-Auth-Token": this.options.secretKey },
     });
@@ -110,7 +120,7 @@ export class ScalewaySecretProvider implements WritableSecretProvider {
   }
 
   async set(name: string, value: string): Promise<void> {
-    const fullName = this.prefix + name;
+    const fullName = this.fullName(name);
     let id = await this.findSecretId(fullName);
     if (!id) {
       if (!this.options.projectId) {
@@ -139,7 +149,7 @@ export class ScalewaySecretProvider implements WritableSecretProvider {
   }
 
   async delete(name: string): Promise<void> {
-    const id = await this.findSecretId(this.prefix + name);
+    const id = await this.findSecretId(this.fullName(name));
     if (!id) return;
     const response = await this.fetchFn(`${this.root()}/secrets/${id}`, {
       method: "DELETE",

@@ -1,0 +1,19 @@
+# JAMAIS dans une image : secrets/env réels, coffre de dev, artefacts.
+**/.env
+**/.env.*
+!**/.env.example
+.dev-vault.json*
+**/secrets/**
+*.pem
+**/node_modules
+**/.next
+**/dist
+**/.turbo
+.git
+.github
+infra/.terraform
+*.tfstate*
+**/test
+**/*.test.ts
+docs
+# ops/ reste inclus : infra/litellm/Dockerfile copie ops/litellm/config.yaml
