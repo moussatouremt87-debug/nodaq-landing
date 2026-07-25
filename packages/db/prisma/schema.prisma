@@ -19,6 +19,8 @@ model Tenant {
   memberships Membership[]
   invitations Invitation[]
   notes       Note[]
+  classifications Classification[]
+  policy      TenantPolicy?
 
   @@map("tenants")
 }
@@ -143,4 +145,46 @@ model Note {
 
   @@index([tenantId])
   @@map("notes")
+}
+
+/// RGPD audit trail of model routing decisions: which sensitivity category and
+/// model tier a request was routed to, and by which mechanism (rules vs. LLM
+/// classifier). Sealed by RLS (see the migration `rls_classifications_and_policies`).
+/// Never stores the request content — only a hash — so this table is safe to keep
+/// long-term for audit purposes.
+model Classification {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  requestId   String   @map("request_id")
+  /// 'confidentiel' | 'interne' | 'non_sensible' — validated app-side by Zod.
+  category    String
+  /// Model group chosen for this request (e.g. 'sovereign-fast').
+  tier        String
+  /// 'rules' | 'llm' — which mechanism decided the category.
+  decidedBy   String   @map("decided_by")
+  /// 'allowed' | 'blocked' (sovereignty guard) | 'failed' (model call error) —
+  /// blocked attempts MUST leave a trace too (RGPD audit finding 1.1).
+  outcome     String   @default("allowed")
+  /// sha256 of the request text — never the content itself.
+  contentHash String   @map("content_hash")
+  createdAt   DateTime @default(now()) @map("created_at")
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("classifications")
+}
+
+/// Per-tenant model routing policy. Sealed by RLS (see the migration
+/// `rls_classifications_and_policies`).
+model TenantPolicy {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenantId         String   @unique @map("tenant_id") @db.Uuid
+  /// Whether this tenant is allowed to route non-sensitive requests to frontier
+  /// (non-sovereign) model providers.
+  frontierEnabled  Boolean  @default(false) @map("frontier_enabled")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at")
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_policies")
 }

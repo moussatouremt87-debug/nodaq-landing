@@ -3,7 +3,16 @@ import { TenantId } from "@nodaq/shared";
 import { APP_DATABASE_URL } from "./env.js";
 
 export { Prisma } from "@prisma/client";
-export type { Note, Tenant, User, Membership, Invitation, Session } from "@prisma/client";
+export type {
+  Note,
+  Tenant,
+  User,
+  Membership,
+  Invitation,
+  Session,
+  Classification,
+  TenantPolicy,
+} from "@prisma/client";
 
 /**
  * Client applicatif : connecté avec le rôle `app_user` (non-superuser), donc soumis

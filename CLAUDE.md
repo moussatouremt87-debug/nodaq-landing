@@ -55,8 +55,9 @@ pnpm db:reset                 # reset complet (dev)
 ## Règles NON négociables
 
 1. **Souveraineté** : aucune donnée classée `confidentiel` ne sort du tier souverain.
-   Tout appel modèle passe par `packages/classifier` puis LiteLLM — **jamais** un SDK
-   fournisseur en direct depuis le code métier.
+   Tout appel modèle passe par **`packages/llm.route()`** (classify → policy → garde
+   dure → LiteLLM → audit hashé) — jamais LiteLLM ni un SDK fournisseur en direct
+   depuis le métier. Embeddings : `embed()` (toujours souverain).
 2. **Isolation multi-tenant (2 couches, toujours les deux)** :
    - **DB** : Row-Level Security active. Le seul accès aux données métier est
      `withTenant(tenantId, fn)` (transaction + `set_config('app.current_tenant_id', …, true)`).

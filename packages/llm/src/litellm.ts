@@ -1,0 +1,71 @@
+import type { ModelGroup } from "@nodaq/shared";
+
+/**
+ * Minimal OpenAI-compatible client for the LiteLLM proxy. Plain fetch on
+ * purpose: NEVER a provider SDK (CLAUDE.md rule #1 + ESLint barrier).
+ * Config is read at CALL time so tests can point at a fake server.
+ */
+function config(): { baseUrl: string; masterKey: string } {
+  const baseUrl = process.env.LITELLM_BASE_URL;
+  const masterKey = process.env.LITELLM_MASTER_KEY;
+  // Fail fast in production: silently calling with dev defaults would be a
+  // fail-open (audit finding 1.1). Dev defaults match the ops/ compose stack.
+  if (process.env.NODE_ENV === "production" && (!baseUrl || !masterKey)) {
+    throw new Error(
+      "LITELLM_BASE_URL and LITELLM_MASTER_KEY must be provided in production (Secret Manager)",
+    );
+  }
+  return {
+    baseUrl: baseUrl ?? "http://localhost:4000",
+    masterKey: masterKey ?? "sk-local-master",
+  };
+}
+
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+/** Calls a LiteLLM model group. Errors carry status codes only, never payloads. */
+export async function chatCompletion(group: ModelGroup, messages: ChatMessage[]): Promise<string> {
+  const { baseUrl, masterKey } = config();
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${masterKey}`,
+    },
+    body: JSON.stringify({ model: group, messages }),
+  });
+  if (!response.ok) {
+    throw new Error(`LiteLLM chat/completions failed for group "${group}": HTTP ${response.status}`);
+  }
+  const body = (await response.json()) as { choices?: { message?: { content?: string } }[] };
+  const content = body.choices?.[0]?.message?.content;
+  if (typeof content !== "string") {
+    throw new Error(`LiteLLM returned no content for group "${group}"`);
+  }
+  return content;
+}
+
+/** Embeddings are ALWAYS sovereign (they encode customer data). */
+export async function embeddings(texts: string[]): Promise<number[][]> {
+  const { baseUrl, masterKey } = config();
+  const response = await fetch(`${baseUrl}/v1/embeddings`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${masterKey}`,
+    },
+    body: JSON.stringify({ model: "embeddings", input: texts }),
+  });
+  if (!response.ok) {
+    throw new Error(`LiteLLM embeddings failed: HTTP ${response.status}`);
+  }
+  const body = (await response.json()) as { data?: { embedding?: number[] }[] };
+  const vectors = body.data?.map((d) => d.embedding);
+  if (!vectors || vectors.some((v) => !Array.isArray(v))) {
+    throw new Error("LiteLLM returned malformed embeddings");
+  }
+  return vectors as number[][];
+}

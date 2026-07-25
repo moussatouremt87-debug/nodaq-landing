@@ -31,7 +31,7 @@ export default tseslint.config(
     // is NOT in this list, so it needs none. If a precise exemption is ever
     // required, re-declare the rule for that path minus one entry — never ignore
     // the whole directory.
-    files: ["apps/**/*.ts", "apps/**/*.tsx", "mcp-servers/**/*.ts"],
+    files: ["apps/**/*.ts", "apps/**/*.tsx", "mcp-servers/**/*.ts", "packages/**/*.ts"],
     rules: {
       "no-restricted-imports": [
         "error",

@@ -25,6 +25,23 @@ export const CreateNoteInput = z.object({
 });
 export type CreateNoteInput = z.infer<typeof CreateNoteInput>;
 
+/**
+ * Data sensitivity category (CLAUDE.md rule #1 — sovereignty).
+ * Drives model-tier routing: `confidentiel` NEVER leaves the sovereign tier.
+ */
+export const SensitivityCategory = z.enum(["confidentiel", "interne", "non_sensible"]);
+export type SensitivityCategory = z.infer<typeof SensitivityCategory>;
+
+/** LiteLLM model groups. `frontier` is the only non-sovereign tier (tenant opt-in). */
+export const ModelGroup = z.enum([
+  "confidential",
+  "sovereign-strong",
+  "sovereign-fast",
+  "frontier",
+  "embeddings",
+]);
+export type ModelGroup = z.infer<typeof ModelGroup>;
+
 /** Invariant runtime : jette si la condition est fausse (narrowing TypeScript). */
 export function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
