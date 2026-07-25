@@ -12,6 +12,7 @@ export type {
   Session,
   Classification,
   TenantPolicy,
+  Connector,
 } from "@prisma/client";
 
 /**
