@@ -1,7 +1,7 @@
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { ComptaAgent } from "@nodaq/agent-runtime";
+import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
 import { prisma, withTenant } from "@nodaq/db";
 import { CreateNoteInput, TenantId, Uuid } from "@nodaq/shared";
@@ -95,6 +95,19 @@ function requireRole(roles: string[]) {
 export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const executors = options.executors ?? defaultExecutors;
   const app = Fastify({ logger: process.env.NODE_ENV !== "test" });
+
+  // Last rampart against detail leaks: an unhandled error must never echo its
+  // message (internal URLs, secret refs) to the client — name only, log full.
+  app.setErrorHandler((error: unknown, request, reply) => {
+    request.log.error(error);
+    const statusCode =
+      error && typeof error === "object" && "statusCode" in error
+        ? Number(error.statusCode)
+        : NaN;
+    void reply
+      .code(Number.isInteger(statusCode) && statusCode >= 400 ? statusCode : 500)
+      .send({ error: error instanceof Error ? error.name : "InternalServerError" });
+  });
 
   // better-auth handler: /api/auth/* (sign-up/sign-in email, session, sign-out,
   // organization/create, organization/set-active, invitations...)
@@ -309,6 +322,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       ...options.agentContext,
       tenantId: request.tenantId,
       requestedBy: request.authSession.user.id,
+      // The toolset filters owner-only tools (treasury) on this role.
+      role: request.membershipRole,
     });
     try {
       await agentRuntime.run(body.data.message, {
@@ -322,6 +337,47 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       reply.raw.end();
     }
     return reply;
+  });
+
+  /**
+   * Cockpit v0 (ticket 1.7) — KPIs of the virtual employees' work. Counts are
+   * metadata-only (visible to every member); the treasury forecast is the
+   * tenant's aggregate financial picture, reserved to the OWNER (same
+   * delegated-third-party reasoning as the pending-action detail, audit 1.5).
+   */
+  app.get("/cockpit/kpis", { preHandler: businessRoute }, async (request) => {
+    const byStatus = await withTenant(request.tenantId, (tx) =>
+      tx.pendingAction.groupBy({ by: ["status"], _count: { _all: true } }),
+    );
+    const pendingActions: Record<string, number> = {};
+    for (const row of byStatus) pendingActions[row.status] = row._count._all;
+    const conversations = await withTenant(request.tenantId, (tx) => tx.agentConversation.count());
+
+    // Treasury via the SAME tenant-bound toolset as the agent (read-only,
+    // OWNER-only — enforced by the toolset's role gate AND skipped here).
+    // Any failure (no Qonto connector, service down) yields null — the cockpit
+    // degrades; only the error NAME reaches the logs, nothing reaches the client.
+    let treasury: unknown = null;
+    if (request.membershipRole === "owner") {
+      let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+      try {
+        toolset = await buildToolset({
+          ...options.agentContext,
+          tenantId: request.tenantId,
+          role: request.membershipRole,
+        });
+        treasury = JSON.parse(await toolset.execute("compute_treasury_forecast", {}));
+      } catch (error) {
+        request.log.warn(
+          { err: error instanceof Error ? error.name : "Error" },
+          "cockpit treasury unavailable",
+        );
+        treasury = null;
+      } finally {
+        await toolset?.close().catch(() => undefined);
+      }
+    }
+    return { pendingActions, conversations, treasury };
   });
 
   app.get("/notes", { preHandler: businessRoute }, async (request) => {

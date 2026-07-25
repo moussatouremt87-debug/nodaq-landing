@@ -6,6 +6,7 @@ import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
 import { ComptaAgent } from "../src/agent.js";
 import type { AgentEvent } from "../src/agent.js";
+import { buildToolset } from "../src/tools.js";
 import { createLangfuseTracer } from "../src/tracing.js";
 import type { AgentRunTrace, AgentTracer } from "../src/tracing.js";
 
@@ -261,6 +262,29 @@ describe("ComptaAgent — the full loop", () => {
       tx.agentConversation.findUnique({ where: { id: first.conversationId } }),
     );
     expect((stored?.messages as unknown[]).length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("owner-only tools are filtered out of a non-owner toolset (fail-closed)", async () => {
+    for (const [role, expected] of [
+      ["owner", true],
+      ["member", false],
+      ["accountant", false],
+      [undefined, false], // no role provided = not owner
+    ] as const) {
+      const toolset = await buildToolset({
+        tenantId,
+        secretProvider: vault,
+        ...(role ? { role } : {}),
+      });
+      const names = toolset.definitions.map((d) => d.name);
+      expect(names.includes("compute_treasury_forecast")).toBe(expected);
+      if (!expected) {
+        await expect(toolset.execute("compute_treasury_forecast", {})).rejects.toThrow(
+          /unknown tool/,
+        );
+      }
+      await toolset.close();
+    }
   });
 
   it("traces a run to Langfuse — METADATA ONLY, never content", async () => {

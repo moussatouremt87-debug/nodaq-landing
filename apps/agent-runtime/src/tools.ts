@@ -17,9 +17,19 @@ import { TenantId } from "@nodaq/shared";
 
 export interface ToolsetContext extends Omit<ActionsServerContext, "tenantId"> {
   tenantId: string;
+  /** Membership role of the human behind the run (owner|member|accountant). */
+  role?: string;
   ragBaseUrl?: string;
   ragToken?: string;
 }
+
+/*
+ * Role gate on sensitive tools (RGPD audit 1.7): the tenant's aggregate
+ * financial picture is reserved to the OWNER — a member or an accountant
+ * (delegated third party) must not obtain it through the agent either.
+ * Fail-closed: no role provided = not owner.
+ */
+const OWNER_ONLY_TOOLS = new Set(["compute_treasury_forecast"]);
 
 export interface Toolset {
   definitions: ToolDefinition[];
@@ -57,6 +67,7 @@ export async function buildToolset(context: ToolsetContext): Promise<Toolset> {
   const connectorsClient = await connectInMemory(createConnectorsMcpServer(serverContext));
   const actionsClient = await connectInMemory(createActionsMcpServer(serverContext));
 
+  const isOwner = context.role === "owner";
   const routing = new Map<string, Client>();
   const definitions: ToolDefinition[] = [];
   for (const [client, source] of [
@@ -65,6 +76,7 @@ export async function buildToolset(context: ToolsetContext): Promise<Toolset> {
   ] as const) {
     const { tools } = await client.listTools();
     for (const tool of tools) {
+      if (OWNER_ONLY_TOOLS.has(tool.name) && !isOwner) continue;
       routing.set(tool.name, client);
       definitions.push({
         name: tool.name,

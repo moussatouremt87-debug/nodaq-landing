@@ -6,18 +6,18 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 
 > **Langue** : code, identifiants et commentaires techniques en anglais ; docs produit en français.
 
-> **État du repo** : tickets 0.1→0.3, 0.5 et 1.1→1.6 livrés. Auth : better-auth +
-> plugin organization (`organization` = `tenants`, `member` = `memberships`, rôles
+> **État du repo** : tickets 0.1→0.3, 0.5 et 1.1→1.7 livrés. Auth : better-auth + plugin
+> organization (`organization` = `tenants`, `member` = `memberships`, rôles
 > `owner|member|accountant`) ; tenant = organisation active de la session, chaîne
-> `requireAuth → resolveTenant → requireMembership → withTenant` dans `apps/api/src/app.ts`.
-> Secrets : `@nodaq/secrets` (voir `packages/secret-manager/README.md`). Routage LLM :
-> `packages/llm` (`route()`/`routeChat()`) + classifieur (1.1) ; connecteurs Pennylane/
-> Qonto (1.2) ; RAG Python (1.3) ; OCR + `pending_actions` (1.4) ; trésorerie/relances (1.5).
-> **Employé virtuel Compta (1.6, ADR-006)** : boucle d'agent model-agnostic dans
-> `apps/agent-runtime` — chaque itération passe par `routeChat()`, runtime construit LIÉ
-> au tenant de session (jamais un input d'outil), outils d'écriture → `pending_action`,
-> exécution UNIQUEMENT sur approbation (`/pending-actions/:id/approve`, idempotente),
-> chat SSE `/employees/compta/chat`, traces Langfuse métadonnées-seulement.
+> `requireAuth → resolveTenant → requireMembership → withTenant` (`apps/api/src/app.ts`).
+> Secrets : `@nodaq/secrets`. LLM : `packages/llm` (`route()`/`routeChat()`) + classifieur
+> (1.1) ; connecteurs (1.2) ; RAG (1.3) ; OCR + `pending_actions` (1.4) ; trésorerie (1.5).
+> **Compta (1.6, ADR-006)** : boucle model-agnostic dans `apps/agent-runtime` — chaque
+> itération passe par `routeChat()`, runtime LIÉ au tenant de session (jamais un input
+> d'outil), écritures → `pending_action`, exécution UNIQUEMENT sur approbation
+> (idempotente), chat SSE `/employees/compta/chat`, Langfuse métadonnées-seulement.
+> **UI (1.7)** : `apps/web` (Next.js 15) — cockpit KPIs (trésorerie owner-only), file de
+> validation 1-clic, chat SSE ; API via le proxy same-origin de `next.config.ts`.
 
 ---
 
@@ -182,7 +182,7 @@ pour les actions sensibles (ex. inviter un membre = OWNER).
 ## Structure du repo (rappel)
 
 ```
-apps/      web (Next.js) · api (Fastify) · agent-runtime (Claude Agent SDK)
+apps/      web (Next.js) · api (Fastify) · agent-runtime (boucle ADR-006)
 services/  rag · ml · ocr           (Python / FastAPI)
 mcp-servers/ connectors · actions · einvoice   (outils métier MCP)
 packages/  shared · classifier · db · llm

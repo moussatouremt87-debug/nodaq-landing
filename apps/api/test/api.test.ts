@@ -390,10 +390,47 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       });
     });
 
+    // Minimal fake Qonto (cockpit treasury KPI): one account, one settled credit.
+    const fakeQonto = createServer((req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      if ((req.url ?? "").startsWith("/organization")) {
+        res.end(
+          JSON.stringify({
+            organization: {
+              slug: "org-a",
+              bank_accounts: [
+                { slug: "main", iban: "FR7630001007941234567890185", balance_cents: 500_000 },
+              ],
+            },
+          }),
+        );
+      } else {
+        res.end(
+          JSON.stringify({
+            transactions: Array.from({ length: 30 }, (_, i) => ({
+              amount_cents: 1_000,
+              side: "credit",
+              settled_at: new Date(Date.now() - i * 86_400_000).toISOString(),
+            })),
+          }),
+        );
+      }
+    });
+
     beforeAll(async () => {
-      await new Promise<void>((resolve) => fakeLiteLlm.listen(0, "127.0.0.1", resolve));
+      for (const server of [fakeLiteLlm, fakeQonto]) {
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      }
       process.env.LITELLM_BASE_URL = `http://127.0.0.1:${(fakeLiteLlm.address() as AddressInfo).port}`;
       process.env.LITELLM_MASTER_KEY = "sk-test";
+
+      // Qonto connector for orgA, so the owner's cockpit gets a real forecast.
+      const { withTenant } = await import("@nodaq/db");
+      const qontoRef = `connector/${orgA}/qonto`;
+      await withTenant(orgA, (tx) =>
+        tx.connector.create({ data: { tenantId: orgA, type: "qonto", credentialsRef: qontoRef } }),
+      );
+
       execApp = buildApp({
         executors: {
           spy_action: (payload) => {
@@ -403,7 +440,15 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
           },
         },
         agentContext: {
-          secretProvider: { get: () => Promise.resolve(undefined) },
+          secretProvider: {
+            get: (name: string) =>
+              Promise.resolve(
+                name === qontoRef
+                  ? JSON.stringify({ organizationSlug: "org-a", secretKey: "sk-qonto" })
+                  : undefined,
+              ),
+          },
+          qontoBaseUrl: `http://127.0.0.1:${(fakeQonto.address() as AddressInfo).port}`,
           ragBaseUrl: "http://127.0.0.1:9", // never reached: the script has no tool call
           ragToken: "test-token",
         },
@@ -413,6 +458,7 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
 
     afterAll(async () => {
       fakeLiteLlm.close();
+      fakeQonto.close();
       await execApp.close();
     });
 
@@ -483,6 +529,48 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       expect(res.statusCode).toBe(200);
       expect(res.json()).toMatchObject({ status: "rejected" });
       expect(executed).toHaveLength(before);
+    });
+
+    it("GET /cockpit/kpis: counts for members, treasury for the OWNER only", async () => {
+      const anon = await execApp.inject({ method: "GET", url: "/cockpit/kpis" });
+      expect(anon.statusCode).toBe(401);
+
+      // Owner: pending-action counts + a real Qonto-backed forecast.
+      const owner = await execApp.inject({
+        method: "GET",
+        url: "/cockpit/kpis",
+        headers: { cookie: cookieA },
+      });
+      expect(owner.statusCode).toBe(200);
+      const kpis = owner.json() as {
+        pendingActions: Record<string, number>;
+        conversations: number;
+        treasury: { account: string; horizons: unknown } | null;
+      };
+      expect(kpis.pendingActions.executed).toBeGreaterThanOrEqual(1);
+      expect(kpis.treasury).not.toBeNull();
+      expect(kpis.treasury?.account).toBe("main");
+
+      // A MEMBER of the same tenant sees the counts but NOT the treasury.
+      const cookieM2 = await signup("cockpit-membre@example.com", "Cockpit Membre");
+      const memberId = (
+        await execApp.inject({ method: "GET", url: "/me", headers: { cookie: cookieM2 } })
+      ).json().userId as string;
+      await admin.membership.create({ data: { tenantId: orgA, userId: memberId, role: "member" } });
+      await execApp.inject({
+        method: "POST",
+        url: "/api/auth/organization/set-active",
+        headers: { cookie: cookieM2 },
+        payload: { organizationId: orgA },
+      });
+      const member = await execApp.inject({
+        method: "GET",
+        url: "/cockpit/kpis",
+        headers: { cookie: cookieM2 },
+      });
+      expect(member.statusCode).toBe(200);
+      expect(member.json().treasury).toBeNull();
+      expect(member.json().pendingActions).toEqual(kpis.pendingActions);
     });
 
     it("POST /employees/compta/chat: 401 anonymous, SSE stream + persisted conversation", async () => {
