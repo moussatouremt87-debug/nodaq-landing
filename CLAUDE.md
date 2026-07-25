@@ -142,7 +142,26 @@ pour les actions sensibles (ex. inviter un membre = OWNER).
 4. **Avant de considérer une tâche finie** : `pnpm lint && pnpm typecheck && pnpm test`
    verts (+ équivalents Python), et l'éval du workflow concerné si applicable.
 5. **Sécurité/RGPD** : sur tout diff touchant données/tenant/auth, passer le sous-agent
-   `rgpd-security-reviewer` avant merge.
+   `rgpd-security-reviewer` avant merge (il rapporte, il ne corrige pas — gate humaine,
+   pas bloqueur automatique).
+
+### Outillage automatique (ticket 0.5)
+
+- **Nouvelle table métier** ⇒ skill `/add-migration` (modèle + migration + RLS depuis
+  le template bundlé + test d'isolation, via le sous-agent `migration-writer`).
+- **Tests** ⇒ sous-agent `test-runner` (résumé court, jamais le log verbeux).
+- **Hooks** (`.claude/hooks/`) : PreToolUse bloque les écritures dans les `.env` réels
+  / fichiers de secrets / contenus ressemblant à un secret, plus `rm -rf` hors repo et
+  `git push --force` (sans lease). PostToolUse lance lint+typecheck du package touché
+  (jamais la suite de tests — trop lente pour un hook). Stop rappelle tests + gate RGPD.
+- **ESLint** : `no-restricted-imports` interdit les SDK LLM fournisseurs dans `apps/**`
+  et `mcp-servers/**` (exception : `apps/agent-runtime`, Claude Agent SDK légitime).
+- **Permissions** : `.env` réels bloqués en lecture (`.env`, `.env.local`,
+  `.env.{production,staging,development,test}*`, à la racine comme en sous-dossier),
+  `**/secrets/**` et `*.pem` aussi ; `.env.example` éditable. Git : seuls les verbes
+  de lecture + `add` sont auto-approuvés (`show`/`log -p` liraient les fichiers deny ;
+  `commit`/`push` restent sur confirmation). Overrides perso dans
+  `settings.local.json` (gitignored), qui l'emporte.
 
 ---
 
