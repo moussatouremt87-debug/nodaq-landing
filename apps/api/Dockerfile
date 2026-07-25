@@ -14,6 +14,10 @@ RUN pnpm --filter @nodaq/api... build
 
 FROM node:22-slim
 ENV NODE_ENV=production
+# Prisma (moteur natif) exige libssl à l'exécution — node:22-slim ne l'embarque
+# pas ("failed to detect libssl/openssl" puis crash aux requêtes).
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 WORKDIR /repo
 # Le workspace complet : node_modules pnpm (symlinks) + dist. Plus lourd qu'un
 # `pnpm deploy`, mais fidèle au graphe workspace:* sans étape fragile.

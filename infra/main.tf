@@ -102,16 +102,16 @@ resource "scaleway_container_namespace" "main" {
 }
 
 resource "scaleway_container" "litellm" {
-  name           = "litellm"
-  namespace_id   = scaleway_container_namespace.main.id
-  registry_image = "${local.registry}/litellm:${var.image_tag}"
-  port           = 4000
-  cpu_limit      = 500
-  memory_limit   = 1024
-  min_scale      = 1
-  max_scale      = 1
-  privacy        = "public" # protégé par LITELLM_MASTER_KEY ; réseau privé = suivi
-  deploy         = true
+  name               = "litellm"
+  namespace_id       = scaleway_container_namespace.main.id
+  registry_image     = "${local.registry}/litellm:${var.image_tag}"
+  port               = 4000
+  cpu_limit          = 500
+  memory_limit_bytes = 1073741824 # 1 GiB
+  min_scale          = 1
+  max_scale          = 1
+  privacy            = "public" # protégé par LITELLM_MASTER_KEY ; réseau privé = suivi
+  deploy             = true
 
   environment_variables = {
     # Fallback Mistral La Plateforme non provisionné en staging : la config
@@ -126,24 +126,30 @@ resource "scaleway_container" "litellm" {
   }
 }
 
+# public_endpoint peut être nu ou déjà préfixé selon la version du provider :
+# on normalise en URL https dans tous les cas.
+locals {
+  litellm_url = startswith(scaleway_container.litellm.public_endpoint, "http") ? scaleway_container.litellm.public_endpoint : "https://${scaleway_container.litellm.public_endpoint}"
+}
+
 resource "scaleway_container" "api" {
-  name           = "api"
-  namespace_id   = scaleway_container_namespace.main.id
-  registry_image = "${local.registry}/api:${var.image_tag}"
-  port           = 8080
-  cpu_limit      = 1000
-  memory_limit   = 2048
-  min_scale      = 1
-  max_scale      = 2
-  privacy        = "public"
-  deploy         = true
+  name               = "api"
+  namespace_id       = scaleway_container_namespace.main.id
+  registry_image     = "${local.registry}/api:${var.image_tag}"
+  port               = 8080
+  cpu_limit          = 1000
+  memory_limit_bytes = 2147483648 # 2 GiB
+  min_scale          = 1
+  max_scale          = 2
+  privacy            = "public"
+  deploy             = true
 
   environment_variables = {
     NODE_ENV               = "production"
     SCW_DEFAULT_REGION     = "fr-par"
     SCW_DEFAULT_PROJECT_ID = var.project_id
     SCW_SECRET_PREFIX      = local.secret_prefix
-    LITELLM_BASE_URL       = "https://${scaleway_container.litellm.domain_name}"
+    LITELLM_BASE_URL       = local.litellm_url
     # 2e apply : URLs réelles ; 1er apply : placeholders le temps que les
     # domaines existent (l'auth 403 tant que WEB_ORIGIN n'est pas la vraie).
     WEB_ORIGIN    = var.web_origin != "" ? var.web_origin : "https://staging.invalid"
@@ -159,22 +165,21 @@ resource "scaleway_container" "api" {
 
   depends_on = [
     scaleway_secret_version.auth_secret,
-    scaleway_secret_version.database_url,
     scaleway_secret_version.app_database_url,
   ]
 }
 
 resource "scaleway_container" "web" {
-  name           = "web"
-  namespace_id   = scaleway_container_namespace.main.id
-  registry_image = "${local.registry}/web:${var.image_tag}"
-  port           = 3000
-  cpu_limit      = 500
-  memory_limit   = 1024
-  min_scale      = 1
-  max_scale      = 2
-  privacy        = "public"
-  deploy         = true
+  name               = "web"
+  namespace_id       = scaleway_container_namespace.main.id
+  registry_image     = "${local.registry}/web:${var.image_tag}"
+  port               = 3000
+  cpu_limit          = 500
+  memory_limit_bytes = 1073741824 # 1 GiB
+  min_scale          = 1
+  max_scale          = 2
+  privacy            = "public"
+  deploy             = true
   # API_URL est figé DANS l'image (rewrites Next au build) — voir le workflow.
 }
 
