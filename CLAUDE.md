@@ -13,6 +13,8 @@
 - Dev : `pnpm dev` | Tests : `pnpm test` / `uv run pytest`
 - Lint : `pnpm lint` / `ruff check` | Types : `pnpm typecheck` / `mypy`
 - Migrations : `pnpm prisma migrate dev`
+- Stack locale (PG+pgvector, Redis, Qdrant, MinIO, LiteLLM, Langfuse) :
+  `cd ops && cp .env.example .env && docker compose up -d` (détails : `ops/README.md`)
 - Landing actuelle : ouvrir `index.html` directement (page statique, aucun build).
 
 ## Règles NON négociables

@@ -1,0 +1,56 @@
+# LiteLLM — passerelle modèles unifiée (API OpenAI-compatible sur http://localhost:4000)
+# Le routeur de classification appelle un "model_name" logique ; LiteLLM dispatche
+# vers le bon fournisseur souverain. ADAPTE les `model:` aux modèles réellement
+# disponibles dans ta console Scaleway / Mistral (les noms évoluent).
+#
+# Doc modèles Scaleway Generative APIs :
+#   https://www.scaleway.com/en/docs/generative-apis/reference-content/supported-models/
+
+model_list:
+  # ── Tier « interne » rapide (généraliste / edge) ─────────────────────────────
+  - model_name: sovereign-fast
+    litellm_params:
+      model: openai/ministral-8b-latest          # <- nom à confirmer dans Scaleway
+      api_base: https://api.scaleway.ai/v1
+      api_key: os.environ/SCW_GENERATIVE_API_KEY
+
+  # ── Tier « interne » fort (raisonnement) ─────────────────────────────────────
+  - model_name: sovereign-strong
+    litellm_params:
+      model: openai/mistral-small-latest          # ou un Large hébergé UE
+      api_base: https://api.scaleway.ai/v1
+      api_key: os.environ/SCW_GENERATIVE_API_KEY
+
+  # ── Redondance UE (Mistral La Plateforme) ────────────────────────────────────
+  - model_name: sovereign-strong                  # même nom logique -> fallback
+    litellm_params:
+      model: mistral/mistral-small-latest
+      api_key: os.environ/MISTRAL_API_KEY
+
+  # ── Embeddings multilingues (souverains) ─────────────────────────────────────
+  - model_name: embeddings
+    litellm_params:
+      model: openai/bge-multilingual-gemma2        # <- nom à confirmer dans Scaleway
+      api_base: https://api.scaleway.ai/v1
+      api_key: os.environ/SCW_GENERATIVE_API_KEY
+
+  # ── Tier « confidentiel » : à pointer vers un endpoint Managed Inference dédié
+  #    ou un vLLM privé. Laisse commenté tant que non provisionné.
+  # - model_name: confidential
+  #   litellm_params:
+  #     model: openai/mistral-small
+  #     api_base: https://<ton-endpoint-managed-inference>/v1
+  #     api_key: os.environ/SCW_MANAGED_INFERENCE_KEY
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 2
+  fallbacks:
+    - sovereign-strong: ["sovereign-fast"]
+
+litellm_settings:
+  drop_params: true
+  # set_verbose: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

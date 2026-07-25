@@ -1,9 +1,10 @@
 # Overrides Claude Code perso (non versionnés)
 .claude/settings.local.json
 
-# Secrets & environnement
+# Secrets & environnement (les .env.example restent versionnés)
 .env
 .env.*
+!.env.example
 *.pem
 
 # Dépendances & builds (pour les futures phases du monorepo)
