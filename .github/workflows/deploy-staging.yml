@@ -105,6 +105,7 @@ jobs:
         run: |
           terraform apply -auto-approve \
             -target=scaleway_rdb_database.appdb \
+            -target=scaleway_rdb_privilege.admin_appdb \
             -target=scaleway_secret_version.auth_secret \
             -target=scaleway_secret_version.app_database_url \
             -target=scaleway_container.litellm \
@@ -129,6 +130,9 @@ jobs:
           psql "$DB_URL" -v ON_ERROR_STOP=1 <<SQL
           SET log_statement TO 'none';
           ALTER ROLE app_user WITH PASSWORD '$APP_PWD';
+          -- Scaleway RDB : CONNECT n'est pas accordé par défaut ; sans ce
+          -- GRANT, l'API (app_user) ne peut pas joindre la base au runtime.
+          GRANT CONNECT ON DATABASE appdb TO app_user;
           SQL
 
       - name: Build & push image web (API_URL figé au build)

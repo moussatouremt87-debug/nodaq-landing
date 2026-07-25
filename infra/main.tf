@@ -69,6 +69,18 @@ resource "scaleway_rdb_database" "appdb" {
   name        = "appdb"
 }
 
+# Scaleway RDB n'accorde AUCUN privilège sur une base créée via l'API — même
+# pas CONNECT pour l'utilisateur initial (« permission denied for database »,
+# run #5 des migrations). On attribue tout à nodaq_admin explicitement.
+# app_user (créé par NOS migrations SQL, invisible de l'API Scaleway) reçoit
+# son GRANT CONNECT via psql dans le workflow, juste après les migrations.
+resource "scaleway_rdb_privilege" "admin_appdb" {
+  instance_id   = scaleway_rdb_instance.main.id
+  user_name     = scaleway_rdb_instance.main.user_name
+  database_name = scaleway_rdb_database.appdb.name
+  permission    = "all"
+}
+
 # ACL EXPLICITE (audit 0.4) : staging ouvert (runner GitHub + conteneurs
 # serverless n'ont pas d'IP fixe), défense = mots de passe forts générés.
 # Durcissement prod (suivi) : Private Network / VPC + ACL restreinte.
