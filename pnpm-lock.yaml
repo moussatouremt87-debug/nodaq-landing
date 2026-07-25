@@ -33,8 +33,39 @@ importers:
         specifier: ^8.19.0
         version: 8.65.0(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)
 
+  apps/agent-runtime:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@3.25.76)
+      '@nodaq/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@nodaq/llm':
+        specifier: workspace:*
+        version: link:../../packages/llm
+      '@nodaq/mcp-actions':
+        specifier: workspace:*
+        version: link:../../mcp-servers/actions
+      '@nodaq/mcp-connectors':
+        specifier: workspace:*
+        version: link:../../mcp-servers/connectors
+      '@nodaq/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
   apps/api:
     dependencies:
+      '@nodaq/agent-runtime':
+        specifier: workspace:*
+        version: link:../agent-runtime
       '@nodaq/db':
         specifier: workspace:*
         version: link:../../packages/db

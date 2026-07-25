@@ -16,6 +16,7 @@ export type {
   Document,
   DocumentChunk,
   PendingAction,
+  AgentConversation,
 } from "@prisma/client";
 
 /**

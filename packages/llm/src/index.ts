@@ -9,8 +9,8 @@ import { withTenant } from "@nodaq/db";
 import { SensitivityCategory, TenantId } from "@nodaq/shared";
 import type { ModelGroup } from "@nodaq/shared";
 import { SovereigntyViolationError } from "./errors.js";
-import { chatCompletion, embeddings } from "./litellm.js";
-import type { ChatMessage } from "./litellm.js";
+import { chatCompletion, chatCompletionWithTools, embeddings } from "./litellm.js";
+import type { AssistantTurn, ChatMessage, LoopMessage, ToolDefinition } from "./litellm.js";
 
 export { SovereigntyViolationError } from "./errors.js";
 export type { ChatMessage } from "./litellm.js";
@@ -38,6 +38,33 @@ export interface RouteOptions {
    * through the hard guard — forcing can never break sovereignty.
    */
   forceGroup?: ModelGroup;
+  /** Tool definitions exposed to the model (routeChat only). */
+  tools?: ToolDefinition[];
+}
+
+/** Shared audit write (hash only, under the tenant's RLS context). */
+async function audit(
+  tenantId: string,
+  requestId: string,
+  category: SensitivityCategory,
+  group: ModelGroup,
+  decidedBy: "rules" | "llm",
+  outcome: "allowed" | "blocked" | "failed",
+  text: string,
+): Promise<void> {
+  await withTenant(tenantId, (tx) =>
+    tx.classification.create({
+      data: {
+        tenantId,
+        requestId,
+        category,
+        tier: group,
+        decidedBy,
+        outcome,
+        contentHash: sha256(text),
+      },
+    }),
+  );
 }
 
 export interface RouteResult {
@@ -169,4 +196,106 @@ export async function route(task: RouteTask, opts: RouteOptions = {}): Promise<R
 export async function embed(texts: string[]): Promise<number[][]> {
   z.array(z.string().min(1)).min(1).parse(texts);
   return embeddings(texts);
+}
+
+// ── routeChat: the agent-loop sibling of route() (ADR-006) ──────────────────────
+
+export type { AssistantTurn, LoopMessage, ToolDefinition } from "./litellm.js";
+
+export const RouteChatTask = z.object({
+  /** Full conversation, including prior assistant/tool turns. */
+  messages: z.array(z.record(z.unknown())).min(1),
+  category: SensitivityCategory.optional(),
+  tenantId: TenantId,
+  requestId: z.string().min(1).max(200),
+});
+export type RouteChatTask = {
+  messages: LoopMessage[];
+  category?: SensitivityCategory;
+  tenantId: string;
+  requestId: string;
+};
+
+/**
+ * Everything that will be SENT to the model must be classified and hashed:
+ * plain contents AND tool-call arguments (a drafted email or an IBAN can sit
+ * in the arguments of an assistant tool call, not in any `content`).
+ */
+function conversationText(messages: LoopMessage[]): string {
+  return messages
+    .flatMap((message) => {
+      const parts: string[] = [];
+      if ("content" in message && typeof message.content === "string" && message.content) {
+        parts.push(message.content);
+      }
+      if ("tool_calls" in message && message.tool_calls) {
+        for (const call of message.tool_calls) parts.push(call.function.arguments);
+      }
+      return parts;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/**
+ * One agent-loop iteration through the sovereign gateway (ADR-006): classify
+ * the WHOLE conversation (a later turn can carry more sensitive content than
+ * the first), apply the tenant policy, HARD GUARD, call LiteLLM with tools,
+ * audit (hash only). The loop in apps/agent-runtime calls this every iteration
+ * — sovereignty is structural, not a configuration.
+ */
+export async function routeChat(
+  task: RouteChatTask,
+  opts: RouteOptions = {},
+): Promise<{ turn: AssistantTurn; category: SensitivityCategory; group: ModelGroup }> {
+  RouteChatTask.parse(task);
+  const { messages, tenantId, requestId } = task;
+  const text = conversationText(messages) || "(conversation vide)";
+
+  // Always classify; a declared category can only harden (same rule as route()).
+  const detected = await classify(
+    { text },
+    {
+      fallback: (t) =>
+        chatCompletion("sovereign-fast", [
+          { role: "system", content: CLASSIFICATION_PROMPT },
+          { role: "user", content: t },
+        ]),
+    },
+  );
+  const severity: Record<SensitivityCategory, number> = {
+    non_sensible: 0,
+    interne: 1,
+    confidentiel: 2,
+  };
+  let category = detected.category;
+  let decidedBy = detected.decidedBy;
+  if (task.category && severity[task.category] > severity[category]) {
+    category = task.category;
+    decidedBy = "rules";
+  }
+
+  const policy = await withTenant(tenantId, (tx) =>
+    tx.tenantPolicy.findUnique({ where: { tenantId } }),
+  );
+  const allowed = allowedTiers(category, { frontierEnabled: policy?.frontierEnabled ?? false });
+  const group: ModelGroup =
+    opts.forceGroup ??
+    (opts.preferFrontier && allowed.includes("frontier") ? "frontier" : "sovereign-fast");
+
+  assertSovereignty(category, group, requestId);
+  if (!allowed.includes(group)) {
+    console.error("[POLICY-VIOLATION-BLOCKED]", { category, group, requestId });
+    await audit(tenantId, requestId, category, group, decidedBy, "blocked", text);
+    throw new SovereigntyViolationError(category, group, requestId);
+  }
+
+  try {
+    const turn = await chatCompletionWithTools(group, messages, opts.tools ?? []);
+    await audit(tenantId, requestId, category, group, decidedBy, "allowed", text);
+    return { turn, category, group };
+  } catch (error) {
+    await audit(tenantId, requestId, category, group, decidedBy, "failed", text);
+    throw error;
+  }
 }

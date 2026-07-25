@@ -1,9 +1,20 @@
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { ComptaAgent } from "@nodaq/agent-runtime";
+import type { ToolsetContext } from "@nodaq/agent-runtime";
 import { prisma, withTenant } from "@nodaq/db";
 import { CreateNoteInput, TenantId, Uuid } from "@nodaq/shared";
 import { auth } from "./auth.js";
+import { defaultExecutors } from "./executors.js";
+import type { ExecutorRegistry } from "./executors.js";
+
+export interface BuildAppOptions {
+  /** Executors for approved pending actions (injectable in tests). */
+  executors?: ExecutorRegistry;
+  /** Extra agent context (fake service URLs in tests). */
+  agentContext?: Partial<Omit<ToolsetContext, "tenantId">>;
+}
 
 type AuthSession = NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>;
 
@@ -81,7 +92,8 @@ function requireRole(roles: string[]) {
   };
 }
 
-export function buildApp(): FastifyInstance {
+export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
+  const executors = options.executors ?? defaultExecutors;
   const app = Fastify({ logger: process.env.NODE_ENV !== "test" });
 
   // better-auth handler: /api/auth/* (sign-up/sign-in email, session, sign-out,
@@ -202,7 +214,68 @@ export function buildApp(): FastifyInstance {
   app.post(
     "/pending-actions/:id/approve",
     { preHandler: [...businessRoute, requireRole(["owner"])] },
-    decide("approved"),
+    async (request, reply) => {
+      const params = z.object({ id: Uuid }).safeParse(request.params);
+      if (!params.success) {
+        return reply.code(400).send({ error: "invalid pending action id" });
+      }
+      // Atomic claim pending -> approved: exactly ONE approval wins, so the
+      // execution below runs exactly once (double-approve => 409, no re-run).
+      const { count } = await withTenant(request.tenantId, (tx) =>
+        tx.pendingAction.updateMany({
+          where: { id: params.data.id, status: "pending" },
+          data: {
+            status: "approved",
+            validatedBy: request.authSession.user.id,
+            validatedAt: new Date(),
+          },
+        }),
+      );
+      if (count === 0) {
+        const exists = await withTenant(request.tenantId, (tx) =>
+          tx.pendingAction.findUnique({ where: { id: params.data.id }, select: { status: true } }),
+        );
+        if (!exists) return reply.code(404).send({ error: "pending action not found" });
+        return reply.code(409).send({ error: `already ${exists.status}` });
+      }
+
+      // Execute AFTER human approval — the only place a prepared action runs.
+      const action = await withTenant(request.tenantId, (tx) =>
+        tx.pendingAction.findUniqueOrThrow({ where: { id: params.data.id } }),
+      );
+      const executor = executors[action.type];
+      let outcome: { status: "executed" | "failed"; result: object };
+      if (!executor) {
+        outcome = { status: "failed", result: { error: "no-executor" } };
+      } else {
+        try {
+          const result = await executor(action.payload, { tenantId: request.tenantId });
+          outcome = { status: "executed", result: (result ?? {}) as object };
+        } catch (error) {
+          // Error NAME only — an executor error must never echo payload content.
+          outcome = {
+            status: "failed",
+            result: { error: error instanceof Error ? error.name : "Error" },
+          };
+        }
+      }
+      const updated = await withTenant(request.tenantId, (tx) =>
+        tx.pendingAction.update({
+          where: { id: params.data.id },
+          data: { status: outcome.status, executedAt: new Date(), result: outcome.result },
+          select: {
+            id: true,
+            type: true,
+            status: true,
+            validatedBy: true,
+            validatedAt: true,
+            executedAt: true,
+            result: true,
+          },
+        }),
+      );
+      return reply.send(updated);
+    },
   );
 
   app.post(
@@ -210,6 +283,46 @@ export function buildApp(): FastifyInstance {
     { preHandler: [...businessRoute, requireRole(["owner"])] },
     decide("rejected"),
   );
+
+  /**
+   * Conversation with the Compta/Direction virtual employee — SSE stream.
+   * The agent runtime is constructed HERE, from the session's active
+   * organization, AFTER the full auth chain: the tenant provenance follow-up
+   * from tickets 1.2/1.3 is closed at this exact line.
+   */
+  app.post("/employees/compta/chat", { preHandler: businessRoute }, async (request, reply) => {
+    const body = z
+      .object({ message: z.string().min(1).max(10_000), conversationId: Uuid.optional() })
+      .safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    });
+    const send = (event: object): void => {
+      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+    const agentRuntime = new ComptaAgent({
+      ...options.agentContext,
+      tenantId: request.tenantId,
+      requestedBy: request.authSession.user.id,
+    });
+    try {
+      await agentRuntime.run(body.data.message, {
+        ...(body.data.conversationId ? { conversationId: body.data.conversationId } : {}),
+        onEvent: send,
+      });
+    } catch (error) {
+      // Error NAME only in the stream — never content.
+      send({ type: "error", name: error instanceof Error ? error.name : "Error" });
+    } finally {
+      reply.raw.end();
+    }
+    return reply;
+  });
 
   app.get("/notes", { preHandler: businessRoute }, async (request) => {
     return withTenant(request.tenantId, (tx) =>

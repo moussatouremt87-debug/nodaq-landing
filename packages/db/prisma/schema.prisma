@@ -25,6 +25,7 @@ model Tenant {
   documents       Document[]
   documentChunks  DocumentChunk[]
   pendingActions  PendingAction[]
+  agentConversations AgentConversation[]
 
   @@map("tenants")
 }
@@ -285,13 +286,21 @@ model PendingAction {
   type         String
   /// The prepared action, ready to execute after approval.
   payload      Json
-  /// 'pending' | 'approved' | 'rejected' | 'executed'
+  /// 'pending' | 'approved' | 'rejected' | 'executed' | 'failed' — validated app-side.
   status       String    @default("pending")
   /// The user or agent run that prepared the action.
   requestedBy  String?   @map("requested_by") @db.Uuid
+  /// Which virtual employee prepared this action (e.g. 'compta'). Nullable: a human
+  /// can also submit an action directly.
+  employee     String?
   /// The HUMAN who clicked to approve/reject — legal attribution, never an agent.
   validatedBy  String?   @map("validated_by") @db.Uuid
   validatedAt  DateTime? @map("validated_at")
+  /// When post-approval execution actually happened (set once, by the executor).
+  executedAt   DateTime? @map("executed_at")
+  /// Execution outcome metadata only (e.g. external id, error code) — NEVER
+  /// sensitive client content.
+  result       Json?
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at")
   tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -299,4 +308,23 @@ model PendingAction {
   @@index([tenantId])
   @@index([tenantId, status])
   @@map("pending_actions")
+}
+
+/// Persisted conversation transcripts of virtual employees (blueprint agentic
+/// runtime), enabling resume-after-restart. Sealed by RLS (see the migration
+/// `agent_runtime`) — `messages` is the full transcript and may contain sensitive
+/// client content, exactly like `notes`.
+model AgentConversation {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  /// Which virtual employee owns this conversation, e.g. 'compta'.
+  employee  String
+  /// Full conversation transcript (sensitive: sealed by RLS, never logged).
+  messages  Json
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("agent_conversations")
 }
