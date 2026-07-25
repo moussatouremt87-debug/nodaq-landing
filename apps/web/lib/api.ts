@@ -67,10 +67,10 @@ export const CockpitKpis = z.object({
   treasury: z
     .object({
       account: z.string(),
-      balanceCents: z.number(),
-      dailyNetCents: z.number(),
+      currentBalanceCents: z.number(),
+      avgDailyNetFlowCents: z.number(),
       observedDays: z.number(),
-      points: z.array(z.object({ horizonDays: z.number(), balanceCents: z.number() })),
+      points: z.array(z.object({ horizonDays: z.number(), projectedBalanceCents: z.number() })),
     })
     .nullable(),
 });
@@ -100,6 +100,38 @@ export const decidePendingAction = (
   decision: "approve" | "reject",
 ): Promise<PendingActionDecision> =>
   call(PendingActionDecision, `/pending-actions/${id}/${decision}`, { method: "POST" });
+
+// Connector onboarding (ticket 1.8) — metadata only in responses; the
+// credentials travel one way (in) and are never read back.
+export const ConnectorSummary = z.object({
+  type: z.string(),
+  status: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string().optional(),
+});
+export type ConnectorSummary = z.infer<typeof ConnectorSummary>;
+
+export const listConnectors = (): Promise<ConnectorSummary[]> =>
+  call(z.object({ connectors: z.array(ConnectorSummary) }), "/connectors").then(
+    (body) => body.connectors,
+  );
+
+export const connectConnector = (
+  type: "pennylane" | "qonto",
+  credentials: Record<string, string>,
+): Promise<void> =>
+  call(z.object({ type: z.string() }), "/connectors", {
+    method: "POST",
+    body: JSON.stringify({ type, credentials }),
+  }).then(() => undefined);
+
+export const disconnectConnector = async (type: string): Promise<void> => {
+  // 204: no body to Zod-parse — the status IS the contract.
+  const response = await fetch(`/backend/connectors/${encodeURIComponent(type)}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) throw new ApiError(response.status, `HTTP ${response.status}`);
+};
 
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {

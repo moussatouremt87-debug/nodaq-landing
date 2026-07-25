@@ -4,6 +4,14 @@ import { z } from "zod";
 import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
 import { prisma, withTenant } from "@nodaq/db";
+import {
+  connectorSecretName,
+  ConnectorType,
+  PennylaneClient,
+  QontoClient,
+} from "@nodaq/mcp-connectors";
+import { defaultWritableProvider } from "@nodaq/secrets";
+import type { WritableSecretProvider } from "@nodaq/secrets";
 import { CreateNoteInput, TenantId, Uuid } from "@nodaq/shared";
 import { auth } from "./auth.js";
 import { defaultExecutors } from "./executors.js";
@@ -14,6 +22,8 @@ export interface BuildAppOptions {
   executors?: ExecutorRegistry;
   /** Extra agent context (fake service URLs in tests). */
   agentContext?: Partial<Omit<ToolsetContext, "tenantId">>;
+  /** Writable vault for connector credentials (injectable in tests). */
+  vault?: WritableSecretProvider;
 }
 
 type AuthSession = NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>;
@@ -94,6 +104,10 @@ function requireRole(roles: string[]) {
 
 export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const executors = options.executors ?? defaultExecutors;
+  // ONE vault for the app: connector credentials are WRITTEN here (onboarding)
+  // and READ back by the agent toolset — unless a test injects fakes.
+  const vault = options.vault ?? defaultWritableProvider();
+  const agentContext = { secretProvider: vault, ...options.agentContext };
   const app = Fastify({ logger: process.env.NODE_ENV !== "test" });
 
   // Last rampart against detail leaks: an unhandled error must never echo its
@@ -319,7 +333,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
     };
     const agentRuntime = new ComptaAgent({
-      ...options.agentContext,
+      ...agentContext,
       tenantId: request.tenantId,
       requestedBy: request.authSession.user.id,
       // The toolset filters owner-only tools (treasury) on this role.
@@ -338,6 +352,127 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     }
     return reply;
   });
+
+  /*
+   * Connector onboarding (ticket 1.8). Rule of the house: credentials go IN,
+   * never OUT — stored in the vault under `connector/<tenantId>/<type>`,
+   * referenced by name in the connector row, absent from every response.
+   * OWNER only: connecting a tool grants the agent read access to the
+   * company's books. Credentials are TESTED against the provider before
+   * being stored (fail-closed on typos); failures are generic client-side.
+   */
+
+  const ConnectorCredentials = {
+    pennylane: z.object({ apiKey: z.string().min(8).max(200) }).strict(),
+    qonto: z
+      .object({
+        organizationSlug: z.string().min(1).max(100),
+        secretKey: z.string().min(8).max(200),
+      })
+      .strict(),
+  } as const;
+
+  /**
+   * Live credential check before vaulting. The provider response is DISCARDED
+   * entirely — it only proves the key works; nothing from it is stored,
+   * logged or returned. On failure the caller gets a constant 422; only the
+   * error NAME reaches the server log (ops visibility without leaking).
+   */
+  async function testConnectorCredentials(
+    type: ConnectorType,
+    credentials: unknown,
+    log: FastifyRequest["log"],
+  ): Promise<boolean> {
+    try {
+      if (type === "pennylane") {
+        const client = new PennylaneClient(
+          ConnectorCredentials.pennylane.parse(credentials),
+          agentContext.pennylaneBaseUrl,
+        );
+        await client.listCustomerInvoices({ limit: 1 });
+      } else {
+        const client = new QontoClient(
+          ConnectorCredentials.qonto.parse(credentials),
+          agentContext.qontoBaseUrl,
+        );
+        await client.getOrganization();
+      }
+      return true;
+    } catch (error) {
+      log.warn(
+        { type, err: error instanceof Error ? error.name : "Error" },
+        "connector credential test failed",
+      );
+      return false;
+    }
+  }
+
+  // Metadata only — the credentialsRef itself stays server-side.
+  app.get("/connectors", { preHandler: businessRoute }, async (request) => {
+    const rows = await withTenant(request.tenantId, (tx) =>
+      tx.connector.findMany({
+        orderBy: { createdAt: "asc" },
+        select: { type: true, status: true, createdAt: true, updatedAt: true },
+      }),
+    );
+    return { connectors: rows };
+  });
+
+  app.post(
+    "/connectors",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const body = z
+        .object({ type: ConnectorType, credentials: z.record(z.unknown()) })
+        .safeParse(request.body);
+      if (!body.success) return reply.code(400).send({ error: "invalid payload" });
+      const parsed = ConnectorCredentials[body.data.type].safeParse(body.data.credentials);
+      if (!parsed.success) return reply.code(400).send({ error: "invalid credentials format" });
+
+      if (!(await testConnectorCredentials(body.data.type, parsed.data, request.log))) {
+        // Generic on purpose: no provider status code, no detail.
+        return reply.code(422).send({ error: "connection test failed" });
+      }
+
+      const secretName = connectorSecretName(request.tenantId, body.data.type);
+      await vault.set(secretName, JSON.stringify(parsed.data));
+      let row;
+      try {
+        row = await withTenant(request.tenantId, async (tx) => {
+          // One connector per type: replacing = rotating the credentials.
+          await tx.connector.deleteMany({ where: { type: body.data.type } });
+          return tx.connector.create({
+            data: { tenantId: request.tenantId, type: body.data.type, credentialsRef: secretName },
+            select: { type: true, status: true, createdAt: true },
+          });
+        });
+      } catch (error) {
+        // No orphan credentials: if the row cannot be written, the secret
+        // (unreachable by any future DELETE) is purged before failing.
+        await vault.delete(secretName).catch(() => undefined);
+        throw error;
+      }
+      return reply.code(201).send(row);
+    },
+  );
+
+  app.delete(
+    "/connectors/:type",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const params = z.object({ type: ConnectorType }).safeParse(request.params);
+      if (!params.success) return reply.code(400).send({ error: "unknown connector type" });
+      // Secret FIRST (droit à l'effacement) : if the vault delete fails the
+      // row survives, so a retry purges again — never the other way around,
+      // which would strand credentials in the vault with no row to reach them.
+      await vault.delete(connectorSecretName(request.tenantId, params.data.type));
+      const { count } = await withTenant(request.tenantId, (tx) =>
+        tx.connector.deleteMany({ where: { type: params.data.type } }),
+      );
+      if (count === 0) return reply.code(404).send({ error: "connector not configured" });
+      return reply.code(204).send();
+    },
+  );
 
   /**
    * Cockpit v0 (ticket 1.7) — KPIs of the virtual employees' work. Counts are
@@ -362,7 +497,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
       try {
         toolset = await buildToolset({
-          ...options.agentContext,
+          ...agentContext,
           tenantId: request.tenantId,
           role: request.membershipRole,
         });

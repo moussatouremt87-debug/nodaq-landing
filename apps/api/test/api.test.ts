@@ -372,6 +372,7 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
   describe("execution on approval (ticket 1.6) + agent SSE chat", () => {
     let execApp: FastifyInstance;
     const executed: unknown[] = [];
+    const vaultStore = new Map<string, string>();
     let failMode = false;
 
     // Minimal fake LiteLLM: the model always answers directly (no tool calls),
@@ -390,8 +391,14 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       });
     });
 
-    // Minimal fake Qonto (cockpit treasury KPI): one account, one settled credit.
+    // Minimal fake Qonto (cockpit treasury KPI + connector onboarding):
+    // REAL auth check so the credential test has something to fail against.
     const fakeQonto = createServer((req, res) => {
+      if (req.headers.authorization !== "org-a:sk-qonto-1") {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ message: "unauthorized" }));
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" });
       if ((req.url ?? "").startsWith("/organization")) {
         res.end(
@@ -430,6 +437,7 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       await withTenant(orgA, (tx) =>
         tx.connector.create({ data: { tenantId: orgA, type: "qonto", credentialsRef: qontoRef } }),
       );
+      vaultStore.set(qontoRef, JSON.stringify({ organizationSlug: "org-a", secretKey: "sk-qonto-1" }));
 
       execApp = buildApp({
         executors: {
@@ -439,15 +447,19 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
             return Promise.resolve({ ok: true });
           },
         },
-        agentContext: {
-          secretProvider: {
-            get: (name: string) =>
-              Promise.resolve(
-                name === qontoRef
-                  ? JSON.stringify({ organizationSlug: "org-a", secretKey: "sk-qonto" })
-                  : undefined,
-              ),
+        // ONE in-memory writable vault: onboarding writes, the toolset reads.
+        vault: {
+          get: (name) => Promise.resolve(vaultStore.get(name)),
+          set: (name, value) => {
+            vaultStore.set(name, value);
+            return Promise.resolve();
           },
+          delete: (name) => {
+            vaultStore.delete(name);
+            return Promise.resolve();
+          },
+        },
+        agentContext: {
           qontoBaseUrl: `http://127.0.0.1:${(fakeQonto.address() as AddressInfo).port}`,
           ragBaseUrl: "http://127.0.0.1:9", // never reached: the script has no tool call
           ragToken: "test-token",
@@ -545,11 +557,18 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       const kpis = owner.json() as {
         pendingActions: Record<string, number>;
         conversations: number;
-        treasury: { account: string; horizons: unknown } | null;
+        treasury: {
+          account: string;
+          currentBalanceCents: number;
+          points: { horizonDays: number; projectedBalanceCents: number }[];
+        } | null;
       };
       expect(kpis.pendingActions.executed).toBeGreaterThanOrEqual(1);
-      expect(kpis.treasury).not.toBeNull();
-      expect(kpis.treasury?.account).toBe("main");
+      // Shape pinned here because the web cockpit parses EXACTLY these fields
+      // (apps/web/lib/api.ts CockpitKpis) — a rename must break this test.
+      expect(kpis.treasury).toMatchObject({ account: "main", currentBalanceCents: 500_000 });
+      expect(kpis.treasury?.points.map((p) => p.horizonDays)).toEqual([30, 60, 90]);
+      expect(typeof kpis.treasury?.points[0]?.projectedBalanceCents).toBe("number");
 
       // A MEMBER of the same tenant sees the counts but NOT the treasury.
       const cookieM2 = await signup("cockpit-membre@example.com", "Cockpit Membre");
@@ -615,6 +634,140 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
         tx.agentConversation.findUnique({ where: { id: convo.conversationId } }),
       );
       expect(stored?.employee).toBe("compta");
+    });
+
+    it("connector onboarding: owner-only, credentials tested then stored, never echoed", async () => {
+      // Anonymous and member are refused.
+      expect(
+        (await execApp.inject({ method: "POST", url: "/connectors", payload: {} })).statusCode,
+      ).toBe(401);
+      const cookieM = await signup("onboarding-membre@example.com", "Onboarding Membre");
+      const memberId = (
+        await execApp.inject({ method: "GET", url: "/me", headers: { cookie: cookieM } })
+      ).json().userId as string;
+      await admin.membership.create({ data: { tenantId: orgA, userId: memberId, role: "member" } });
+      await execApp.inject({
+        method: "POST",
+        url: "/api/auth/organization/set-active",
+        headers: { cookie: cookieM },
+        payload: { organizationId: orgA },
+      });
+      const memberPost = await execApp.inject({
+        method: "POST",
+        url: "/connectors",
+        headers: { cookie: cookieM },
+        payload: { type: "qonto", credentials: { organizationSlug: "org-a", secretKey: "sk-qonto-1" } },
+      });
+      expect(memberPost.statusCode).toBe(403);
+      // The member still SEES the connector list (metadata only).
+      const memberList = await execApp.inject({
+        method: "GET",
+        url: "/connectors",
+        headers: { cookie: cookieM },
+      });
+      expect(memberList.statusCode).toBe(200);
+
+      // Wrong credentials: tested against the provider -> generic 422, nothing stored.
+      const before = vaultStore.size;
+      const bad = await execApp.inject({
+        method: "POST",
+        url: "/connectors",
+        headers: { cookie: cookieA },
+        payload: { type: "qonto", credentials: { organizationSlug: "org-a", secretKey: "wrong-secret" } },
+      });
+      expect(bad.statusCode).toBe(422);
+      expect(bad.json()).toEqual({ error: "connection test failed" });
+      expect(vaultStore.size).toBe(before);
+
+      // Valid credentials: 201, row listed, secret in the vault, NOTHING echoed.
+      const good = await execApp.inject({
+        method: "POST",
+        url: "/connectors",
+        headers: { cookie: cookieA },
+        payload: { type: "qonto", credentials: { organizationSlug: "org-a", secretKey: "sk-qonto-1" } },
+      });
+      expect(good.statusCode).toBe(201);
+      expect(good.json()).toMatchObject({ type: "qonto", status: "active" });
+      expect(good.body).not.toContain("sk-qonto-1");
+      expect(vaultStore.get(`connector/${orgA}/qonto`)).toContain("sk-qonto-1");
+
+      const list = await execApp.inject({
+        method: "GET",
+        url: "/connectors",
+        headers: { cookie: cookieA },
+      });
+      expect(list.json().connectors.map((c: { type: string }) => c.type)).toContain("qonto");
+      expect(JSON.stringify(list.json())).not.toContain("sk-qonto-1");
+      expect(JSON.stringify(list.json())).not.toContain("credentialsRef");
+
+      // The agent toolset reads what onboarding stored: the owner's cockpit
+      // still computes the treasury forecast with the ROTATED credentials.
+      const kpis = await execApp.inject({
+        method: "GET",
+        url: "/cockpit/kpis",
+        headers: { cookie: cookieA },
+      });
+      expect(kpis.json().treasury).not.toBeNull();
+
+      // Unknown type & malformed payloads.
+      expect(
+        (
+          await execApp.inject({
+            method: "POST",
+            url: "/connectors",
+            headers: { cookie: cookieA },
+            payload: { type: "stripe", credentials: {} },
+          })
+        ).statusCode,
+      ).toBe(400);
+
+      // A MEMBER cannot delete either (owner-only sensitive action).
+      expect(
+        (
+          await execApp.inject({
+            method: "DELETE",
+            url: "/connectors/qonto",
+            headers: { cookie: cookieM },
+          })
+        ).statusCode,
+      ).toBe(403);
+
+      // Cross-tenant: Bob (other org) neither sees nor deletes Alice's
+      // connector — and his 404 delete does NOT touch Alice's secret.
+      const bobList = await execApp.inject({
+        method: "GET",
+        url: "/connectors",
+        headers: { cookie: cookieB },
+      });
+      expect(bobList.json().connectors).toEqual([]);
+      expect(
+        (
+          await execApp.inject({
+            method: "DELETE",
+            url: "/connectors/qonto",
+            headers: { cookie: cookieB },
+          })
+        ).statusCode,
+      ).toBe(404);
+      expect(vaultStore.has(`connector/${orgA}/qonto`)).toBe(true);
+
+      // Delete: row AND secret gone; deleting again -> 404.
+      const del = await execApp.inject({
+        method: "DELETE",
+        url: "/connectors/qonto",
+        headers: { cookie: cookieA },
+      });
+      expect(del.statusCode).toBe(204);
+      expect(vaultStore.has(`connector/${orgA}/qonto`)).toBe(false);
+      expect(
+        (
+          await execApp.inject({
+            method: "DELETE",
+            url: "/connectors/qonto",
+            headers: { cookie: cookieA },
+          })
+        ).statusCode,
+      ).toBe(404);
     });
   });
 });

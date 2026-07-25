@@ -69,6 +69,9 @@ importers:
       '@nodaq/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@nodaq/mcp-connectors':
+        specifier: workspace:*
+        version: link:../../mcp-servers/connectors
       '@nodaq/secrets':
         specifier: workspace:*
         version: link:../../packages/secret-manager
