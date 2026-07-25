@@ -1,0 +1,15 @@
+# Overrides Claude Code perso (non versionnés)
+.claude/settings.local.json
+
+# Secrets & environnement
+.env
+.env.*
+*.pem
+
+# Dépendances & builds (pour les futures phases du monorepo)
+node_modules/
+dist/
+.next/
+.turbo/
+__pycache__/
+.venv/
