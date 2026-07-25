@@ -13,6 +13,8 @@ export type {
   Classification,
   TenantPolicy,
   Connector,
+  Document,
+  DocumentChunk,
 } from "@prisma/client";
 
 /**

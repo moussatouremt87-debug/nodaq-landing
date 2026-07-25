@@ -22,6 +22,8 @@ model Tenant {
   classifications Classification[]
   policy      TenantPolicy?
   connectors  Connector[]
+  documents       Document[]
+  documentChunks  DocumentChunk[]
 
   @@map("tenants")
 }
@@ -209,4 +211,63 @@ model TenantPolicy {
   tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("tenant_policies")
+}
+
+/// RAG ingestion tracking: one row per source document ingested for a tenant.
+/// Sealed by RLS (see the migration `rls_documents`). `objectKey` is the Object
+/// Storage key (provenance) — the raw file itself lives in S3, never in Postgres.
+/// `hash` (sha256 of the raw file) is the idempotency key per tenant: re-ingesting
+/// the same file for the same tenant is a no-op.
+model Document {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  /// Object Storage key (provenance) — optional (e.g. not yet uploaded, or ingested
+  /// straight from a connector without persisting the raw file).
+  objectKey  String?   @map("object_key")
+  /// Department scope — validated app-side (Zod), not a DB enum.
+  dept       String
+  /// 'UPLOAD' | 'CONNECTOR' — validated app-side.
+  source     String    @default("UPLOAD")
+  /// sha256 of the raw file — idempotency key (see @@unique below).
+  hash       String
+  indexedAt  DateTime? @map("indexed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  chunks     DocumentChunk[]
+
+  @@unique([tenantId, hash])
+  @@index([tenantId])
+  @@map("documents")
+}
+
+/// RAG vector store: one row per chunk of a `Document`, with its embedding.
+/// Sealed by RLS (see the migration `rls_documents`).
+/// IMPORTANT: the embedding dimension (1024) MUST stay in sync with
+/// EMBEDDING_DIM in `services/rag` (bge-m3) — changing one without the other
+/// breaks ingestion/search silently (dimension mismatch at insert time).
+model DocumentChunk {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  documentId String    @map("document_id") @db.Uuid
+  chunkIndex Int       @map("chunk_index")
+  content    String
+  /// pgvector column, dim 1024 (bge-m3) — see the note above on the model doc.
+  /// Prisma's `Unsupported` type: no client-side CRUD on this field, raw SQL only.
+  embedding  Unsupported("vector(1024)")?
+  dept       String
+  source     String    @default("UPLOAD")
+  metadata   Json?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  document   Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, chunkIndex])
+  @@index([tenantId])
+  // NOTE: no @@index declaration for the HNSW vector index here — the installed
+  // Prisma engine (6.19.3) doesn't support the `Hnsw` index type at the schema
+  // level (`Unknown index type: Hnsw` on `prisma validate`). The index is created
+  // via raw SQL in the `rag_documents` migration and `document_chunks` is marked
+  // as an externally-managed table in `prisma.config.ts` (`tables.external`) so
+  // `prisma migrate dev` doesn't perpetually try to reconcile/drop it as drift.
+  @@map("document_chunks")
 }

@@ -43,7 +43,7 @@ pnpm --filter @nodaq/api dev  # un seul service
 
 # Qualité (à lancer après chaque étape)
 pnpm lint && pnpm typecheck && pnpm test
-uv run ruff check && uv run mypy && uv run pytest    # côté Python
+cd services/rag && uv run ruff check && uv run mypy && uv run pytest   # côté Python
 
 # Base
 pnpm db:migrate               # applique migrations Prisma + policies RLS
@@ -127,6 +127,15 @@ pour les actions sensibles (ex. inviter un membre = OWNER).
 - **Port ClickHouse (9000)** laissé interne dans le compose pour ne pas entrer en
   conflit avec MinIO.
 - **Ne pas appeler les services Python depuis le front** : toujours passer par l'API.
+  Les services Python sont INTERNES : jeton d'appel obligatoire (`RAG_INTERNAL_TOKEN`).
+- **Python : migrations = Prisma SEULEMENT.** Les services Python font du DML, jamais
+  de DDL — `document_chunks` (pgvector) et sa RLS viennent de `packages/db`. La
+  dimension d'embedding (1024) doit matcher la colonne `vector(1024)`.
+- **Python : même RLS, même piège.** `services/rag/src/rag/db.py::with_tenant` =
+  réplique de `withTenant` (rôle `app_user` + `set_config(..., true)` EN transaction).
+  Garde au boot : refus de tourner en superuser. Embeddings via LiteLLM uniquement.
+- **Shadow DB Prisma + pgvector** : `prisma migrate dev` exige une shadow DB où
+  `CREATE EXTENSION vector` est déjà passé (voir `packages/db/.env.example`).
 - **Secrets au boot, pas à l'import.** `injectSecrets()` (`@nodaq/secrets`) doit
   s'exécuter AVANT l'import des modules qui lisent `process.env` à l'import
   (`@nodaq/db`, `auth.ts`) — d'où les imports dynamiques dans `server.ts`.
