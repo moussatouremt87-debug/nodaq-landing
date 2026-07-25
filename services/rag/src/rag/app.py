@@ -15,6 +15,8 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -33,6 +35,15 @@ def require_internal_token(request: Request) -> None:
 
 
 Auth = Annotated[None, Depends(require_internal_token)]
+
+
+async def validation_error_without_input_echo(
+    _request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """FastAPI's default 422 echoes the offending `input` — for an oversized
+    contentBase64 that re-emits the whole document. Type + location only."""
+    detail = [{"type": e.get("type"), "loc": list(e.get("loc", []))} for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": detail})
 
 
 class IngestRequest(BaseModel):
@@ -78,6 +89,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="nodaq-rag", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
     )
+    app.add_exception_handler(RequestValidationError, validation_error_without_input_echo)  # type: ignore[arg-type]
 
     @app.get("/health")
     def health() -> dict[str, str]:

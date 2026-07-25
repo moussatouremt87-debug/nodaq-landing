@@ -6,19 +6,37 @@ module. NEVER log document content.
 """
 
 import io
+import logging
 
 from pypdf import PdfReader
+
+# pypdf logs RAW SLICES of the document on malformed structures — silence it
+# (same hardening as services/ocr, RGPD audit 1.4).
+_pypdf_logger = logging.getLogger("pypdf")
+_pypdf_logger.addHandler(logging.NullHandler())
+_pypdf_logger.propagate = False
 
 
 class UnsupportedDocumentError(Exception):
     """Raised when no parser matches the document type (type only, no content)."""
 
 
+def _extension(lower_filename: str) -> str:
+    return lower_filename.rsplit(".", 1)[-1] if "." in lower_filename else "unknown"
+
+
 def parse_document(data: bytes, filename: str) -> str:
     lower = filename.lower()
     if lower.endswith(".pdf") or data[:5] == b"%PDF-":
-        reader = PdfReader(io.BytesIO(data))
-        return "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
+        try:
+            reader = PdfReader(io.BytesIO(data))
+            return "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
+        except Exception as error:
+            # Content-free error: an unhandled PdfReadError would put document
+            # bytes into a 500 traceback.
+            raise UnsupportedDocumentError(
+                f"unsupported document type: .{_extension(lower)}"
+            ) from error
     if lower.endswith((".txt", ".md", ".csv")):
         return data.decode("utf-8", errors="replace").strip()
     # Last resort: try utf-8; refuse binary garbage instead of indexing noise.

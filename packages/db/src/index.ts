@@ -15,6 +15,7 @@ export type {
   Connector,
   Document,
   DocumentChunk,
+  PendingAction,
 } from "@prisma/client";
 
 /**

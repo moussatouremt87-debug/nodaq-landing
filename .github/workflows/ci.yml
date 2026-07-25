@@ -93,14 +93,26 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      - name: Lint Python (ruff)
+      - name: Lint Python (ruff) — rag
         working-directory: services/rag
         run: uv run ruff check
 
-      - name: Types Python (mypy strict)
+      - name: Types Python (mypy strict) — rag
         working-directory: services/rag
         run: uv run mypy
 
-      - name: Tests Python (dont isolation tenant — bloquants)
+      - name: Tests Python (dont isolation tenant — bloquants) — rag
         working-directory: services/rag
+        run: uv run pytest
+
+      - name: Lint Python (ruff) — ocr
+        working-directory: services/ocr
+        run: uv run ruff check
+
+      - name: Types Python (mypy strict) — ocr
+        working-directory: services/ocr
+        run: uv run mypy
+
+      - name: Tests Python — ocr
+        working-directory: services/ocr
         run: uv run pytest

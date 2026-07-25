@@ -61,6 +61,28 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.1)
 
+  mcp-servers/actions:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@3.25.76)
+      '@nodaq/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@nodaq/llm':
+        specifier: workspace:*
+        version: link:../../packages/llm
+      '@nodaq/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
   mcp-servers/connectors:
     dependencies:
       '@modelcontextprotocol/sdk':
