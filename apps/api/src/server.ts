@@ -8,9 +8,11 @@ import { injectSecrets } from "@nodaq/secrets";
  * Manager (SCW_SECRET_KEY set), and the required secrets become mandatory.
  */
 const isProd = process.env.NODE_ENV === "production";
+// Least privilege (audit 0.4): the runtime NEVER holds the admin DSN —
+// DATABASE_URL is for migrations/tests only; prisma runs on APP_DATABASE_URL
+// (app_user, NOSUPERUSER, RLS enforced).
 await injectSecrets([
   { name: "AUTH_SECRET", required: isProd },
-  { name: "DATABASE_URL", required: isProd },
   { name: "APP_DATABASE_URL", required: isProd },
   { name: "AUTH_BASE_URL", required: false },
 ]);

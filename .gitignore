@@ -18,3 +18,10 @@ __pycache__/
 
 # Coffre local de dev (FileSecretProvider — jamais un vrai store)
 .dev-vault.json*
+
+# Terraform (infra/) — state et caches, jamais commités
+.terraform/
+*.tfstate*
+*.tfvars
+*.tfvars.json
+infra/crash*.log

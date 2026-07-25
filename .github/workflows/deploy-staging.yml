@@ -1,0 +1,154 @@
+# Déploiement staging Scaleway (ticket 0.4) — déclenchement MANUEL uniquement.
+# Prérequis (une fois) : secrets GitHub Actions `SCW_ACCESS_KEY` et `SCW_SECRET_KEY`
+# (jamais dans le code). Le projet et la région sont non sensibles, définis ici.
+#
+# Séquence (les URLs des conteneurs n'existent qu'après création, d'où 3 applies) :
+#   1. bucket state + images litellm/api -> apply ciblé (db, secrets, litellm, api)
+#   2. migrations Prisma + ALTER ROLE app_user (mdp géré par Terraform)
+#   3. image web (API_URL figé au build) -> apply complet -> apply final (WEB_ORIGIN)
+
+name: Deploy staging
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency: deploy-staging
+
+env:
+  SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+  SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+  SCW_DEFAULT_PROJECT_ID: ${{ vars.SCW_DEFAULT_PROJECT_ID || '955f9c20-9d60-4943-a810-71c737a42a45' }}
+  SCW_DEFAULT_REGION: fr-par
+  TF_VAR_scw_access_key: ${{ secrets.SCW_ACCESS_KEY }}
+  TF_VAR_scw_secret_key: ${{ secrets.SCW_SECRET_KEY }}
+  # Backend S3 (Object Storage Scaleway)
+  AWS_ACCESS_KEY_ID: ${{ secrets.SCW_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_KEY }}
+  REGISTRY: rg.fr-par.scw.cloud/nodaq-staging
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Garde-fou secrets
+        run: |
+          if [ -z "$SCW_ACCESS_KEY" ] || [ -z "$SCW_SECRET_KEY" ]; then
+            echo "::error::Secrets SCW_ACCESS_KEY / SCW_SECRET_KEY manquants (Settings -> Secrets and variables -> Actions)."
+            exit 1
+          fi
+
+      - name: Bucket de state Terraform (idempotent, versionné)
+        run: |
+          BUCKET="nodaq-tfstate-${SCW_DEFAULT_PROJECT_ID%%-*}"
+          echo "TF_STATE_BUCKET=$BUCKET" >> "$GITHUB_ENV"
+          ENDPOINT="--endpoint-url https://s3.fr-par.scw.cloud --region fr-par"
+          # N'avale que « le bucket existe déjà » — toute autre erreur (auth,
+          # bucket d'un autre projet) doit faire échouer le job ici, pas à l'init.
+          if ! aws s3api create-bucket --bucket "$BUCKET" $ENDPOINT 2>create-bucket.err; then
+            grep -q "BucketAlreadyOwnedByYou\|BucketAlreadyExists" create-bucket.err || {
+              cat create-bucket.err; exit 1;
+            }
+            aws s3api head-bucket --bucket "$BUCKET" $ENDPOINT
+          fi
+          # Versioning : le state contient les secrets générés — pouvoir revenir
+          # en arrière fait partie du plan de reprise.
+          aws s3api put-bucket-versioning --bucket "$BUCKET" $ENDPOINT \
+            --versioning-configuration Status=Enabled
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: terraform init -backend-config="bucket=$TF_STATE_BUCKET"
+
+      - name: Login registre Scaleway
+        run: echo "$SCW_SECRET_KEY" | docker login rg.fr-par.scw.cloud -u nologin --password-stdin
+
+      - name: Build & push images litellm + api
+        working-directory: .
+        run: |
+          docker build -f infra/litellm/Dockerfile -t "$REGISTRY/litellm:${GITHUB_SHA::12}" .
+          docker build -f apps/api/Dockerfile -t "$REGISTRY/api:${GITHUB_SHA::12}" .
+          # Le namespace de registre doit exister avant le premier push.
+          (cd infra && terraform apply -auto-approve \
+            -target=scaleway_registry_namespace.main \
+            -var "project_id=$SCW_DEFAULT_PROJECT_ID" -var "image_tag=${GITHUB_SHA::12}")
+          docker push "$REGISTRY/litellm:${GITHUB_SHA::12}"
+          docker push "$REGISTRY/api:${GITHUB_SHA::12}"
+
+      - name: Apply 1 — base de données, secrets, litellm, api
+        run: |
+          terraform apply -auto-approve \
+            -target=scaleway_rdb_database.appdb \
+            -target=scaleway_secret_version.auth_secret \
+            -target=scaleway_secret_version.database_url \
+            -target=scaleway_secret_version.app_database_url \
+            -target=scaleway_container.litellm \
+            -target=scaleway_container.api \
+            -var "project_id=$SCW_DEFAULT_PROJECT_ID" -var "image_tag=${GITHUB_SHA::12}"
+
+      - name: Migrations Prisma + mot de passe app_user
+        working-directory: .
+        run: |
+          DB_URL="$(cd infra && terraform output -raw database_url)"
+          APP_PWD="$(cd infra && terraform output -raw db_app_password)"
+          # Masque l'URL entière ET le mot de passe admin isolé (au cas où un
+          # outil aval l'afficherait hors du DSN).
+          ADMIN_PWD="${DB_URL#postgresql://nodaq_admin:}"; ADMIN_PWD="${ADMIN_PWD%%@*}"
+          echo "::add-mask::$DB_URL"; echo "::add-mask::$APP_PWD"; echo "::add-mask::$ADMIN_PWD"
+          pnpm install --frozen-lockfile
+          DATABASE_URL="$DB_URL" pnpm db:migrate:deploy
+          # La migration crée app_user avec un mdp de dev : remplacé IMMÉDIATEMENT
+          # par celui géré par Terraform. SQL passé par stdin (pas d'argv), et
+          # log_statement coupé pour la session (le mdp ne doit pas atterrir
+          # dans les logs serveur PostgreSQL).
+          psql "$DB_URL" -v ON_ERROR_STOP=1 <<SQL
+          SET log_statement TO 'none';
+          ALTER ROLE app_user WITH PASSWORD '$APP_PWD';
+          SQL
+
+      - name: Build & push image web (API_URL figé au build)
+        working-directory: .
+        run: |
+          API_URL="$(cd infra && terraform output -raw api_url)"
+          docker build -f apps/web/Dockerfile --build-arg "API_URL=$API_URL" \
+            -t "$REGISTRY/web:${GITHUB_SHA::12}" .
+          docker push "$REGISTRY/web:${GITHUB_SHA::12}"
+
+      - name: Apply 2 — web + AUTH_BASE_URL
+        run: |
+          API_URL="$(terraform output -raw api_url)"
+          terraform apply -auto-approve \
+            -var "project_id=$SCW_DEFAULT_PROJECT_ID" -var "image_tag=${GITHUB_SHA::12}" \
+            -var "api_base_url=$API_URL"
+
+      - name: Apply 3 — WEB_ORIGIN définitif (trustedOrigins better-auth)
+        run: |
+          API_URL="$(terraform output -raw api_url)"
+          WEB_URL="$(terraform output -raw web_url)"
+          terraform apply -auto-approve \
+            -var "project_id=$SCW_DEFAULT_PROJECT_ID" -var "image_tag=${GITHUB_SHA::12}" \
+            -var "api_base_url=$API_URL" -var "web_origin=$WEB_URL"
+
+      - name: URL de staging
+        run: |
+          echo "## 🚀 NODAQ staging" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Application : $(terraform output -raw web_url)**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- API : $(terraform output -raw api_url)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Région : fr-par (souverain)" >> "$GITHUB_STEP_SUMMARY"
