@@ -67,11 +67,16 @@ resource "scaleway_rdb_acl" "main" {
   }
 }
 
+# Le provider expose load_balancer comme LISTE VIDE (connue) tant que
+# l'instance n'existe pas — un [0] direct casse au plan. D'où : locals
+# null-tolérants + un apply préalable ciblé sur l'instance dans le workflow,
+# pour que les DSN soient toujours calculés sur un load balancer réel avant
+# que les secrets/conteneurs ne soient planifiés.
 locals {
-  db_host          = scaleway_rdb_instance.main.load_balancer[0].ip
-  db_port          = scaleway_rdb_instance.main.load_balancer[0].port
-  database_url     = "postgresql://nodaq_admin:${random_password.db_admin.result}@${local.db_host}:${local.db_port}/appdb"
-  app_database_url = "postgresql://app_user:${random_password.db_app.result}@${local.db_host}:${local.db_port}/appdb"
+  db_host          = try(scaleway_rdb_instance.main.load_balancer[0].ip, null)
+  db_port          = try(scaleway_rdb_instance.main.load_balancer[0].port, null)
+  database_url     = local.db_host == null ? null : "postgresql://nodaq_admin:${random_password.db_admin.result}@${local.db_host}:${local.db_port}/appdb"
+  app_database_url = local.db_host == null ? null : "postgresql://app_user:${random_password.db_app.result}@${local.db_host}:${local.db_port}/appdb"
 }
 
 # ── Secret Manager : les secrets lus au boot de l'API ─────────────────────────
@@ -104,7 +109,7 @@ resource "scaleway_container_namespace" "main" {
 resource "scaleway_container" "litellm" {
   name               = "litellm"
   namespace_id       = scaleway_container_namespace.main.id
-  registry_image     = "${local.registry}/litellm:${var.image_tag}"
+  image              = "${local.registry}/litellm:${var.image_tag}"
   port               = 4000
   cpu_limit          = 500
   memory_limit_bytes = 1073741824 # 1 GiB
@@ -135,7 +140,7 @@ locals {
 resource "scaleway_container" "api" {
   name               = "api"
   namespace_id       = scaleway_container_namespace.main.id
-  registry_image     = "${local.registry}/api:${var.image_tag}"
+  image              = "${local.registry}/api:${var.image_tag}"
   port               = 8080
   cpu_limit          = 1000
   memory_limit_bytes = 2147483648 # 2 GiB
@@ -172,7 +177,7 @@ resource "scaleway_container" "api" {
 resource "scaleway_container" "web" {
   name               = "web"
   namespace_id       = scaleway_container_namespace.main.id
-  registry_image     = "${local.registry}/web:${var.image_tag}"
+  image              = "${local.registry}/web:${var.image_tag}"
   port               = 3000
   cpu_limit          = 500
   memory_limit_bytes = 1073741824 # 1 GiB

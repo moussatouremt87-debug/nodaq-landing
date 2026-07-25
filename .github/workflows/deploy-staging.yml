@@ -92,6 +92,16 @@ jobs:
           docker push "$REGISTRY/litellm:${GITHUB_SHA::12}"
           docker push "$REGISTRY/api:${GITHUB_SHA::12}"
 
+      - name: Apply 0 — instance PostgreSQL seule
+        # Le provider expose load_balancer en liste vide tant que l'instance
+        # n'existe pas : on la crée d'abord pour que les DSN (secrets, output
+        # migrations) soient planifiés sur un endpoint réel.
+        run: |
+          terraform apply -auto-approve \
+            -target=scaleway_rdb_instance.main \
+            -target=scaleway_rdb_acl.main \
+            -var "project_id=$SCW_DEFAULT_PROJECT_ID" -var "image_tag=${GITHUB_SHA::12}"
+
       - name: Apply 1 — base de données, secrets, litellm, api
         run: |
           terraform apply -auto-approve \
