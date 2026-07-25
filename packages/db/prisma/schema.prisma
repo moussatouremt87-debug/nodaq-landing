@@ -24,6 +24,7 @@ model Tenant {
   connectors  Connector[]
   documents       Document[]
   documentChunks  DocumentChunk[]
+  pendingActions  PendingAction[]
 
   @@map("tenants")
 }
@@ -270,4 +271,32 @@ model DocumentChunk {
   // as an externally-managed table in `prisma.config.ts` (`tables.external`) so
   // `prisma migrate dev` doesn't perpetually try to reconcile/drop it as drift.
   @@map("document_chunks")
+}
+
+/// Human-in-the-loop validation queue (blueprint §5.4/§6, CLAUDE.md rule 4): every
+/// write-side MCP tool (`send_*`, `create_*`, `submit_*`) creates a `PendingAction`
+/// instead of executing directly. A human validates it in one click; `validatedBy`
+/// is the legal attribution of who approved it. Sealed by RLS (see the migration
+/// `rls_pending_actions`).
+model PendingAction {
+  id           String    @id @default(uuid()) @db.Uuid
+  tenantId     String    @map("tenant_id") @db.Uuid
+  /// e.g. 'book_invoice', 'send_dunning' — validated app-side by Zod.
+  type         String
+  /// The prepared action, ready to execute after approval.
+  payload      Json
+  /// 'pending' | 'approved' | 'rejected' | 'executed'
+  status       String    @default("pending")
+  /// The user or agent run that prepared the action.
+  requestedBy  String?   @map("requested_by") @db.Uuid
+  /// The HUMAN who clicked to approve/reject — legal attribution, never an agent.
+  validatedBy  String?   @map("validated_by") @db.Uuid
+  validatedAt  DateTime? @map("validated_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at")
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("pending_actions")
 }

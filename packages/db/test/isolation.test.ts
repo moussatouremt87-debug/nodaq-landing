@@ -23,6 +23,8 @@ let documentAId: string;
 let documentBId: string;
 let documentChunkAId: string;
 let documentChunkBId: string;
+let pendingActionAId: string;
+let pendingActionBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -30,6 +32,7 @@ beforeAll(async () => {
   await admin.classification.deleteMany();
   await admin.tenantPolicy.deleteMany();
   await admin.connector.deleteMany();
+  await admin.pendingAction.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -145,6 +148,29 @@ beforeAll(async () => {
   );
   documentChunkAId = documentChunkA.id;
   documentChunkBId = documentChunkB.id;
+
+  // payload est l'action préparée (jamais exécutée avant validation humaine) —
+  // placeholder de test, jamais une vraie donnée client.
+  const pendingActionA = await withTenant(tenantA, (tx) =>
+    tx.pendingAction.create({
+      data: {
+        tenantId: tenantA,
+        type: "book_invoice",
+        payload: { invoiceId: "inv-a-1" },
+      },
+    }),
+  );
+  const pendingActionB = await withTenant(tenantB, (tx) =>
+    tx.pendingAction.create({
+      data: {
+        tenantId: tenantB,
+        type: "send_dunning",
+        payload: { invoiceId: "inv-b-1" },
+      },
+    }),
+  );
+  pendingActionAId = pendingActionA.id;
+  pendingActionBId = pendingActionB.id;
 });
 
 afterAll(async () => {
@@ -204,6 +230,14 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur document_chunks", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'document_chunks'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur pending_actions", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'pending_actions'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -393,6 +427,39 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (pending_actions) — withTenant(A) ne voit QUE les pending actions de A", async () => {
+    const pendingActions = await withTenant(tenantA, (tx) => tx.pendingAction.findMany());
+    expect(pendingActions).toHaveLength(1);
+    expect(pendingActions[0]?.id).toBe(pendingActionAId);
+    expect(pendingActions.some((p) => p.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (pending_actions) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const pendingActions = await prisma.pendingAction.findMany();
+    expect(pendingActions).toHaveLength(0);
+  });
+
+  it("test 3 (pending_actions) — lire la pending action de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.pendingAction.findUnique({ where: { id: pendingActionBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (pending_actions) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.pendingAction.create({
+          data: {
+            tenantId: tenantB,
+            type: "intrusion",
+            payload: { invoiceId: "intrusion" },
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -512,5 +579,25 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const chunks = await withTenant(tenantA, (tx) => tx.documentChunk.findMany());
     expect(chunks).toHaveLength(1);
+  });
+
+  it("policy désactivée sur pending_actions => la fuite se produit aussi (la file de validation human-in-the-loop devient visible entre tenants)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "pending_actions" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.pendingAction.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((p) => p.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.pendingAction.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "pending_actions" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "pending_actions" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const pendingActions = await withTenant(tenantA, (tx) => tx.pendingAction.findMany());
+    expect(pendingActions).toHaveLength(1);
   });
 });
