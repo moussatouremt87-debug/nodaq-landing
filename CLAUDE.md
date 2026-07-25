@@ -1,69 +1,158 @@
-# NODAQ — Assistant IA souverain PME — contexte projet
+# Assistant IA souverain PME — contexte projet
 
-> Blueprint complet : voir `blueprint-technique-v2.md` (architecture, stack, plan de build).
-> État : monorepo initialisé (ticket 0.1 — fondations + socle multi-tenant RLS).
-> La landing page historique reste dans `index.html`.
+Plateforme SaaS d'employés virtuels (agents IA) pour PME françaises. Souveraineté des
+données (France/UE), architecture agentique, multi-tenant strict. Voir
+`blueprint-technique-v2.md` pour l'architecture cible complète.
+
+> **Langue** : code, identifiants et commentaires techniques en anglais ; docs produit en français.
+
+> **État du repo** : tickets 0.1 (monorepo + RLS `notes`) et 0.2 (better-auth
+> email+password) livrés. L'auth actuelle utilise une table `memberships` custom et le
+> header `x-tenant-id` comme sélecteur contrôlé ; le **plugin organization** de
+> better-auth (organisation active de session, décrit ci-dessous) est la cible — à
+> brancher lors d'un prochain ticket. La landing page historique reste dans `index.html`.
+
+---
 
 ## Stack
-- Monorepo pnpm workspaces + Turborepo. TypeScript strict, ESM, Node 20+.
-- `apps/api` : Fastify (ADR-003 tranché Fastify au ticket 0.1) — health + notes RLS.
-- `packages/shared` : types + schémas Zod partagés (TenantId, CreateNoteInput...).
-- `packages/db` : Prisma + Postgres, helper `withTenant`, client admin séparé.
-- `services/` : futurs micro-services Python (uv) — rag, ml, ocr.
-- Cible : Next.js (web), agent-runtime (@anthropic-ai/claude-agent-sdk), LiteLLM,
-  Qdrant, Redis, Object Storage — voir blueprint §3.
+
+- **Monorepo** : pnpm workspaces + Turborepo. `apps/*`, `packages/*`, `services/*`, `mcp-servers/*`.
+- **TypeScript** (app) : strict, ESM, Node 20+. API en **Fastify**. ORM **Prisma**. Validation **Zod**. Tests **Vitest**.
+- **Python** (data/ML) : `uv` + **FastAPI**. `services/{rag,ml,ocr}`. Typé, **mypy** + **ruff**.
+- **Agents** : `@anthropic-ai/claude-agent-sdk` (headless) dans `apps/agent-runtime`.
+- **Modèles** : via **LiteLLM** (jamais d'appel LLM en direct). Fournisseurs souverains : Scaleway Generative APIs / Managed Inference, Mistral EU.
+- **Données** : PostgreSQL + pgvector, Redis, Qdrant, Object Storage (S3). En prod : **Scaleway, région FR-PAR**. Local : `ops/docker-compose.yml`.
+- **Auth** : better-auth + plugin organization (`organization` = tenant, `member` = membership).
+- **Workflows** : BullMQ (démarrage) → Temporal (à l'échelle). **Observabilité** : Langfuse + OpenTelemetry.
+
+---
 
 ## Commandes
-- Stack locale (PG+pgvector, Redis, Qdrant, MinIO, LiteLLM, Langfuse) :
-  `cd ops && cp .env.example .env && docker compose up -d` (détails : `ops/README.md`)
-- Setup : `cp .env.example .env && cp packages/db/.env.example packages/db/.env`
-- Install : `pnpm install` | Build : `pnpm build` | Dev API : `pnpm --filter @nodaq/api dev`
-- Tests : `pnpm test` (sérialisés — base réelle partagée) | Lint : `pnpm lint` | Types : `pnpm typecheck`
-- Migrations : `pnpm db:migrate` (dev) / `pnpm db:migrate:deploy` (CI/prod) / `pnpm db:reset`
-- Landing actuelle : ouvrir `index.html` directement (page statique, aucun build).
 
-## Multi-tenant : le pattern withTenant (OBLIGATOIRE)
-- Deux rôles Postgres : `postgres` (admin — migrations/seeds SEULEMENT, bypass la RLS)
-  et `app_user` (non-superuser, NOBYPASSRLS — tout le runtime). L'app ne tourne
-  JAMAIS en admin, sinon la RLS est silencieusement bypassée.
-- Toute requête sur une table métier passe par `withTenant(tenantId, fn)`
-  (`packages/db/src/index.ts`) : transaction + `set_config('app.current_tenant_id',
-  id, true)` (portée transaction — sûr avec le pooling). Jamais de `prisma.note.*`
-  hors `withTenant`.
-- **Toute nouvelle table métier ⇒** `tenant_id uuid` non nullable + index, RLS
-  `ENABLE` + `FORCE` + policy `tenant_isolation` (pattern dans la migration
-  `rls_notes`), **et un test d'isolation** dans `packages/db/test/` qui prouve que
-  la fuite se produit si on désactive la RLS.
-- Le tenant vient du header `x-tenant-id` (validé Zod) — provisoire, remplacé par
-  la session auth au ticket 0.2.
+```bash
+# Infra locale (obligatoire avant tout)
+cd ops && cp .env.example .env && docker compose up -d
+
+# Dev
+pnpm install
+pnpm dev                      # tous les services (Turborepo)
+pnpm --filter @nodaq/api dev  # un seul service
+
+# Qualité (à lancer après chaque étape)
+pnpm lint && pnpm typecheck && pnpm test
+uv run ruff check && uv run mypy && uv run pytest    # côté Python
+
+# Base
+pnpm db:migrate               # applique migrations Prisma + policies RLS
+pnpm db:reset                 # reset complet (dev)
+```
+
+---
 
 ## Règles NON négociables
-- Souveraineté : aucune donnée `confidentiel` ne sort du tier souverain. Toujours
-  passer par packages/classifier ; jamais d'appel LLM en direct.
-- Multi-tenant : toute requête DB passe par `withTenant` (RLS). Test d'isolation
-  pour toute nouvelle table.
-- Human-in-the-loop : tout outil d'écriture/envoi crée une pending_action, il
-  n'exécute jamais directement.
-- Secrets : jamais en clair, jamais commités. Lire via Secret Manager (dev : `.env`
-  gitignorés, valeurs par défaut = stack `ops/` uniquement).
-- Style : TS strict, Zod pour toute frontière ; Python typé + mypy.
 
-## Gotchas
-- Un superuser Postgres bypass la RLS : les tests d'isolation vérifient que le
-  client applicatif n'est ni `rolsuper` ni `rolbypassrls` — ne pas retirer ce garde-fou.
-- `set_config(..., true)` DOIT rester dans une transaction (un `SET` global fuit
-  entre requêtes à cause du pooling Prisma).
-- L'extension `vector` est activée par `ops/db/init` — ne pas la recréer.
-- `pnpm test` tourne avec `--concurrency=1` : les suites db et api partagent la
-  même base ; ne pas re-paralléliser.
-- Les serveurs MCP d'écriture doivent déclarer `requiresValidation: true`.
-- Ne pas appeler les services Python depuis le front : passer par l'API.
-- La landing (`index.html`) est autonome et en français — ne pas y introduire de
-  dépendances de build.
+1. **Souveraineté** : aucune donnée classée `confidentiel` ne sort du tier souverain.
+   Tout appel modèle passe par `packages/classifier` puis LiteLLM — **jamais** un SDK
+   fournisseur en direct depuis le code métier.
+2. **Isolation multi-tenant (2 couches, toujours les deux)** :
+   - **DB** : Row-Level Security active. Le seul accès aux données métier est
+     `withTenant(tenantId, fn)` (transaction + `set_config('app.current_tenant_id', …, true)`).
+   - **App** : chaîne d'autorisation obligatoire avant `withTenant` :
+     `requireAuth → resolveTenant → requireMembership → withTenant`.
+3. **Le `tenantId` vient de la session** (organisation active), jamais d'un input client
+   non recontrôlé contre les memberships de l'utilisateur.
+4. **Human-in-the-loop** : tout outil MCP d'écriture/envoi (`send_*`, `create_*`,
+   `submit_*`) crée une `pending_action` à valider en 1 clic — il n'exécute **jamais**
+   directement.
+5. **Secrets** : jamais en clair, jamais commités. Lus depuis `.env` (dev) / Secret
+   Manager (prod). Ne jamais logger un secret ni le contenu d'une donnée sensible.
+6. **Toute nouvelle table métier** ⇒ colonne `tenantId` + policy RLS + **test
+   d'isolation** (le test doit échouer si on retire la policy).
 
-## Workflow de développement
-- Un ticket du plan (§9 du blueprint) à la fois : plan → tests → code → vérif.
-- Features parallèles en `git worktree`.
-- Passer le sous-agent `rgpd-security-reviewer` sur tout diff touchant données/tenants.
-- CI (`.github/workflows/ci.yml`) : Postgres de service (pgvector), migrations,
-  lint + typecheck + tests — les tests d'isolation sont bloquants.
+---
+
+## Pattern `withTenant` (accès données)
+
+```ts
+// Seule porte d'accès aux tables métier. Pose le tenant DANS la transaction
+// (portée locale) — indispensable à cause du pooling Prisma.
+await withTenant(tenantId, async (tx) => {
+  return tx.note.findMany();   // RLS scelle automatiquement au tenant
+});
+```
+
+## Chaîne d'autorisation (routes métier)
+
+```
+requireAuth        -> valide la session better-auth, sinon 401
+resolveTenant      -> tenant visé = organisation active de la session
+requireMembership  -> vérifie EN BASE que l'user est membre du tenant, sinon 403
+withTenant(id, …)  -> ouvre l'accès données (RLS = dernier rempart)
+```
+
+Rôles : `OWNER | MEMBER | ACCOUNTANT`. `ACCOUNTANT` = accès délégué multi-tenants
+(expert-comptable) : membre de plusieurs organisations clientes. `requireRole([...])`
+pour les actions sensibles (ex. inviter un membre = OWNER).
+
+---
+
+## Conventions
+
+- **Frontières typées** : toute entrée externe (HTTP, webhook, sortie LLM) validée par Zod.
+- **Types partagés** dans `packages/shared` ; ne pas dupliquer les types entre app et tests.
+- **Tests** : Postgres réel (pas de mock DB) pour tout ce qui touche RLS/tenant. Un
+  test d'isolation par table métier. Vitest côté TS, pytest côté Python.
+- **Outils MCP** : un outil = un schéma Zod d'entrée/sortie + garde-fous. Les outils
+  d'écriture déclarent `requiresValidation: true`.
+- **Migrations** : Prisma pour le schéma ; les policies RLS et rôles Postgres dans une
+  migration SQL dédiée qui suit. Utiliser le skill `/add-migration`.
+- **Commits** : Conventional Commits (`feat:`, `fix:`, `chore:`…). Une PR = un ticket.
+
+---
+
+## Gotchas (pièges déjà rencontrés)
+
+- **Superuser bypass la RLS.** L'app tourne avec un rôle Postgres **non super-user**
+  (`app_user`). Le user `postgres` ignore les policies — ne jamais faire tourner l'app
+  avec.
+- **Pooling Prisma + `SET`.** Un `SET` hors transaction fuit entre requêtes. Toujours
+  `set_config(..., true)` **dans** la transaction (`withTenant`).
+- **Session ≠ autorisation.** Être connecté ne donne aucun droit sur un tenant ;
+  `requireMembership` est obligatoire avant `withTenant`.
+- **pgvector déjà activé** par `ops/db/init` — ne pas recréer l'extension.
+- **Port ClickHouse (9000)** laissé interne dans le compose pour ne pas entrer en
+  conflit avec MinIO.
+- **Ne pas appeler les services Python depuis le front** : toujours passer par l'API.
+
+---
+
+## Méthode de travail
+
+1. **Plan mode d'abord** pour tout ticket non trivial (lis ce fichier + le blueprint + le ticket).
+2. **TDD** : écrire le test qui échoue, puis le code jusqu'au vert.
+3. **Isolation** : une feature = une branche / un `git worktree`. Une PR = un ticket.
+4. **Avant de considérer une tâche finie** : `pnpm lint && pnpm typecheck && pnpm test`
+   verts (+ équivalents Python), et l'éval du workflow concerné si applicable.
+5. **Sécurité/RGPD** : sur tout diff touchant données/tenant/auth, passer le sous-agent
+   `rgpd-security-reviewer` avant merge.
+
+---
+
+## Structure du repo (rappel)
+
+```
+apps/      web (Next.js) · api (Fastify) · agent-runtime (Claude Agent SDK)
+services/  rag · ml · ocr           (Python / FastAPI)
+mcp-servers/ connectors · actions · einvoice   (outils métier MCP)
+packages/  shared · classifier · db · llm
+infra/     Terraform (Scaleway)     ops/  docker-compose local
+.claude/   agents · skills · settings.json
+```
+
+## À NE PAS faire
+
+- Appeler un SDK LLM fournisseur en direct (toujours LiteLLM via le classifier).
+- Lire/écrire une table métier hors `withTenant`.
+- Faire confiance à un `tenantId` venu du client sans contrôle d'appartenance.
+- Exécuter une action d'écriture agentique sans passer par la file de validation.
+- Committer un secret, ou logger de la donnée client sensible.
