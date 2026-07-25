@@ -3,10 +3,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { withTenant } from "@nodaq/db";
+import { route } from "@nodaq/llm";
+import { getPennylaneClient, getQontoClient } from "@nodaq/mcp-connectors";
+import type { RegistryOptions } from "@nodaq/mcp-connectors";
 import { TenantId } from "@nodaq/shared";
+import { scoreLatePayment } from "./dunning.js";
 import { extractInvoiceFields } from "./invoiceExtraction.js";
 import type { OcrClientOptions } from "./ocrClient.js";
 import { extractInvoiceText } from "./ocrClient.js";
+import { forecastTreasury } from "./treasury.js";
+import type { TreasuryTransaction } from "./treasury.js";
 
 /*
  * Business-action MCP server (blueprint §5.5). One instance = ONE tenant,
@@ -19,7 +25,7 @@ import { extractInvoiceText } from "./ocrClient.js";
  * (validatedBy) for legal attribution.
  */
 
-export interface ActionsServerContext extends OcrClientOptions {
+export interface ActionsServerContext extends OcrClientOptions, RegistryOptions {
   tenantId: string;
   /** User or agent-run that prepares the actions (traceability — RGPD audit 1.4). */
   requestedBy?: string;
@@ -36,7 +42,15 @@ type NodaqToolAnnotations = ToolAnnotations & { requiresValidation: boolean };
  */
 export const TOOL_POLICIES = {
   ocr_and_book_invoice: { requiresValidation: true },
+  draft_dunning: { requiresValidation: true },
+  compute_treasury_forecast: { requiresValidation: false },
 } as const satisfies Record<string, { requiresValidation: boolean }>;
+
+const DUNNING_PROMPT =
+  "Rédige un e-mail de relance courtois mais ferme pour une facture impayée d'une PME " +
+  "française. Ton professionnel, rappel des références et du montant, demande de " +
+  "règlement sous 7 jours, mention des pénalités légales de retard (art. L441-10). " +
+  "Réponds UNIQUEMENT avec le texte de l'e-mail (pas de commentaire).\n\nFaits :\n";
 
 export function createActionsMcpServer(context: ActionsServerContext): McpServer {
   const tenantId = TenantId.parse(context.tenantId);
@@ -96,6 +110,149 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
             text: JSON.stringify({
               pendingActionId: pendingAction.id,
               status: "pending_validation",
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "compute_treasury_forecast",
+    {
+      description:
+        "Prévision de trésorerie 30/60/90 jours (lecture seule) : solde Qonto actuel " +
+        "projeté avec le flux net journalier moyen observé sur les transactions.",
+      inputSchema: {
+        accountSlug: z
+          .string()
+          .optional()
+          .describe("Slug du compte Qonto (défaut : premier compte)"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ accountSlug }) => {
+      const qonto = await getQontoClient(tenantId, context);
+      const { organization } = await qonto.getOrganization();
+      const account = accountSlug
+        ? organization.bank_accounts.find((a) => a.slug === accountSlug)
+        : organization.bank_accounts[0];
+      if (!account?.iban) {
+        throw new Error(`unknown bank account${accountSlug ? ` "${accountSlug}"` : ""}`);
+      }
+      const { transactions } = await qonto.listTransactions({ iban: account.iban, perPage: 100 });
+      if (account.balance_cents == null) {
+        // A missing balance must not silently become a zero-balance forecast.
+        throw new Error(`bank account "${account.slug}" has no balance available`);
+      }
+      const usable: TreasuryTransaction[] = transactions.flatMap((t) =>
+        t.amount_cents != null && t.settled_at && (t.side === "credit" || t.side === "debit")
+          ? [{ amountCents: t.amount_cents, side: t.side, settledAt: t.settled_at }]
+          : [],
+      );
+      const forecast = forecastTreasury(account.balance_cents, usable, new Date());
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ account: account.slug, ...forecast }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "draft_dunning",
+    {
+      description:
+        "Prépare une relance d'impayé : score de risque + brouillon d'e-mail (généré en " +
+        "tier souverain) déposés dans la file de validation. N'ENVOIE JAMAIS la relance : " +
+        "un humain valide en 1 clic (requiresValidation).",
+      inputSchema: {
+        invoiceId: z.string().min(1).max(100).describe("Id Pennylane de la facture impayée"),
+      },
+      annotations,
+    },
+    async ({ invoiceId }) => {
+      const pennylane = await getPennylaneClient(tenantId, context);
+      const { items } = await pennylane.listCustomerInvoices({ limit: 100 });
+      const invoice = items.find((i) => i.id === invoiceId);
+      if (!invoice) {
+        throw new Error(`invoice "${invoiceId}" not found`);
+      }
+
+      // Financial data feeding a write action is validated, never defaulted:
+      // a silent "0 EUR / 0 days overdue" pending action would mislead the
+      // human validator (RGPD audit 1.5).
+      const UNPAID_STATUSES = new Set(["late", "overdue", "unpaid", "pending"]);
+      if (!invoice.status || !UNPAID_STATUSES.has(invoice.status)) {
+        throw new Error(
+          `invoice "${invoiceId}" is not eligible for dunning (status: ${invoice.status ?? "unknown"})`,
+        );
+      }
+      const amountCents = Math.round(Number.parseFloat(String(invoice.amount)) * 100);
+      if (!Number.isFinite(amountCents) || amountCents <= 0) {
+        throw new Error(`invoice "${invoiceId}" has no readable amount`);
+      }
+      const dueDate = invoice.deadline;
+      if (!dueDate) {
+        throw new Error(`invoice "${invoiceId}" has no due date`);
+      }
+      const risk = scoreLatePayment(
+        {
+          invoiceNumber: invoice.invoice_number ?? null,
+          amountCents,
+          dueDate,
+          status: invoice.status,
+        },
+        new Date(),
+      );
+
+      // Sovereign draft via route() — confidentiel, audited (hash only).
+      const requestId = `dunning-${randomUUID()}`;
+      const facts =
+        `Facture ${invoice.invoice_number ?? invoice.id}, montant ${amountCents / 100} ` +
+        `${invoice.currency ?? "EUR"}, échéance ${dueDate}, ` +
+        `retard ${risk.daysOverdue} jours.`;
+      const draft = await route({
+        text: DUNNING_PROMPT + facts,
+        category: "confidentiel",
+        tenantId,
+        requestId,
+      });
+
+      // PREPARE, never send: the draft lives in the validation queue only.
+      const pendingAction = await withTenant(tenantId, (tx) =>
+        tx.pendingAction.create({
+          data: {
+            tenantId,
+            type: "send_dunning",
+            requestedBy: context.requestedBy ?? null,
+            payload: {
+              invoice: {
+                id: invoice.id,
+                number: invoice.invoice_number ?? null,
+                amountCents,
+                currency: invoice.currency ?? "EUR",
+                dueDate,
+              },
+              risk,
+              draft: draft.text,
+              extraction: { requestId },
+            },
+          },
+        }),
+      );
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              pendingActionId: pendingAction.id,
+              status: "pending_validation",
+              riskBand: risk.band,
             }),
           },
         ],

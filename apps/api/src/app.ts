@@ -1,7 +1,8 @@
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { z } from "zod";
 import { prisma, withTenant } from "@nodaq/db";
-import { CreateNoteInput, TenantId } from "@nodaq/shared";
+import { CreateNoteInput, TenantId, Uuid } from "@nodaq/shared";
 import { auth } from "./auth.js";
 
 type AuthSession = NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>;
@@ -10,6 +11,7 @@ declare module "fastify" {
   interface FastifyRequest {
     authSession: AuthSession;
     tenantId: string;
+    membershipRole: string;
   }
 }
 
@@ -59,15 +61,25 @@ async function requireMembership(request: FastifyRequest, reply: FastifyReply): 
   // already did — a stale or tampered session must never open another tenant.
   const membership = await prisma.membership.findUnique({
     where: { tenantId_userId: { tenantId: request.tenantId, userId: request.authSession.user.id } },
-    select: { id: true },
+    select: { id: true, role: true },
   });
   if (!membership) {
     await reply.code(403).send({ error: "not a member of the active organization" });
     return;
   }
+  request.membershipRole = membership.role;
 }
 
 const businessRoute = [requireAuth, resolveTenant, requireMembership];
+
+/** Sensitive actions gate (CLAUDE.md): role checked from the DB membership. */
+function requireRole(roles: string[]) {
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    if (!roles.includes(request.membershipRole)) {
+      await reply.code(403).send({ error: `requires role: ${roles.join(" | ")}` });
+    }
+  };
+}
 
 export function buildApp(): FastifyInstance {
   const app = Fastify({ logger: process.env.NODE_ENV !== "test" });
@@ -108,6 +120,96 @@ export function buildApp(): FastifyInstance {
       memberships,
     };
   });
+
+  /*
+   * 1-click validation queue (CLAUDE.md rule #4). Agents PREPARE pending
+   * actions; only a HUMAN approves or rejects here — validatedBy records who,
+   * for legal attribution. State machine: pending -> approved | rejected.
+   * Approval/rejection = sensitive action => OWNER only.
+   */
+
+  // List = metadata ONLY: payloads carry confidential drafts/invoice data,
+  // reserved to the owner-gated detail endpoint (RGPD audit 1.5 — the
+  // `accountant` role is a delegated third party).
+  app.get("/pending-actions", { preHandler: businessRoute }, async (request) => {
+    return withTenant(request.tenantId, (tx) =>
+      tx.pendingAction.findMany({
+        orderBy: { createdAt: "desc" },
+        take: 100,
+        select: {
+          id: true,
+          type: true,
+          status: true,
+          requestedBy: true,
+          validatedBy: true,
+          validatedAt: true,
+          createdAt: true,
+        },
+      }),
+    );
+  });
+
+  app.get(
+    "/pending-actions/:id",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const params = z.object({ id: Uuid }).safeParse(request.params);
+      if (!params.success) {
+        return reply.code(400).send({ error: "invalid pending action id" });
+      }
+      const action = await withTenant(request.tenantId, (tx) =>
+        tx.pendingAction.findUnique({ where: { id: params.data.id } }),
+      );
+      if (!action) return reply.code(404).send({ error: "pending action not found" });
+      return reply.send(action);
+    },
+  );
+
+  const decide = (decision: "approved" | "rejected") =>
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const params = z.object({ id: Uuid }).safeParse(request.params);
+      if (!params.success) {
+        return reply.code(400).send({ error: "invalid pending action id" });
+      }
+      const { count } = await withTenant(request.tenantId, (tx) =>
+        tx.pendingAction.updateMany({
+          where: { id: params.data.id, status: "pending" },
+          data: {
+            status: decision,
+            validatedBy: request.authSession.user.id,
+            validatedAt: new Date(),
+          },
+        }),
+      );
+      if (count === 0) {
+        // RLS-scoped: an id from another tenant is indistinguishable from a
+        // missing one (404); an already-processed one is a conflict (409).
+        const exists = await withTenant(request.tenantId, (tx) =>
+          tx.pendingAction.findUnique({ where: { id: params.data.id }, select: { status: true } }),
+        );
+        if (!exists) return reply.code(404).send({ error: "pending action not found" });
+        return reply.code(409).send({ error: `already ${exists.status}` });
+      }
+      const updated = await withTenant(request.tenantId, (tx) =>
+        tx.pendingAction.findUnique({
+          where: { id: params.data.id },
+          select: { id: true, type: true, status: true, validatedBy: true, validatedAt: true },
+        }),
+      );
+      return reply.send(updated);
+    };
+
+  app.post(
+    "/pending-actions/:id/approve",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    decide("approved"),
+  );
+
+  app.post(
+    "/pending-actions/:id/reject",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    decide("rejected"),
+  );
 
   app.get("/notes", { preHandler: businessRoute }, async (request) => {
     return withTenant(request.tenantId, (tx) =>

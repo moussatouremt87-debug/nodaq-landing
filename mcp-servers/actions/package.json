@@ -18,6 +18,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@nodaq/db": "workspace:*",
+    "@nodaq/mcp-connectors": "workspace:*",
     "@nodaq/llm": "workspace:*",
     "@nodaq/shared": "workspace:*",
     "zod": "^3.24.1"

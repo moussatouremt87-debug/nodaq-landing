@@ -54,21 +54,90 @@ let admin: PrismaClient;
 let tenantId: string;
 const REQUESTED_BY = "11111111-2222-4333-8444-555555555555";
 
+// Fake Qonto + Pennylane behind the connectors registry (namespaced vault refs).
+const fakeSaas = createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" });
+  const path = req.url ?? "";
+  if (path.startsWith("/organization")) {
+    res.end(
+      JSON.stringify({
+        organization: {
+          slug: "org-t",
+          bank_accounts: [
+            { slug: "main", iban: "FR7616798000010000012345678", currency: "EUR", balance_cents: 100_000 },
+          ],
+        },
+      }),
+    );
+  } else if (path.startsWith("/transactions")) {
+    res.end(
+      JSON.stringify({
+        transactions: [
+          { transaction_id: "t1", amount_cents: 90_000, side: "credit", settled_at: "2026-06-25T12:00:00Z" },
+          { transaction_id: "t2", amount_cents: 60_000, side: "debit", settled_at: "2026-07-10T12:00:00Z" },
+        ],
+        meta: { current_page: 1 },
+      }),
+    );
+  } else if (path.startsWith("/customer_invoices")) {
+    res.end(
+      JSON.stringify({
+        items: [
+          {
+            id: "inv-42",
+            invoice_number: "F-2026-042",
+            amount: "1200.00",
+            currency: "EUR",
+            date: "2026-05-01",
+            deadline: "2026-06-01",
+            status: "late",
+          },
+        ],
+        next_cursor: null,
+      }),
+    );
+  } else {
+    res.end("{}");
+  }
+});
+
+const vaultEntries: Record<string, string> = {};
+const vault = {
+  get: (name: string) => Promise.resolve(vaultEntries[name]),
+};
+
 beforeAll(async () => {
   await new Promise<void>((resolve) => fakeOcr.listen(0, "127.0.0.1", resolve));
   await new Promise<void>((resolve) => fakeLiteLlm.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => fakeSaas.listen(0, "127.0.0.1", resolve));
   process.env.LITELLM_BASE_URL = `http://127.0.0.1:${(fakeLiteLlm.address() as AddressInfo).port}`;
   process.env.LITELLM_MASTER_KEY = "sk-test";
 
   admin = createAdminClient();
   await admin.pendingAction.deleteMany({ where: { tenant: { name: "Actions T" } } });
+  await admin.connector.deleteMany({ where: { tenant: { name: "Actions T" } } });
   await admin.tenant.deleteMany({ where: { name: "Actions T" } });
   tenantId = (await admin.tenant.create({ data: { name: "Actions T" } })).id;
+
+  vaultEntries[`connector/${tenantId}/qonto`] = JSON.stringify({
+    organizationSlug: "org-t",
+    secretKey: "sk-q",
+  });
+  vaultEntries[`connector/${tenantId}/pennylane`] = JSON.stringify({ apiKey: "pk-t" });
+  await withTenant(tenantId, (tx) =>
+    tx.connector.createMany({
+      data: [
+        { tenantId, type: "qonto", credentialsRef: `connector/${tenantId}/qonto` },
+        { tenantId, type: "pennylane", credentialsRef: `connector/${tenantId}/pennylane` },
+      ],
+    }),
+  );
 });
 
 afterAll(async () => {
   fakeOcr.close();
   fakeLiteLlm.close();
+  fakeSaas.close();
   await admin.$disconnect();
   await prisma.$disconnect();
 });
@@ -80,11 +149,15 @@ beforeEach(() => {
 });
 
 function connectedClient() {
+  const saasBase = `http://127.0.0.1:${(fakeSaas.address() as AddressInfo).port}`;
   const server = createActionsMcpServer({
     tenantId,
     requestedBy: REQUESTED_BY,
     baseUrl: `http://127.0.0.1:${(fakeOcr.address() as AddressInfo).port}`,
     token: "test-ocr-token",
+    secretProvider: vault,
+    qontoBaseUrl: saasBase,
+    pennylaneBaseUrl: saasBase,
   });
   const client = new Client({ name: "test-client", version: "0.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -104,6 +177,10 @@ describe("ocr_and_book_invoice — human-in-the-loop", () => {
     // contract lives in the exported TOOL_POLICIES registry.
     const { TOOL_POLICIES } = await import("../src/server.js");
     expect(TOOL_POLICIES.ocr_and_book_invoice.requiresValidation).toBe(true);
+    expect(TOOL_POLICIES.draft_dunning.requiresValidation).toBe(true);
+    expect(TOOL_POLICIES.compute_treasury_forecast.requiresValidation).toBe(false);
+    const dunningTool = tools.tools.find((t) => t.name === "draft_dunning");
+    expect(dunningTool?.annotations?.readOnlyHint).toBe(false);
     expect(JSON.stringify(tool?.inputSchema)).not.toContain("tenantId");
   });
 
@@ -154,6 +231,65 @@ describe("ocr_and_book_invoice — human-in-the-loop", () => {
     });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result.content)).toContain("HTTP 500");
+    const after = await withTenant(tenantId, (tx) => tx.pendingAction.count());
+    expect(after).toBe(before);
+  });
+
+  it("compute_treasury_forecast is read-only and projects from Qonto data", async () => {
+    const client = await connectedClient();
+    const tools = await client.listTools();
+    const tool = tools.tools.find((t) => t.name === "compute_treasury_forecast");
+    expect(tool?.annotations?.readOnlyHint).toBe(true);
+
+    const result = await client.callTool({ name: "compute_treasury_forecast", arguments: {} });
+    const parsed = JSON.parse((result.content as { text: string }[])[0]!.text) as {
+      account: string;
+      currentBalanceCents: number;
+      points: { horizonDays: number; projectedBalanceCents: number }[];
+    };
+    expect(parsed.account).toBe("main");
+    expect(parsed.currentBalanceCents).toBe(100_000);
+    expect(parsed.points.map((p) => p.horizonDays)).toEqual([30, 60, 90]);
+    // No pending_action for a read tool.
+  });
+
+  it("draft_dunning PREPARES a send_dunning pending_action with the sovereign draft", async () => {
+    modelAnswer = "Bonjour,\n\nSauf erreur de notre part, la facture F-2026-042 reste impayée...";
+    const client = await connectedClient();
+    const result = await client.callTool({
+      name: "draft_dunning",
+      arguments: { invoiceId: "inv-42" },
+    });
+
+    const text = (result.content as { text: string }[])[0]!.text;
+    const parsed = JSON.parse(text) as { pendingActionId: string; status: string; riskBand: string };
+    expect(parsed.status).toBe("pending_validation");
+    expect(["medium", "high"]).toContain(parsed.riskBand);
+    // Minimization: the draft (confidentiel) does NOT come back in the context.
+    expect(text).not.toContain("Sauf erreur de notre part");
+
+    const rows = await withTenant(tenantId, (tx) =>
+      tx.pendingAction.findMany({ where: { id: parsed.pendingActionId } }),
+    );
+    expect(rows[0]).toMatchObject({ type: "send_dunning", status: "pending", validatedBy: null });
+    const payload = rows[0]!.payload as {
+      invoice: { number: string; amountCents: number };
+      risk: { band: string };
+      draft: string;
+    };
+    expect(payload.invoice).toMatchObject({ number: "F-2026-042", amountCents: 120_000 });
+    expect(payload.draft).toContain("Sauf erreur de notre part");
+    expect(modelCalls.every((c) => c.model !== "frontier")).toBe(true);
+  });
+
+  it("draft_dunning on an unknown invoice => error, no pending_action", async () => {
+    const client = await connectedClient();
+    const before = await withTenant(tenantId, (tx) => tx.pendingAction.count());
+    const result = await client.callTool({
+      name: "draft_dunning",
+      arguments: { invoiceId: "nope" },
+    });
+    expect(result.isError).toBe(true);
     const after = await withTenant(tenantId, (tx) => tx.pendingAction.count());
     expect(after).toBe(before);
   });

@@ -9,6 +9,12 @@ export default defineConfig({
         new URL("../../packages/classifier/src/index.ts", import.meta.url),
       ),
       "@nodaq/llm": fileURLToPath(new URL("../../packages/llm/src/index.ts", import.meta.url)),
+      "@nodaq/mcp-connectors": fileURLToPath(
+        new URL("../connectors/src/index.ts", import.meta.url),
+      ),
+      "@nodaq/secrets": fileURLToPath(
+        new URL("../../packages/secret-manager/src/index.ts", import.meta.url),
+      ),
       "@nodaq/db/admin": fileURLToPath(new URL("../../packages/db/src/admin.ts", import.meta.url)),
       "@nodaq/db": fileURLToPath(new URL("../../packages/db/src/index.ts", import.meta.url)),
     },
