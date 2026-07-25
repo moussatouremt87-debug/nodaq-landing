@@ -1,13 +1,19 @@
+# public_endpoint normalisé en URL https (le champ peut être nu ou préfixé).
+locals {
+  web_url = startswith(scaleway_container.web.public_endpoint, "http") ? scaleway_container.web.public_endpoint : "https://${scaleway_container.web.public_endpoint}"
+  api_url = startswith(scaleway_container.api.public_endpoint, "http") ? scaleway_container.api.public_endpoint : "https://${scaleway_container.api.public_endpoint}"
+}
+
 output "web_url" {
-  value = "https://${scaleway_container.web.domain_name}"
+  value = local.web_url
 }
 
 output "api_url" {
-  value = "https://${scaleway_container.api.domain_name}"
+  value = local.api_url
 }
 
 output "litellm_url" {
-  value = "https://${scaleway_container.litellm.domain_name}"
+  value = local.litellm_url
 }
 
 output "db_host" {
