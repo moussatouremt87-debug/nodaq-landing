@@ -6,7 +6,9 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 
 > **Langue** : code, identifiants et commentaires techniques en anglais ; docs produit en français.
 
-> **État du repo** : tickets 0.1 (monorepo + RLS `notes`) et 0.2 (better-auth) livrés,
+> **État du repo** : tickets 0.1 (monorepo + RLS `notes`), 0.2 (better-auth) et
+> 0.3 (secrets : `@nodaq/secrets`, `.env` en dev → Scaleway Secret Manager en prod,
+> voir `packages/secret-manager/README.md`) livrés,
 > **plugin organization branché** : `organization` = `tenants`, `member` = `memberships`
 > (rôles `owner|member|accountant`), le tenant vient de l'organisation active de la
 > session (`activeOrganizationId`) — le header `x-tenant-id` n'existe plus. La chaîne
@@ -124,6 +126,11 @@ pour les actions sensibles (ex. inviter un membre = OWNER).
 - **Port ClickHouse (9000)** laissé interne dans le compose pour ne pas entrer en
   conflit avec MinIO.
 - **Ne pas appeler les services Python depuis le front** : toujours passer par l'API.
+- **Secrets au boot, pas à l'import.** `injectSecrets()` (`@nodaq/secrets`) doit
+  s'exécuter AVANT l'import des modules qui lisent `process.env` à l'import
+  (`@nodaq/db`, `auth.ts`) — d'où les imports dynamiques dans `server.ts`.
+- **`packages/secret-manager`** (et pas `secrets`) : la règle deny
+  `Read(**/secrets/**)` de `.claude/settings.json` bloquerait le dossier.
 
 ---
 
