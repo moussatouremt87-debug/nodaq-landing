@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@nodaq/db": "workspace:*",
+    "@nodaq/secrets": "workspace:*",
     "@nodaq/shared": "workspace:*",
     "better-auth": "^1.6.25",
     "fastify": "^5.2.0",

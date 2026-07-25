@@ -38,6 +38,9 @@ importers:
       '@nodaq/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@nodaq/secrets':
+        specifier: workspace:*
+        version: link:../../packages/secret-manager
       '@nodaq/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -70,6 +73,12 @@ importers:
       prisma:
         specifier: ^6.1.0
         version: 6.19.3(typescript@5.9.3)
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
+  packages/secret-manager:
+    devDependencies:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.1)
