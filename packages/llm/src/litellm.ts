@@ -26,6 +26,99 @@ export interface ChatMessage {
   content: string;
 }
 
+/** OpenAI-compatible tool definition (function calling). */
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  /** JSON Schema of the tool input. */
+  parameters: Record<string, unknown>;
+}
+
+/** One tool invocation requested by the assistant. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  /** Raw JSON string as returned by the model — parse and validate downstream. */
+  argumentsJson: string;
+}
+
+export interface AssistantTurn {
+  content: string | null;
+  toolCalls: ToolCall[];
+}
+
+/** Message including tool results, for the agent loop. */
+export type LoopMessage =
+  | ChatMessage
+  | {
+      role: "assistant";
+      content: string | null;
+      tool_calls?: {
+        id: string;
+        type: "function";
+        function: { name: string; arguments: string };
+      }[];
+    }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+/**
+ * Full chat-completions call with tool support. Same transport rules as
+ * chatCompletion: plain fetch, status-only errors.
+ */
+export async function chatCompletionWithTools(
+  group: ModelGroup,
+  messages: LoopMessage[],
+  tools: ToolDefinition[],
+): Promise<AssistantTurn> {
+  const { baseUrl, masterKey } = config();
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${masterKey}`,
+    },
+    body: JSON.stringify({
+      model: group,
+      messages,
+      ...(tools.length > 0
+        ? {
+            tools: tools.map((tool) => ({
+              type: "function",
+              function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
+              },
+            })),
+          }
+        : {}),
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`LiteLLM chat/completions failed for group "${group}": HTTP ${response.status}`);
+  }
+  const body = (await response.json()) as {
+    choices?: {
+      message?: {
+        content?: string | null;
+        tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[];
+      };
+    }[];
+  };
+  const message = body.choices?.[0]?.message;
+  if (!message) {
+    throw new Error(`LiteLLM returned no message for group "${group}"`);
+  }
+  return {
+    content: message.content ?? null,
+    toolCalls: (message.tool_calls ?? []).map((call, index) => ({
+      id: call.id ?? `call_${index}`,
+      name: call.function?.name ?? "",
+      argumentsJson: call.function?.arguments ?? "{}",
+    })),
+  };
+}
+
 /** Calls a LiteLLM model group. Errors carry status codes only, never payloads. */
 export async function chatCompletion(group: ModelGroup, messages: ChatMessage[]): Promise<string> {
   const { baseUrl, masterKey } = config();

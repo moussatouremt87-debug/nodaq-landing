@@ -1,27 +1,30 @@
 {
-  "name": "@nodaq/api",
+  "name": "@nodaq/agent-runtime",
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src test",
-    "dev": "tsx watch src/server.ts",
-    "start": "node dist/server.js",
     "test": "vitest run"
   },
   "dependencies": {
-    "@nodaq/agent-runtime": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@nodaq/db": "workspace:*",
-    "@nodaq/secrets": "workspace:*",
+    "@nodaq/llm": "workspace:*",
+    "@nodaq/mcp-actions": "workspace:*",
+    "@nodaq/mcp-connectors": "workspace:*",
     "@nodaq/shared": "workspace:*",
-    "better-auth": "^1.6.25",
-    "fastify": "^5.2.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "tsx": "^4.19.2",
     "vitest": "^2.1.8"
   }
 }

@@ -29,6 +29,8 @@ export interface ActionsServerContext extends OcrClientOptions, RegistryOptions 
   tenantId: string;
   /** User or agent-run that prepares the actions (traceability — RGPD audit 1.4). */
   requestedBy?: string;
+  /** Virtual employee preparing the actions (e.g. 'compta') — audit attribution. */
+  employee?: string;
 }
 
 /** requiresValidation is the repo-wide convention marker for write tools. */
@@ -91,6 +93,7 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
             tenantId,
             type: "book_invoice",
             requestedBy: context.requestedBy ?? null,
+            employee: context.employee ?? null,
             payload: {
               invoice,
               source: { filename, pages: extracted.pages },
@@ -229,6 +232,7 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
             tenantId,
             type: "send_dunning",
             requestedBy: context.requestedBy ?? null,
+            employee: context.employee ?? null,
             payload: {
               invoice: {
                 id: invoice.id,

@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { PrismaClient } from "@prisma/client";
@@ -309,8 +311,15 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       headers: { cookie: cookieA },
     });
     expect(approve.statusCode).toBe(200);
-    expect(approve.json()).toMatchObject({ status: "approved", validatedBy: aliceId });
+    // Approval is the ONLY execution point (ticket 1.6): the default executor
+    // ran (simulated) and the state machine moved pending -> approved -> executed.
+    expect(approve.json()).toMatchObject({
+      status: "executed",
+      validatedBy: aliceId,
+      result: { sent: true, simulated: true },
+    });
     expect(approve.json().validatedAt).toBeTruthy();
+    expect(approve.json().executedAt).toBeTruthy();
 
     // Double-approve => conflict, the first decision stands.
     const again = await app.inject({
@@ -358,5 +367,166 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       payload: { title: "" },
     });
     expect(res.statusCode).toBe(400);
+  });
+
+  describe("execution on approval (ticket 1.6) + agent SSE chat", () => {
+    let execApp: FastifyInstance;
+    const executed: unknown[] = [];
+    let failMode = false;
+
+    // Minimal fake LiteLLM: the model always answers directly (no tool calls),
+    // enough to drive the SSE endpoint end to end.
+    const fakeLiteLlm = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            choices: [
+              { message: { content: "Relance préparée, en attente de validation humaine." } },
+            ],
+          }),
+        );
+      });
+    });
+
+    beforeAll(async () => {
+      await new Promise<void>((resolve) => fakeLiteLlm.listen(0, "127.0.0.1", resolve));
+      process.env.LITELLM_BASE_URL = `http://127.0.0.1:${(fakeLiteLlm.address() as AddressInfo).port}`;
+      process.env.LITELLM_MASTER_KEY = "sk-test";
+      execApp = buildApp({
+        executors: {
+          spy_action: (payload) => {
+            if (failMode) return Promise.reject(new RangeError("boom: contenu-confidentiel"));
+            executed.push(payload);
+            return Promise.resolve({ ok: true });
+          },
+        },
+        agentContext: {
+          secretProvider: { get: () => Promise.resolve(undefined) },
+          ragBaseUrl: "http://127.0.0.1:9", // never reached: the script has no tool call
+          ragToken: "test-token",
+        },
+      });
+      await execApp.ready();
+    });
+
+    afterAll(async () => {
+      fakeLiteLlm.close();
+      await execApp.close();
+    });
+
+    async function preparedAction(type: string): Promise<string> {
+      const { withTenant } = await import("@nodaq/db");
+      const pa = await withTenant(orgA, (tx) =>
+        tx.pendingAction.create({ data: { tenantId: orgA, type, payload: { n: 1 } } }),
+      );
+      return pa.id;
+    }
+
+    it("KEY — the executor runs exactly ONCE; double-approve is 409 without re-run", async () => {
+      const id = await preparedAction("spy_action");
+      const first = await execApp.inject({
+        method: "POST",
+        url: `/pending-actions/${id}/approve`,
+        headers: { cookie: cookieA },
+      });
+      expect(first.statusCode).toBe(200);
+      expect(first.json()).toMatchObject({ status: "executed", result: { ok: true } });
+      expect(executed).toHaveLength(1);
+
+      const second = await execApp.inject({
+        method: "POST",
+        url: `/pending-actions/${id}/approve`,
+        headers: { cookie: cookieA },
+      });
+      expect(second.statusCode).toBe(409);
+      expect(executed).toHaveLength(1); // idempotent: no second execution
+    });
+
+    it("a failing executor marks the action failed — error NAME only, never content", async () => {
+      failMode = true;
+      try {
+        const id = await preparedAction("spy_action");
+        const res = await execApp.inject({
+          method: "POST",
+          url: `/pending-actions/${id}/approve`,
+          headers: { cookie: cookieA },
+        });
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toMatchObject({ status: "failed", result: { error: "RangeError" } });
+        expect(JSON.stringify(res.json())).not.toContain("contenu-confidentiel");
+      } finally {
+        failMode = false;
+      }
+    });
+
+    it("an action type without executor fails closed (no silent success)", async () => {
+      const id = await preparedAction("unknown_action_type");
+      const res = await execApp.inject({
+        method: "POST",
+        url: `/pending-actions/${id}/approve`,
+        headers: { cookie: cookieA },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ status: "failed", result: { error: "no-executor" } });
+    });
+
+    it("reject never executes anything", async () => {
+      const before = executed.length;
+      const id = await preparedAction("spy_action");
+      const res = await execApp.inject({
+        method: "POST",
+        url: `/pending-actions/${id}/reject`,
+        headers: { cookie: cookieA },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ status: "rejected" });
+      expect(executed).toHaveLength(before);
+    });
+
+    it("POST /employees/compta/chat: 401 anonymous, SSE stream + persisted conversation", async () => {
+      const anon = await execApp.inject({
+        method: "POST",
+        url: "/employees/compta/chat",
+        payload: { message: "salut" },
+      });
+      expect(anon.statusCode).toBe(401);
+
+      const bad = await execApp.inject({
+        method: "POST",
+        url: "/employees/compta/chat",
+        headers: { cookie: cookieA },
+        payload: { message: "" },
+      });
+      expect(bad.statusCode).toBe(400);
+
+      const res = await execApp.inject({
+        method: "POST",
+        url: "/employees/compta/chat",
+        headers: { cookie: cookieA },
+        payload: { message: "Prépare les relances des factures en retard" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/event-stream");
+
+      const events = res.body
+        .split("\n\n")
+        .filter((line) => line.startsWith("data: "))
+        .map((line) => JSON.parse(line.slice(6)) as { type: string; [k: string]: unknown });
+      expect(events.map((e) => e.type)).toEqual(
+        expect.arrayContaining(["assistant", "conversation", "done"]),
+      );
+      const assistant = events.find((e) => e.type === "assistant") as { content: string };
+      expect(assistant.content).toContain("en attente de validation");
+
+      // The conversation persisted in the SESSION's tenant (provenance).
+      const convo = events.find((e) => e.type === "conversation") as { conversationId: string };
+      const { withTenant } = await import("@nodaq/db");
+      const stored = await withTenant(orgA, (tx) =>
+        tx.agentConversation.findUnique({ where: { id: convo.conversationId } }),
+      );
+      expect(stored?.employee).toBe("compta");
+    });
   });
 });

@@ -6,14 +6,18 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 
 > **Langue** : code, identifiants et commentaires techniques en anglais ; docs produit en français.
 
-> **État du repo** : tickets 0.1 (monorepo + RLS `notes`), 0.2 (better-auth) et
-> 0.3 (secrets : `@nodaq/secrets`, `.env` en dev → Scaleway Secret Manager en prod,
-> voir `packages/secret-manager/README.md`) livrés,
-> **plugin organization branché** : `organization` = `tenants`, `member` = `memberships`
-> (rôles `owner|member|accountant`), le tenant vient de l'organisation active de la
-> session (`activeOrganizationId`) — le header `x-tenant-id` n'existe plus. La chaîne
-> `requireAuth → resolveTenant → requireMembership → withTenant` est en place dans
-> `apps/api/src/app.ts`. La landing page historique reste dans `index.html`.
+> **État du repo** : tickets 0.1→0.3, 0.5 et 1.1→1.6 livrés. Auth : better-auth +
+> plugin organization (`organization` = `tenants`, `member` = `memberships`, rôles
+> `owner|member|accountant`) ; tenant = organisation active de la session, chaîne
+> `requireAuth → resolveTenant → requireMembership → withTenant` dans `apps/api/src/app.ts`.
+> Secrets : `@nodaq/secrets` (voir `packages/secret-manager/README.md`). Routage LLM :
+> `packages/llm` (`route()`/`routeChat()`) + classifieur (1.1) ; connecteurs Pennylane/
+> Qonto (1.2) ; RAG Python (1.3) ; OCR + `pending_actions` (1.4) ; trésorerie/relances (1.5).
+> **Employé virtuel Compta (1.6, ADR-006)** : boucle d'agent model-agnostic dans
+> `apps/agent-runtime` — chaque itération passe par `routeChat()`, runtime construit LIÉ
+> au tenant de session (jamais un input d'outil), outils d'écriture → `pending_action`,
+> exécution UNIQUEMENT sur approbation (`/pending-actions/:id/approve`, idempotente),
+> chat SSE `/employees/compta/chat`, traces Langfuse métadonnées-seulement.
 
 ---
 
@@ -22,7 +26,7 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 - **Monorepo** : pnpm workspaces + Turborepo. `apps/*`, `packages/*`, `services/*`, `mcp-servers/*`.
 - **TypeScript** (app) : strict, ESM, Node 20+. API en **Fastify**. ORM **Prisma**. Validation **Zod**. Tests **Vitest**.
 - **Python** (data/ML) : `uv` + **FastAPI**. `services/{rag,ml,ocr}`. Typé, **mypy** + **ruff**.
-- **Agents** : `@anthropic-ai/claude-agent-sdk` (headless) dans `apps/agent-runtime`.
+- **Agents** : boucle model-agnostic via `routeChat()` dans `apps/agent-runtime` (ADR-006 ; Claude Agent SDK = piste future non-sensible).
 - **Modèles** : via **LiteLLM** (jamais d'appel LLM en direct). Fournisseurs souverains : Scaleway Generative APIs / Managed Inference, Mistral EU.
 - **Données** : PostgreSQL + pgvector, Redis, Qdrant, Object Storage (S3). En prod : **Scaleway, région FR-PAR**. Local : `ops/docker-compose.yml`.
 - **Auth** : better-auth + plugin organization (`organization` = tenant, `member` = membership).
