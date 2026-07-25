@@ -1,0 +1,269 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { PrismaClient } from "@prisma/client";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { prisma, withTenant } from "@nodaq/db";
+import { createAdminClient } from "@nodaq/db/admin";
+import type { SecretProvider } from "@nodaq/secrets";
+import {
+  ConnectorNotConfiguredError,
+  connectorSecretName,
+  getPennylaneClient,
+  getQontoClient,
+} from "../src/registry.js";
+import { createConnectorsMcpServer } from "../src/server.js";
+
+/**
+ * End-to-end: MCP client -> MCP server (in-memory transport) -> registry
+ * (real Postgres, RLS) -> vault (recording fake) -> fake SaaS API.
+ */
+
+const FULL_IBAN = "FR7616798000010000012345678";
+
+const recordedSaas: string[] = [];
+const fakeSaas = createServer((req, res) => {
+  recordedSaas.push(req.url ?? "");
+  res.writeHead(200, { "content-type": "application/json" });
+  const path = req.url ?? "";
+  if (path.startsWith("/customer_invoices")) {
+    res.end(
+      JSON.stringify({ items: [{ id: 1, invoice_number: "F-1", status: "paid" }], next_cursor: null }),
+    );
+  } else if (path.startsWith("/organization")) {
+    res.end(
+      JSON.stringify({
+        organization: {
+          slug: "org-a",
+          bank_accounts: [{ slug: "main", iban: FULL_IBAN, currency: "EUR", balance_cents: 99 }],
+        },
+      }),
+    );
+  } else if (path.startsWith("/transactions")) {
+    res.end(
+      JSON.stringify({
+        transactions: [{ transaction_id: "tx-1", amount_cents: -100, side: "debit" }],
+        meta: { current_page: 1 },
+      }),
+    );
+  } else {
+    res.end("{}");
+  }
+});
+
+let admin: PrismaClient;
+let baseUrl: string;
+let tenantA: string;
+let tenantB: string;
+
+/** Recording fake vault: tracks reads to prove namespace violations never reach it. */
+const vaultEntries: Record<string, string> = {};
+const vaultReads: string[] = [];
+const vault: SecretProvider = {
+  get(name) {
+    vaultReads.push(name);
+    return Promise.resolve(vaultEntries[name]);
+  },
+};
+
+beforeAll(async () => {
+  await new Promise<void>((resolve) => fakeSaas.listen(0, "127.0.0.1", resolve));
+  baseUrl = `http://127.0.0.1:${(fakeSaas.address() as AddressInfo).port}`;
+
+  admin = createAdminClient();
+  // Test hygiene: scope cleanup to THIS suite's tenants (shared Postgres).
+  await admin.connector.deleteMany({ where: { tenant: { name: { in: ["Conn A", "Conn B"] } } } });
+  await admin.tenant.deleteMany({ where: { name: { in: ["Conn A", "Conn B"] } } });
+  tenantA = (await admin.tenant.create({ data: { name: "Conn A" } })).id;
+  tenantB = (await admin.tenant.create({ data: { name: "Conn B" } })).id;
+
+  vaultEntries[connectorSecretName(tenantA, "pennylane")] = JSON.stringify({
+    apiKey: "pk-tenant-a",
+  });
+  vaultEntries[connectorSecretName(tenantA, "qonto")] = JSON.stringify({
+    organizationSlug: "org-a",
+    secretKey: "sk-a",
+  });
+
+  await withTenant(tenantA, (tx) =>
+    tx.connector.createMany({
+      data: [
+        {
+          tenantId: tenantA,
+          type: "pennylane",
+          credentialsRef: connectorSecretName(tenantA, "pennylane"),
+        },
+        { tenantId: tenantA, type: "qonto", credentialsRef: connectorSecretName(tenantA, "qonto") },
+      ],
+    }),
+  );
+});
+
+afterAll(async () => {
+  fakeSaas.close();
+  await admin.$disconnect();
+  await prisma.$disconnect();
+});
+
+function connectedClient() {
+  const server = createConnectorsMcpServer({
+    tenantId: tenantA,
+    secretProvider: vault,
+    pennylaneBaseUrl: baseUrl,
+    qontoBaseUrl: baseUrl,
+  });
+  const client = new Client({ name: "test-client", version: "0.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  return Promise.all([server.connect(serverTransport), client.connect(clientTransport)]).then(
+    () => client,
+  );
+}
+
+function textOf(result: { content?: unknown }): string {
+  return (result.content as { type: string; text: string }[])[0]!.text;
+}
+
+describe("MCP server (per-tenant, read-only)", () => {
+  it("exposes the 4 read-only tools", async () => {
+    const client = await connectedClient();
+    const tools = await client.listTools();
+    const names = tools.tools.map((t) => t.name).sort();
+    expect(names).toEqual([
+      "pennylane_get_customers",
+      "pennylane_get_invoices",
+      "qonto_get_bank_transactions",
+      "qonto_get_organization",
+    ]);
+    for (const tool of tools.tools) {
+      expect(tool.annotations?.readOnlyHint).toBe(true);
+    }
+  });
+
+  it("pennylane_get_invoices goes through registry + vault + fake API", async () => {
+    const client = await connectedClient();
+    const result = await client.callTool({
+      name: "pennylane_get_invoices",
+      arguments: { limit: 5 },
+    });
+    const parsed = JSON.parse(textOf(result)) as { items: { invoice_number: string }[] };
+    expect(parsed.items[0]?.invoice_number).toBe("F-1");
+  });
+
+  it("qonto_get_organization masks the IBAN (data minimization)", async () => {
+    const client = await connectedClient();
+    const result = await client.callTool({ name: "qonto_get_organization", arguments: {} });
+    const text = textOf(result);
+    const parsed = JSON.parse(text) as {
+      organization: { bank_accounts: { iban: string; balance_cents: number }[] };
+    };
+    expect(parsed.organization.bank_accounts[0]).toMatchObject({
+      iban: "****5678",
+      balance_cents: 99,
+    });
+    expect(text).not.toContain(FULL_IBAN);
+  });
+
+  it("qonto_get_bank_transactions works by account SLUG, full IBAN stays server-side", async () => {
+    const client = await connectedClient();
+    const result = await client.callTool({
+      name: "qonto_get_bank_transactions",
+      arguments: { accountSlug: "main", perPage: 10 },
+    });
+    const text = textOf(result);
+    expect(JSON.parse(text).transactions[0].transaction_id).toBe("tx-1");
+    expect(text).not.toContain(FULL_IBAN);
+    // The Qonto API DID receive the full IBAN (resolved in memory from the slug).
+    expect(recordedSaas.some((p) => p.includes(encodeURIComponent(FULL_IBAN)))).toBe(true);
+  });
+
+  it("the tenant is bound at construction: tool input cannot select a tenant", async () => {
+    const client = await connectedClient();
+    const tools = await client.listTools();
+    for (const tool of tools.tools) {
+      expect(JSON.stringify(tool.inputSchema)).not.toContain("tenantId");
+    }
+  });
+});
+
+describe("registry — tenant isolation & failure modes", () => {
+  it("a tenant without a connector gets ConnectorNotConfiguredError (RLS-scoped read)", async () => {
+    await expect(
+      getPennylaneClient(tenantB, { secretProvider: vault, pennylaneBaseUrl: baseUrl }),
+    ).rejects.toThrow(ConnectorNotConfiguredError);
+  });
+
+  it("a credentials ref OUTSIDE the tenant namespace is refused BEFORE any vault read", async () => {
+    await withTenant(tenantB, (tx) =>
+      tx.connector.create({
+        data: {
+          tenantId: tenantB,
+          type: "pennylane",
+          // Poisoned pointer: another tenant's secret (or any arbitrary name).
+          credentialsRef: connectorSecretName(tenantA, "pennylane"),
+        },
+      }),
+    );
+    vaultReads.length = 0;
+    await expect(
+      getPennylaneClient(tenantB, { secretProvider: vault, pennylaneBaseUrl: baseUrl }),
+    ).rejects.toThrow(ConnectorNotConfiguredError);
+    expect(vaultReads).toHaveLength(0);
+  });
+
+  it("a disabled connector is refused with a GENERIC message (no ref, no tenant)", async () => {
+    await withTenant(tenantA, (tx) =>
+      tx.connector.update({
+        where: { tenantId_type: { tenantId: tenantA, type: "pennylane" } },
+        data: { status: "disabled" },
+      }),
+    );
+    try {
+      const error = await getPennylaneClient(tenantA, {
+        secretProvider: vault,
+        pennylaneBaseUrl: baseUrl,
+      }).then(
+        () => null,
+        (e: Error) => e,
+      );
+      expect(error).toBeInstanceOf(ConnectorNotConfiguredError);
+      expect(error?.message).toBe('connector "pennylane" unavailable');
+      expect(error?.message).not.toContain(tenantA);
+    } finally {
+      await withTenant(tenantA, (tx) =>
+        tx.connector.update({
+          where: { tenantId_type: { tenantId: tenantA, type: "pennylane" } },
+          data: { status: "active" },
+        }),
+      );
+    }
+  });
+
+  it("a missing vault secret is refused with the same generic message", async () => {
+    await withTenant(tenantA, (tx) =>
+      tx.connector.update({
+        where: { tenantId_type: { tenantId: tenantA, type: "qonto" } },
+        data: { credentialsRef: connectorSecretName(tenantA, "qonto-missing") },
+      }),
+    );
+    try {
+      const error = await getQontoClient(tenantA, {
+        secretProvider: vault,
+        qontoBaseUrl: baseUrl,
+      }).then(
+        () => null,
+        (e: Error) => e,
+      );
+      expect(error).toBeInstanceOf(ConnectorNotConfiguredError);
+      expect(error?.message).toBe('connector "qonto" unavailable');
+      expect(error?.message).not.toContain("qonto-missing");
+    } finally {
+      await withTenant(tenantA, (tx) =>
+        tx.connector.update({
+          where: { tenantId_type: { tenantId: tenantA, type: "qonto" } },
+          data: { credentialsRef: connectorSecretName(tenantA, "qonto") },
+        }),
+      );
+    }
+  });
+});

@@ -21,6 +21,7 @@ model Tenant {
   notes       Note[]
   classifications Classification[]
   policy      TenantPolicy?
+  connectors  Connector[]
 
   @@map("tenants")
 }
@@ -172,6 +173,27 @@ model Classification {
 
   @@index([tenantId])
   @@map("classifications")
+}
+
+/// Registry of connected SaaS connectors per tenant (blueprint §5.6, e.g. Pennylane,
+/// Qonto). Sealed by RLS (see the migration `20260725120548_connectors`). `credentialsRef` is
+/// the NAME of the secret in the Secret Manager — never a credential value.
+model Connector {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  /// 'pennylane' | 'qonto' — validated app-side by Zod.
+  type            String
+  /// Secret NAME in the vault (Scaleway Secret Manager in prod) — never the credential itself.
+  credentialsRef  String   @map("credentials_ref")
+  /// 'active' | 'disabled'
+  status          String   @default("active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, type])
+  @@index([tenantId])
+  @@map("connectors")
 }
 
 /// Per-tenant model routing policy. Sealed by RLS (see the migration
