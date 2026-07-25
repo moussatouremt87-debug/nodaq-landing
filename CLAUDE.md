@@ -6,11 +6,12 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 
 > **Langue** : code, identifiants et commentaires techniques en anglais ; docs produit en français.
 
-> **État du repo** : tickets 0.1 (monorepo + RLS `notes`) et 0.2 (better-auth
-> email+password) livrés. L'auth actuelle utilise une table `memberships` custom et le
-> header `x-tenant-id` comme sélecteur contrôlé ; le **plugin organization** de
-> better-auth (organisation active de session, décrit ci-dessous) est la cible — à
-> brancher lors d'un prochain ticket. La landing page historique reste dans `index.html`.
+> **État du repo** : tickets 0.1 (monorepo + RLS `notes`) et 0.2 (better-auth) livrés,
+> **plugin organization branché** : `organization` = `tenants`, `member` = `memberships`
+> (rôles `owner|member|accountant`), le tenant vient de l'organisation active de la
+> session (`activeOrganizationId`) — le header `x-tenant-id` n'existe plus. La chaîne
+> `requireAuth → resolveTenant → requireMembership → withTenant` est en place dans
+> `apps/api/src/app.ts`. La landing page historique reste dans `index.html`.
 
 ---
 

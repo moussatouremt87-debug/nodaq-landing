@@ -1,18 +1,19 @@
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { z } from "zod";
 import { prisma, withTenant } from "@nodaq/db";
 import { CreateNoteInput, TenantId } from "@nodaq/shared";
 import { auth } from "./auth.js";
 
+type AuthSession = NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>;
+
 declare module "fastify" {
   interface FastifyRequest {
-    userId: string;
+    authSession: AuthSession;
     tenantId: string;
   }
 }
 
-/** Convertit les headers Fastify en Headers Web (attendu par better-auth). */
+/** Convert Fastify headers to Web Headers (expected by better-auth). */
 function toWebHeaders(request: FastifyRequest): Headers {
   const headers = new Headers();
   for (const [key, value] of Object.entries(request.headers)) {
@@ -22,65 +23,57 @@ function toWebHeaders(request: FastifyRequest): Headers {
   return headers;
 }
 
-/** Session requise : 401 sinon. Pose request.userId. */
-async function requireUser(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+/*
+ * Authorization chain (CLAUDE.md) — every business route runs, in order:
+ *   requireAuth        -> validates the better-auth session, else 401
+ *   resolveTenant      -> target tenant = active organization of the session
+ *   requireMembership  -> checks IN DB that the user belongs to that tenant, else 403
+ *   withTenant(id, …)  -> opens data access (RLS as the last rampart)
+ * The tenantId NEVER comes from client input: switching tenants goes through
+ * POST /api/auth/organization/set-active (which itself checks membership).
+ */
+
+async function requireAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   const session = await auth.api.getSession({ headers: toWebHeaders(request) });
   if (!session) {
-    await reply.code(401).send({ error: "authentification requise" });
+    await reply.code(401).send({ error: "authentication required" });
     return;
   }
-  request.userId = session.user.id;
+  request.authSession = session;
 }
 
-/**
- * Tenant depuis la SESSION (ticket 0.2) — le header x-tenant-id n'est plus une
- * source de vérité : il ne sert qu'à choisir parmi les memberships du user
- * connecté, et est refusé (403) s'il pointe un tenant auquel il n'appartient pas.
- * Sans header : le tenant unique du user (400 s'il en a plusieurs, 403 s'il n'en a aucun).
- */
-async function requireTenant(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-  await requireUser(request, reply);
-  if (reply.sent) return;
+async function resolveTenant(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  const active = TenantId.safeParse(request.authSession.session.activeOrganizationId);
+  if (!active.success) {
+    await reply.code(400).send({
+      error: "no active organization",
+      hint: "create one (POST /api/auth/organization/create) or select one (POST /api/auth/organization/set-active)",
+    });
+    return;
+  }
+  request.tenantId = active.data;
+}
 
-  const memberships = await prisma.membership.findMany({
-    where: { userId: request.userId },
-    select: { tenantId: true },
+async function requireMembership(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  // Session ≠ authorization: re-check membership in DB even though set-active
+  // already did — a stale or tampered session must never open another tenant.
+  const membership = await prisma.membership.findUnique({
+    where: { tenantId_userId: { tenantId: request.tenantId, userId: request.authSession.user.id } },
+    select: { id: true },
   });
-  if (memberships.length === 0) {
-    await reply.code(403).send({ error: "aucun tenant : créez-en un via POST /tenants" });
+  if (!membership) {
+    await reply.code(403).send({ error: "not a member of the active organization" });
     return;
   }
-
-  const requested = request.headers["x-tenant-id"];
-  if (requested !== undefined) {
-    const parsed = TenantId.safeParse(requested);
-    if (!parsed.success) {
-      await reply.code(400).send({ error: "x-tenant-id invalide (uuid attendu)" });
-      return;
-    }
-    if (!memberships.some((m) => m.tenantId === parsed.data)) {
-      await reply.code(403).send({ error: "vous n'êtes pas membre de ce tenant" });
-      return;
-    }
-    request.tenantId = parsed.data;
-    return;
-  }
-
-  if (memberships.length > 1) {
-    await reply
-      .code(400)
-      .send({ error: "plusieurs tenants : précisez x-tenant-id", tenants: memberships });
-    return;
-  }
-  request.tenantId = memberships[0]!.tenantId;
 }
 
-const CreateTenantInput = z.object({ name: z.string().min(1).max(200) });
+const businessRoute = [requireAuth, resolveTenant, requireMembership];
 
 export function buildApp(): FastifyInstance {
   const app = Fastify({ logger: process.env.NODE_ENV !== "test" });
 
-  // Montage better-auth : /api/auth/* (sign-up/sign-in email, session, sign-out...)
+  // better-auth handler: /api/auth/* (sign-up/sign-in email, session, sign-out,
+  // organization/create, organization/set-active, invitations...)
   app.route({
     method: ["GET", "POST"],
     url: "/api/auth/*",
@@ -103,41 +96,29 @@ export function buildApp(): FastifyInstance {
     return { status: "ok", db: "ok" };
   });
 
-  /** Session courante + memberships (pratique pour le front et le debug). */
-  app.get("/me", { preHandler: requireUser }, async (request) => {
+  /** Current session: user, active organization and memberships. */
+  app.get("/me", { preHandler: [requireAuth] }, async (request) => {
     const memberships = await prisma.membership.findMany({
-      where: { userId: request.userId },
-      select: { tenantId: true, role: true, tenant: { select: { name: true } } },
+      where: { userId: request.authSession.user.id },
+      select: { tenantId: true, role: true, tenant: { select: { name: true, slug: true } } },
     });
-    return { userId: request.userId, memberships };
+    return {
+      userId: request.authSession.user.id,
+      activeOrganizationId: request.authSession.session.activeOrganizationId ?? null,
+      memberships,
+    };
   });
 
-  /** Crée un tenant et rattache le user connecté comme OWNER. */
-  app.post("/tenants", { preHandler: requireUser }, async (request, reply) => {
-    const parsed = CreateTenantInput.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: "payload invalide", details: parsed.error.flatten() });
-    }
-    const tenant = await prisma.$transaction(async (tx) => {
-      const t = await tx.tenant.create({ data: { name: parsed.data.name } });
-      await tx.membership.create({
-        data: { tenantId: t.id, userId: request.userId, role: "OWNER" },
-      });
-      return t;
-    });
-    return reply.code(201).send(tenant);
-  });
-
-  app.get("/notes", { preHandler: requireTenant }, async (request) => {
+  app.get("/notes", { preHandler: businessRoute }, async (request) => {
     return withTenant(request.tenantId, (tx) =>
       tx.note.findMany({ orderBy: { createdAt: "desc" } }),
     );
   });
 
-  app.post("/notes", { preHandler: requireTenant }, async (request, reply) => {
+  app.post("/notes", { preHandler: businessRoute }, async (request, reply) => {
     const parsed = CreateNoteInput.safeParse(request.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: "payload invalide", details: parsed.error.flatten() });
+      return reply.code(400).send({ error: "invalid payload", details: parsed.error.flatten() });
     }
     const note = await withTenant(request.tenantId, (tx) =>
       tx.note.create({ data: { ...parsed.data, tenantId: request.tenantId } }),

@@ -11,8 +11,11 @@ export type Uuid = z.infer<typeof Uuid>;
 export const TenantId = Uuid;
 export type TenantId = z.infer<typeof TenantId>;
 
-/** Rôles d'un utilisateur au sein d'un tenant (miroir de l'enum Prisma). */
-export const MembershipRole = z.enum(["OWNER", "MEMBER", "ACCOUNTANT"]);
+/**
+ * Roles within a tenant (better-auth organization plugin, stored as strings).
+ * `accountant` = delegated multi-tenant access (expert-comptable).
+ */
+export const MembershipRole = z.enum(["owner", "member", "accountant"]);
 export type MembershipRole = z.infer<typeof MembershipRole>;
 
 /** Payload de création d'une note (démo du pattern « table métier scellée par RLS »). */
