@@ -52,6 +52,7 @@ cd services/rag && uv run ruff check && uv run mypy && uv run pytest   # côté 
 
 # Base
 pnpm db:migrate               # applique migrations Prisma + policies RLS
+pnpm seed:demo                # (re)crée le tenant démo « Élec Provence » (DEMO_USER_PASSWORD requis)
 pnpm db:reset                 # reset complet (dev)
 ```
 

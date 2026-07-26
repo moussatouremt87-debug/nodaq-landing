@@ -99,7 +99,12 @@ export const decidePendingAction = (
   id: string,
   decision: "approve" | "reject",
 ): Promise<PendingActionDecision> =>
-  call(PendingActionDecision, `/pending-actions/${id}/${decision}`, { method: "POST" });
+  // Corps JSON vide EXPLICITE : `call` pose content-type application/json, et
+  // Fastify refuse (400) un body absent avec ce content-type.
+  call(PendingActionDecision, `/pending-actions/${id}/${decision}`, {
+    method: "POST",
+    body: "{}",
+  });
 
 // Connector onboarding (ticket 1.8) — metadata only in responses; the
 // credentials travel one way (in) and are never read back.

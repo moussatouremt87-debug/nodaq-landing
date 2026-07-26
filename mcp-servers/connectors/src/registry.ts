@@ -2,6 +2,7 @@ import { z } from "zod";
 import { withTenant } from "@nodaq/db";
 import { defaultProvider } from "@nodaq/secrets";
 import type { SecretProvider } from "@nodaq/secrets";
+import { DemoPennylaneClient, DemoQontoClient } from "./demo.js";
 import { PennylaneClient, PennylaneCredentials } from "./pennylane.js";
 import { QontoClient, QontoCredentials } from "./qonto.js";
 
@@ -42,27 +43,41 @@ export interface RegistryOptions {
   qontoBaseUrl?: string;
 }
 
-async function resolveCredentials(
-  tenantId: string,
-  type: ConnectorType,
-  options: RegistryOptions,
-): Promise<unknown> {
+/**
+ * Statut de connecteur du tenant de démonstration (seed démo). Un connecteur
+ * "demo" renvoie un client-fixture (données fictives, zéro réseau, zéro
+ * secret) — jamais le statut "active" d'une vraie connexion. Ce statut n'est
+ * posable QUE par le script de seed : l'API d'onboarding crée toujours
+ * "active" après test réel des identifiants.
+ */
+export const DEMO_CONNECTOR_STATUS = "demo";
+
+async function loadConnectorRow(tenantId: string, type: ConnectorType) {
   // Connector row is read UNDER withTenant: RLS guarantees a tenant can only
   // ever reach its own connector registrations.
   const row = await withTenant(tenantId, (tx) =>
     tx.connector.findUnique({ where: { tenantId_type: { tenantId, type } } }),
   );
   if (!row) throw new ConnectorNotConfiguredError(tenantId, type, "not configured");
-  if (row.status !== "active") {
+  if (row.status !== "active" && row.status !== DEMO_CONNECTOR_STATUS) {
     throw new ConnectorNotConfiguredError(tenantId, type, `status ${row.status}`);
   }
   if (!row.credentialsRef.startsWith(`connector/${tenantId}/`)) {
     throw new ConnectorNotConfiguredError(tenantId, type, "credentials ref outside tenant namespace");
   }
+  return row;
+}
+
+async function resolveCredentials(
+  tenantId: string,
+  type: ConnectorType,
+  options: RegistryOptions,
+  credentialsRef: string,
+): Promise<unknown> {
   const provider = options.secretProvider ?? defaultProvider();
-  const raw = await provider.get(row.credentialsRef);
+  const raw = await provider.get(credentialsRef);
   if (!raw) {
-    throw new ConnectorNotConfiguredError(tenantId, type, `secret "${row.credentialsRef}" missing`);
+    throw new ConnectorNotConfiguredError(tenantId, type, `secret "${credentialsRef}" missing`);
   }
   try {
     return JSON.parse(raw) as unknown;
@@ -75,8 +90,10 @@ export async function getPennylaneClient(
   tenantId: string,
   options: RegistryOptions = {},
 ): Promise<PennylaneClient> {
+  const row = await loadConnectorRow(tenantId, "pennylane");
+  if (row.status === DEMO_CONNECTOR_STATUS) return new DemoPennylaneClient();
   const credentials = PennylaneCredentials.parse(
-    await resolveCredentials(tenantId, "pennylane", options),
+    await resolveCredentials(tenantId, "pennylane", options, row.credentialsRef),
   );
   return new PennylaneClient(credentials, options.pennylaneBaseUrl);
 }
@@ -85,6 +102,10 @@ export async function getQontoClient(
   tenantId: string,
   options: RegistryOptions = {},
 ): Promise<QontoClient> {
-  const credentials = QontoCredentials.parse(await resolveCredentials(tenantId, "qonto", options));
+  const row = await loadConnectorRow(tenantId, "qonto");
+  if (row.status === DEMO_CONNECTOR_STATUS) return new DemoQontoClient();
+  const credentials = QontoCredentials.parse(
+    await resolveCredentials(tenantId, "qonto", options, row.credentialsRef),
+  );
   return new QontoClient(credentials, options.qontoBaseUrl);
 }
