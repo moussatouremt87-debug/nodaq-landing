@@ -15,7 +15,8 @@
     "db:migrate": "pnpm --filter @nodaq/db exec prisma migrate dev",
     "db:migrate:deploy": "pnpm --filter @nodaq/db exec prisma migrate deploy",
     "db:reset": "pnpm --filter @nodaq/db exec prisma migrate reset --force",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "seed:demo": "pnpm --filter @nodaq/api seed:demo"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

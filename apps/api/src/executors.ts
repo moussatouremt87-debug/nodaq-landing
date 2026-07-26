@@ -16,4 +16,6 @@ export type ExecutorRegistry = Record<string, ActionExecutor>;
 export const defaultExecutors: ExecutorRegistry = {
   send_dunning: () => Promise.resolve({ sent: true, simulated: true }),
   book_invoice: () => Promise.resolve({ booked: true, simulated: true }),
+  create_quote: () => Promise.resolve({ created: true, simulated: true }),
+  submit_reconciliation: () => Promise.resolve({ submitted: true, simulated: true }),
 };

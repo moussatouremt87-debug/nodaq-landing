@@ -86,10 +86,14 @@ function ConnectorCard({
     }
   }
 
+  // Statut « demo » (tenant de démonstration) : données fictives — jamais
+  // présenté comme une vraie connexion bancaire.
+  const isDemo = connected?.status === "demo";
+
   return (
     <div className={connected ? "card accent" : "card"} style={{ maxWidth: 430 }}>
       <span className="overline">
-        {spec.title} — {connected ? "connecté" : "non connecté"}
+        {spec.title} — {connected ? (isDemo ? "démo" : "connecté") : "non connecté"}
       </span>
       <p className="hint" style={{ margin: "4px 0 14px" }}>
         {spec.purpose}
@@ -97,8 +101,9 @@ function ConnectorCard({
       {connected ? (
         <>
           <p className="hint">
-            Depuis le {new Date(connected.createdAt).toLocaleDateString("fr-FR")}. Ressaisissez des
-            identifiants pour les faire tourner.
+            {isDemo
+              ? "Données fictives de démonstration — aucune connexion réelle. Saisissez de vrais identifiants pour l'activer."
+              : `Depuis le ${new Date(connected.createdAt).toLocaleDateString("fr-FR")}. Ressaisissez des identifiants pour les faire tourner.`}
           </p>
           <button className="danger" disabled={busy} onClick={() => void disconnect()}>
             Déconnecter

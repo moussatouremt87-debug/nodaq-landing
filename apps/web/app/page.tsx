@@ -15,6 +15,7 @@ export default function CockpitPage() {
   const [kpis, setKpis] = useState<CockpitKpis | null>(null);
   const [recent, setRecent] = useState<PendingActionSummary[]>([]);
   const [connectorCount, setConnectorCount] = useState<number | null>(null);
+  const [demoMode, setDemoMode] = useState(false);
 
   useEffect(() => {
     getKpis().then(setKpis).catch(() => undefined);
@@ -22,7 +23,12 @@ export default function CockpitPage() {
       .then((actions) => setRecent(actions.slice(0, 5)))
       .catch(() => undefined);
     listConnectors()
-      .then((connectors) => setConnectorCount(connectors.length))
+      .then((connectors) => {
+        setConnectorCount(connectors.length);
+        // Tenant de démonstration (seed démo) : signalé discrètement, jamais
+        // présenté comme une vraie connexion.
+        setDemoMode(connectors.some((connector) => connector.status === "demo"));
+      })
       .catch(() => undefined);
   }, []);
 
@@ -33,6 +39,11 @@ export default function CockpitPage() {
     <>
       <h1 className="page-title">Cockpit</h1>
       <p className="page-sub">La journée de vos employés virtuels, en un coup d&apos;œil.</p>
+      {demoMode && (
+        <p className="hint" style={{ marginTop: -12, marginBottom: 20 }}>
+          Mode démo — données fictives (aucune connexion bancaire réelle).
+        </p>
+      )}
 
       {connectorCount === 0 && (
         <div className="card signal" style={{ marginBottom: 24 }}>

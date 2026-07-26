@@ -9,7 +9,8 @@
     "lint": "eslint src test",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "seed:demo": "tsx src/scripts/seed-demo.ts"
   },
   "dependencies": {
     "@nodaq/agent-runtime": "workspace:*",
