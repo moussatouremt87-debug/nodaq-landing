@@ -55,6 +55,12 @@ output "database_url" {
   sensitive = true
 }
 
+# DSN applicatif (app_user, RLS) — requis par le seed démo (withTenant).
+output "app_database_url" {
+  value     = local.app_database_url
+  sensitive = true
+}
+
 output "db_app_password" {
   value     = random_password.db_app.result
   sensitive = true

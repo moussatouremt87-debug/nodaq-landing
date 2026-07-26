@@ -1,0 +1,83 @@
+# Seed démo du STAGING (déclenchement MANUEL uniquement) : (re)crée le tenant
+# « Élec Provence » sur la base de staging — à lancer avant chaque rendez-vous.
+# Prérequis (une fois) : secret GitHub Actions `DEMO_USER_PASSWORD` (mot de
+# passe de connexion de demo@nodaq.fr), en plus des secrets SCW_* existants.
+# Le seed refuse de tourner sans DEMO_SEED_ALLOWED=true (garde production) et
+# ne touche QUE le tenant démo (withTenant/RLS + assertions du script).
+
+name: Seed démo staging
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency: staging-seed-demo
+
+env:
+  SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+  SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+  SCW_DEFAULT_PROJECT_ID: ${{ vars.SCW_DEFAULT_PROJECT_ID || '955f9c20-9d60-4943-a810-71c737a42a45' }}
+  # Même préfixe que l'API : la purge du coffre (bascule active -> demo)
+  # doit viser les mêmes noms de secrets.
+  SCW_SECRET_PREFIX: nodaq-staging-
+  DEMO_USER_PASSWORD: ${{ secrets.DEMO_USER_PASSWORD }}
+  # Backend S3 (Object Storage Scaleway) pour lire les outputs Terraform.
+  AWS_ACCESS_KEY_ID: ${{ secrets.SCW_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_KEY }}
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Garde-fou secrets
+        run: |
+          if [ -z "$SCW_SECRET_KEY" ]; then
+            echo "::error::Secrets SCW_ACCESS_KEY / SCW_SECRET_KEY manquants."
+            exit 1
+          fi
+          if [ -z "$DEMO_USER_PASSWORD" ]; then
+            echo "::error::Secret DEMO_USER_PASSWORD manquant (Settings -> Secrets and variables -> Actions) : c'est le mot de passe de connexion de demo@nodaq.fr."
+            exit 1
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform init (lecture des outputs)
+        working-directory: infra
+        run: terraform init -backend-config="bucket=nodaq-tfstate-${SCW_DEFAULT_PROJECT_ID%%-*}"
+
+      - name: Seed du tenant démo
+        run: |
+          DB_URL="$(cd infra && terraform output -raw database_url)"
+          APP_DB_URL="$(cd infra && terraform output -raw app_database_url)"
+          # Masque les DSN entiers ET les mots de passe isolés.
+          ADMIN_PWD="${DB_URL#postgresql://nodaq_admin:}"; ADMIN_PWD="${ADMIN_PWD%%@*}"
+          APP_PWD="${APP_DB_URL#postgresql://app_user:}"; APP_PWD="${APP_PWD%%@*}"
+          echo "::add-mask::$DB_URL"; echo "::add-mask::$APP_DB_URL"
+          echo "::add-mask::$ADMIN_PWD"; echo "::add-mask::$APP_PWD"
+          pnpm install --frozen-lockfile
+          # Chaîne de dépendances du script (prisma generate inclus).
+          pnpm --filter @nodaq/api... build
+          NODE_ENV=production DEMO_SEED_ALLOWED=true \
+            DATABASE_URL="$DB_URL" APP_DATABASE_URL="$APP_DB_URL" \
+            pnpm seed:demo
+
+      - name: Résumé
+        run: |
+          echo "## 🎬 Démo staging prête" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tenant « Élec Provence » restauré (état du kit de démo)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Connexion : demo@nodaq.fr (mot de passe = secret DEMO_USER_PASSWORD)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- À relancer avant chaque rendez-vous" >> "$GITHUB_STEP_SUMMARY"

@@ -19,9 +19,13 @@ pnpm seed:demo
 - **Rejouable** : chaque exécution supprime et recrée les données du tenant démo
   (y compris les `pending_actions` déjà validées). Aucune autre organisation n'est
   touchée — les écritures métier passent par `withTenant` (RLS).
-- **Staging/production** : refus si `NODE_ENV=production`, sauf
-  `DEMO_SEED_ALLOWED=true` explicite (staging uniquement — jamais sur une base
-  contenant des données réelles).
+- **Staging** : workflow GitHub **« Seed démo staging »** (déclenchement manuel,
+  onglet Actions). Prérequis une fois : créer le secret Actions
+  `DEMO_USER_PASSWORD` (Settings → Secrets and variables → Actions) — c'est le
+  mot de passe de connexion de `demo@nodaq.fr` sur l'URL de staging.
+- **Production** : refus si `NODE_ENV=production` sans `DEMO_SEED_ALLOWED=true`
+  explicite (staging uniquement — jamais sur une base contenant des données
+  réelles).
 
 ## Ce que la démo contient
 
