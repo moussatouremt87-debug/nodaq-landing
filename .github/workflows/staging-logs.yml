@@ -52,6 +52,30 @@ jobs:
           DS_URL="$(echo "$DS_JSON" | jq -r '.data_sources[0].url // empty')"
           [ -n "$DS_URL" ] || DS_URL="https://logs.cockpit.fr-par.scw.cloud"
           echo "URL interrogée : $DS_URL"
+          # Piste parallèle : l'endpoint natif (déprécié mais parfois encore
+          # servi) des logs de conteneur, avec la clé IAM directement.
+          NS_JSON="$(curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
+            "https://api.scaleway.com/containers/v1beta1/regions/fr-par/namespaces?name=nodaq-staging")"
+          NS_ID="$(echo "$NS_JSON" | jq -r '.namespaces[0].id // empty')"
+          if [ -n "$NS_ID" ]; then
+            CONT_JSON="$(curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
+              "https://api.scaleway.com/containers/v1beta1/regions/fr-par/containers?namespace_id=$NS_ID&page_size=50")"
+            for NAME in ${{ inputs.containers || 'api litellm' }}; do
+              CID="$(echo "$CONT_JSON" | jq -r ".containers[] | select(.name==\"$NAME\") | .id")"
+              [ -n "$CID" ] || continue
+              echo "── Endpoint natif logs « $NAME » ──"
+              NCODE="$(curl -s -o /tmp/native.json -w '%{http_code}' -H "X-Auth-Token: $SCW_SECRET_KEY" \
+                "https://api.scaleway.com/containers/v1beta1/regions/fr-par/containers/$CID/logs?page_size=50&order_by=timestamp_desc" || echo 000)"
+              echo "(HTTP $NCODE)"
+              if [ "$NCODE" = "200" ]; then
+                jq -r '.logs[]? | "\(.timestamp) \(.message)"' /tmp/native.json | tac || head -c 1500 /tmp/native.json
+              else
+                head -c 400 /tmp/native.json; echo
+              fi
+            done
+          fi
+          # Laisse au token Cockpit le temps de se propager avant Loki.
+          sleep 10
           END="$(date +%s)000000000"
           START="$(( $(date +%s) - 7200 ))000000000"
           BODY="$(mktemp)"
