@@ -30,14 +30,14 @@ jobs:
         run: |
           set -euo pipefail
           API="https://api.scaleway.com/cockpit/v1/regions/fr-par"
-          # Token éphémère query_logs (secret masqué immédiatement).
-          # Forme DOCUMENTÉE : endpoint v1beta1, `scopes` en OBJET de booléens
-          # ({"query_logs": true}). Les formes tableau (v1) sont ignorées
-          # silencieusement -> token sans droits -> 403 sur Loki.
+          # Token éphémère lecture-seule logs (secret masqué immédiatement).
+          # v1 régionale : scopes = tableau d'enum, la valeur est
+          # `read_only_logs` (une valeur inconnue est IGNORÉE silencieusement
+          # -> token sans droits -> 403 sur Loki).
           TOK_JSON="$(curl -s -X POST -H "X-Auth-Token: $SCW_SECRET_KEY" \
             -H 'content-type: application/json' \
-            -d "{\"project_id\":\"$SCW_DEFAULT_PROJECT_ID\",\"name\":\"ci-logs-$GITHUB_RUN_ID\",\"scopes\":{\"query_logs\":true}}" \
-            "https://api.scaleway.com/cockpit/v1beta1/tokens")"
+            -d "{\"project_id\":\"$SCW_DEFAULT_PROJECT_ID\",\"name\":\"ci-logs-$GITHUB_RUN_ID\",\"scopes\":[\"read_only_logs\"]}" \
+            "$API/tokens")"
           TOKEN_ID="$(echo "$TOK_JSON" | jq -r '.id // empty')"
           TOKEN_SECRET="$(echo "$TOK_JSON" | jq -r '.secret_key // empty')"
           if [ -z "$TOKEN_SECRET" ]; then
@@ -108,6 +108,6 @@ jobs:
             fi
             echo
           done
-          # Nettoyage du token éphémère (même API que la création).
+          # Nettoyage du token éphémère.
           [ -n "$TOKEN_ID" ] && curl -s -X DELETE -H "X-Auth-Token: $SCW_SECRET_KEY" \
-            "https://api.scaleway.com/cockpit/v1beta1/tokens/$TOKEN_ID" >/dev/null || true
+            "$API/tokens/$TOKEN_ID" >/dev/null || true
