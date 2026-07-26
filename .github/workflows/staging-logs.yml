@@ -1,0 +1,77 @@
+# Diagnostic : dump des derniers logs des conteneurs staging via l'API Cockpit
+# (Loki). Lecture seule, token query_logs éphémère (créé puis supprimé dans le
+# run). Aucun secret applicatif affiché : les conteneurs ne loggent jamais de
+# valeur de secret (règle 5), et le token Cockpit est masqué.
+
+name: Staging container logs
+
+on:
+  workflow_dispatch:
+    inputs:
+      containers:
+        description: "Conteneurs à inspecter (séparés par des espaces)"
+        default: "api litellm"
+
+permissions:
+  contents: read
+
+jobs:
+  logs:
+    runs-on: ubuntu-latest
+    env:
+      SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+      SCW_DEFAULT_PROJECT_ID: ${{ vars.SCW_DEFAULT_PROJECT_ID || '955f9c20-9d60-4943-a810-71c737a42a45' }}
+    steps:
+      - name: Garde-fou secrets
+        run: |
+          [ -n "$SCW_SECRET_KEY" ] || { echo "::error::SCW_SECRET_KEY manquant"; exit 1; }
+
+      - name: Logs Cockpit des conteneurs
+        run: |
+          set -euo pipefail
+          API="https://api.scaleway.com/cockpit/v1/regions/fr-par"
+          # Token éphémère query_logs (secret masqué immédiatement).
+          TOK_JSON="$(curl -s -X POST -H "X-Auth-Token: $SCW_SECRET_KEY" \
+            -H 'content-type: application/json' \
+            -d "{\"project_id\":\"$SCW_DEFAULT_PROJECT_ID\",\"name\":\"ci-logs-$GITHUB_RUN_ID\",\"scopes\":[\"query_logs\"]}" \
+            "$API/tokens")"
+          TOKEN_ID="$(echo "$TOK_JSON" | jq -r '.id // empty')"
+          TOKEN_SECRET="$(echo "$TOK_JSON" | jq -r '.secret_key // empty')"
+          if [ -z "$TOKEN_SECRET" ]; then
+            echo "::error::Création du token Cockpit impossible :"
+            echo "$TOK_JSON" | jq -r '.message // .' || true
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN_SECRET"
+          # La source de données logs porte sa propre URL (schéma récent
+          # <ds-id>.logs.cockpit...) ; repli sur l'URL historique sinon.
+          DS_URL="$(curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
+            "$API/data-sources?project_id=$SCW_DEFAULT_PROJECT_ID&types=logs" \
+            | jq -r '.data_sources[0].url // empty')"
+          [ -n "$DS_URL" ] || DS_URL="https://logs.cockpit.fr-par.scw.cloud"
+          END="$(date +%s)000000000"
+          START="$(( $(date +%s) - 7200 ))000000000"
+          for NAME in ${{ inputs.containers || 'api litellm' }}; do
+            echo "═══ Derniers logs « $NAME » (2 h) ═══"
+            RESP="$(curl -sG "$DS_URL/loki/api/v1/query_range" \
+              -H "X-Token: $TOKEN_SECRET" \
+              --data-urlencode "query={resource_type=\"serverless_container\", resource_name=\"$NAME\"}" \
+              --data-urlencode "limit=60" \
+              --data-urlencode "start=$START" --data-urlencode "end=$END" \
+              --data-urlencode "direction=backward")"
+            if ! echo "$RESP" | jq -e '.data.result' >/dev/null 2>&1; then
+              echo "(réponse Loki inattendue)"; echo "$RESP" | head -c 800; echo
+              continue
+            fi
+            COUNT="$(echo "$RESP" | jq '[.data.result[].values[]] | length')"
+            if [ "$COUNT" = "0" ]; then
+              echo "(AUCUN log applicatif — le process ne démarre probablement même pas :"
+              echo " échec avant exec — image/plateforme/stockage.)"
+            else
+              echo "$RESP" | jq -r '[.data.result[].values[]] | sort_by(.[0]) | .[][1]'
+            fi
+            echo
+          done
+          # Nettoyage du token éphémère.
+          [ -n "$TOKEN_ID" ] && curl -s -X DELETE -H "X-Auth-Token: $SCW_SECRET_KEY" \
+            "$API/tokens/$TOKEN_ID" >/dev/null || true
