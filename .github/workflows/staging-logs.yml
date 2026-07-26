@@ -1,16 +1,15 @@
-# Diagnostic : dump des derniers logs des conteneurs staging via l'API Cockpit
-# (Loki). Lecture seule, token query_logs éphémère (créé puis supprimé dans le
-# run). Aucun secret applicatif affiché : les conteneurs ne loggent jamais de
-# valeur de secret (règle 5), et le token Cockpit est masqué.
+# Diagnostic : reproduit le BOOT des images staging (api, litellm) directement
+# sur le runner GitHub avec docker — mêmes variables d'env que les conteneurs
+# Scaleway (cf. infra/main.tf). Le runner a l'accès réseau (Secret Manager,
+# RDB en ACL ouverte), donc un crash au boot se reproduit ici avec sa stack
+# trace complète dans le log. Si l'image boote ICI mais crashe chez Scaleway,
+# le problème est côté plateforme (sandbox/ressources), pas côté code.
+# Aucun secret affiché : l'app ne logge jamais de valeur de secret (règle 5).
 
 name: Staging container logs
 
 on:
   workflow_dispatch:
-    inputs:
-      containers:
-        description: "Conteneurs à inspecter (séparés par des espaces)"
-        default: "api litellm"
 
 permissions:
   contents: read
@@ -19,6 +18,7 @@ jobs:
   logs:
     runs-on: ubuntu-latest
     env:
+      SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
       SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
       SCW_DEFAULT_PROJECT_ID: ${{ vars.SCW_DEFAULT_PROJECT_ID || '955f9c20-9d60-4943-a810-71c737a42a45' }}
     steps:
@@ -26,52 +26,70 @@ jobs:
         run: |
           [ -n "$SCW_SECRET_KEY" ] || { echo "::error::SCW_SECRET_KEY manquant"; exit 1; }
 
-      - name: Logs Cockpit des conteneurs
+      - name: Images déployées (API Scaleway)
+        id: images
         run: |
           set -euo pipefail
-          API="https://api.scaleway.com/cockpit/v1/regions/fr-par"
-          # Token éphémère query_logs (secret masqué immédiatement).
-          TOK_JSON="$(curl -s -X POST -H "X-Auth-Token: $SCW_SECRET_KEY" \
-            -H 'content-type: application/json' \
-            -d "{\"project_id\":\"$SCW_DEFAULT_PROJECT_ID\",\"name\":\"ci-logs-$GITHUB_RUN_ID\",\"scopes\":[\"query_logs\"]}" \
-            "$API/tokens")"
-          TOKEN_ID="$(echo "$TOK_JSON" | jq -r '.id // empty')"
-          TOKEN_SECRET="$(echo "$TOK_JSON" | jq -r '.secret_key // empty')"
-          if [ -z "$TOKEN_SECRET" ]; then
-            echo "::error::Création du token Cockpit impossible :"
-            echo "$TOK_JSON" | jq -r '.message // .' || true
-            exit 1
-          fi
-          echo "::add-mask::$TOKEN_SECRET"
-          # La source de données logs porte sa propre URL (schéma récent
-          # <ds-id>.logs.cockpit...) ; repli sur l'URL historique sinon.
-          DS_URL="$(curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
-            "$API/data-sources?project_id=$SCW_DEFAULT_PROJECT_ID&types=logs" \
-            | jq -r '.data_sources[0].url // empty')"
-          [ -n "$DS_URL" ] || DS_URL="https://logs.cockpit.fr-par.scw.cloud"
-          END="$(date +%s)000000000"
-          START="$(( $(date +%s) - 7200 ))000000000"
-          for NAME in ${{ inputs.containers || 'api litellm' }}; do
-            echo "═══ Derniers logs « $NAME » (2 h) ═══"
-            RESP="$(curl -sG "$DS_URL/loki/api/v1/query_range" \
-              -H "X-Token: $TOKEN_SECRET" \
-              --data-urlencode "query={resource_type=\"serverless_container\", resource_name=\"$NAME\"}" \
-              --data-urlencode "limit=60" \
-              --data-urlencode "start=$START" --data-urlencode "end=$END" \
-              --data-urlencode "direction=backward")"
-            if ! echo "$RESP" | jq -e '.data.result' >/dev/null 2>&1; then
-              echo "(réponse Loki inattendue)"; echo "$RESP" | head -c 800; echo
-              continue
-            fi
-            COUNT="$(echo "$RESP" | jq '[.data.result[].values[]] | length')"
-            if [ "$COUNT" = "0" ]; then
-              echo "(AUCUN log applicatif — le process ne démarre probablement même pas :"
-              echo " échec avant exec — image/plateforme/stockage.)"
-            else
-              echo "$RESP" | jq -r '[.data.result[].values[]] | sort_by(.[0]) | .[][1]'
-            fi
-            echo
-          done
-          # Nettoyage du token éphémère.
-          [ -n "$TOKEN_ID" ] && curl -s -X DELETE -H "X-Auth-Token: $SCW_SECRET_KEY" \
-            "$API/tokens/$TOKEN_ID" >/dev/null || true
+          NS_ID="$(curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
+            "https://api.scaleway.com/containers/v1beta1/regions/fr-par/namespaces?name=nodaq-staging" \
+            | jq -r '.namespaces[0].id // empty')"
+          [ -n "$NS_ID" ] || { echo "::error::namespace nodaq-staging introuvable"; exit 1; }
+          CONT_JSON="$(curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
+            "https://api.scaleway.com/containers/v1beta1/regions/fr-par/containers?namespace_id=$NS_ID&page_size=50")"
+          echo "$CONT_JSON" | jq -r '.containers[] | "\(.name): \(.status) — \(.error_message // "ok") — \(.registry_image // .image)"'
+          {
+            echo "api_image=$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="api") | .registry_image // .image')"
+            echo "litellm_image=$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="litellm") | .registry_image // .image')"
+            echo "api_url=https://$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="api") | .domain_name')"
+            echo "web_url=https://$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="web") | .domain_name')"
+            echo "litellm_url=https://$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="litellm") | .domain_name')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Login registre Scaleway
+        run: echo "$SCW_SECRET_KEY" | docker login rg.fr-par.scw.cloud -u nologin --password-stdin
+
+      - name: Boot api sur le runner (mêmes env que Scaleway)
+        run: |
+          set -uo pipefail
+          IMG="${{ steps.images.outputs.api_image }}"
+          echo "Image : $IMG"
+          docker pull -q "$IMG"
+          # LITELLM_MASTER_KEY factice : lu seulement lors d'un appel LLM,
+          # jamais au boot. Les autres env répliquent infra/main.tf.
+          docker run -d --name api-repro -p 8080:8080 \
+            -e NODE_ENV=production -e PORT=8080 \
+            -e SCW_DEFAULT_REGION=fr-par \
+            -e SCW_DEFAULT_PROJECT_ID="$SCW_DEFAULT_PROJECT_ID" \
+            -e SCW_SECRET_PREFIX=nodaq-staging- \
+            -e SCW_SECRET_KEY="$SCW_SECRET_KEY" -e SCW_ACCESS_KEY="$SCW_ACCESS_KEY" \
+            -e LITELLM_BASE_URL="${{ steps.images.outputs.litellm_url }}" \
+            -e LITELLM_MASTER_KEY=dummy-not-used-at-boot \
+            -e WEB_ORIGIN="${{ steps.images.outputs.web_url }}" \
+            -e AUTH_BASE_URL="${{ steps.images.outputs.api_url }}" \
+            "$IMG"
+          sleep 20
+          echo "── docker logs (60 dernières lignes) ──"
+          docker logs api-repro 2>&1 | tail -60
+          echo "── état ──"
+          docker inspect api-repro --format 'Running={{.State.Running}} ExitCode={{.State.ExitCode}} OOM={{.State.OOMKilled}}'
+          curl -s -o /dev/null -w '/health local : HTTP %{http_code}\n' --max-time 10 http://localhost:8080/health || true
+          docker rm -f api-repro >/dev/null
+
+      - name: Boot litellm sur le runner
+        run: |
+          set -uo pipefail
+          IMG="${{ steps.images.outputs.litellm_image }}"
+          echo "Image : $IMG"
+          docker pull -q "$IMG"
+          docker run -d --name litellm-repro -p 4000:4000 \
+            -e MISTRAL_API_KEY= \
+            -e LITELLM_MASTER_KEY=dummy-master-key \
+            -e SCW_GENERATIVE_API_KEY="$SCW_SECRET_KEY" \
+            "$IMG"
+          sleep 30
+          echo "── docker logs (40 dernières lignes) ──"
+          docker logs litellm-repro 2>&1 | tail -40
+          echo "── état ──"
+          docker inspect litellm-repro --format 'Running={{.State.Running}} ExitCode={{.State.ExitCode}} OOM={{.State.OOMKilled}}'
+          curl -s -o /dev/null -w '/health/liveliness local : HTTP %{http_code}\n' --max-time 10 http://localhost:4000/health/liveliness || true
+          docker rm -f litellm-repro >/dev/null
