@@ -31,11 +31,12 @@ jobs:
           set -euo pipefail
           API="https://api.scaleway.com/cockpit/v1/regions/fr-par"
           # Token éphémère query_logs (secret masqué immédiatement).
-          # NB : le champ s'appelle token_scopes (un champ scopes inconnu est
-          # ignoré et produit un token SANS droits -> 403 sur Loki).
+          # Le champ de requête est bien `scopes` (tableau d'enum) — la réponse
+          # l'expose sous ce nom ; un champ inconnu est ignoré silencieusement
+          # et produit un token SANS droits (403 sur Loki).
           TOK_JSON="$(curl -s -X POST -H "X-Auth-Token: $SCW_SECRET_KEY" \
             -H 'content-type: application/json' \
-            -d "{\"project_id\":\"$SCW_DEFAULT_PROJECT_ID\",\"name\":\"ci-logs-$GITHUB_RUN_ID\",\"token_scopes\":[\"query_logs\"]}" \
+            -d "{\"project_id\":\"$SCW_DEFAULT_PROJECT_ID\",\"name\":\"ci-logs-$GITHUB_RUN_ID\",\"scopes\":[\"query_logs\"]}" \
             "$API/tokens")"
           TOKEN_ID="$(echo "$TOK_JSON" | jq -r '.id // empty')"
           TOKEN_SECRET="$(echo "$TOK_JSON" | jq -r '.secret_key // empty')"
@@ -45,7 +46,7 @@ jobs:
             exit 1
           fi
           echo "::add-mask::$TOKEN_SECRET"
-          echo "Scopes du token : $(echo "$TOK_JSON" | jq -c '.scopes // .token_scopes // "?"')"
+          echo "Token créé : $(echo "$TOK_JSON" | jq -c 'del(.secret_key)')"
           # La source de données logs porte sa propre URL (schéma récent
           # <ds-id>.logs.cockpit...) ; repli sur l'URL historique sinon.
           DS_JSON="$(curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
@@ -78,7 +79,7 @@ jobs:
             done
           fi
           # Laisse au token Cockpit le temps de se propager avant Loki.
-          sleep 10
+          sleep 15
           END="$(date +%s)000000000"
           START="$(( $(date +%s) - 7200 ))000000000"
           BODY="$(mktemp)"
