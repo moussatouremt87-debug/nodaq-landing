@@ -3,6 +3,12 @@
 
 FROM node:22-slim AS build
 WORKDIR /repo
+# openssl dès le BUILD : `prisma generate` détecte la version d'OpenSSL pour
+# choisir le moteur natif — sans openssl il retombe sur openssl-1.1.x et le
+# runtime (OpenSSL 3) crashe au boot. binaryTargets (schema.prisma) fixe la
+# cible explicitement ; ceci garde le "native" cohérent.
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.json ./
 COPY apps ./apps

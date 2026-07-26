@@ -36,10 +36,10 @@ jobs:
           [ -n "$NS_ID" ] || { echo "::error::namespace nodaq-staging introuvable"; exit 1; }
           CONT_JSON="$(curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
             "https://api.scaleway.com/containers/v1beta1/regions/fr-par/containers?namespace_id=$NS_ID&page_size=50")"
-          echo "$CONT_JSON" | jq -r '.containers[] | "\(.name): \(.status) — \(.error_message // "ok") — \(.image)"'
+          echo "$CONT_JSON" | jq -r '.containers[] | "\(.name): \(.status) — \(.error_message // "ok") — \(.registry_image // .image)"'
           {
-            echo "api_image=$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="api") | .image')"
-            echo "litellm_image=$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="litellm") | .image')"
+            echo "api_image=$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="api") | .registry_image // .image')"
+            echo "litellm_image=$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="litellm") | .registry_image // .image')"
             echo "api_url=https://$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="api") | .domain_name')"
             echo "web_url=https://$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="web") | .domain_name')"
             echo "litellm_url=https://$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="litellm") | .domain_name')"
