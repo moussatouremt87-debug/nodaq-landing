@@ -168,11 +168,18 @@ jobs:
           API_URL="$(terraform output -raw api_url)"
           WEB_URL="$(terraform output -raw web_url)"
           LITELLM_URL="$(terraform output -raw litellm_url)"
+          # error_message est du texte libre Scaleway : on masque préventivement
+          # les secrets générés qui pourraient s'y retrouver.
+          AUTH_SECRET="$(terraform output -raw auth_secret)"
+          LITELLM_KEY="$(terraform output -raw litellm_master_key)"
+          echo "::add-mask::$AUTH_SECRET"; echo "::add-mask::$LITELLM_KEY"
+          # max=200 : /health de l'api doit répondre 200 (401/404 = API mal
+          # câblée) ; web/litellm tolèrent tout < 500 (preuve que le process vit).
           check() {
-            local url="$1" name="$2" code=000
+            local url="$1" name="$2" max="$3" code=000
             for _ in $(seq 1 18); do
               code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" || echo 000)"
-              if [ "$code" -ge 200 ] && [ "$code" -lt 500 ]; then
+              if [ "$code" -ge 200 ] && [ "$code" -le "$max" ]; then
                 echo "✅ $name répond (HTTP $code)"; return 0
               fi
               sleep 10
@@ -181,9 +188,9 @@ jobs:
             return 1
           }
           fail=0
-          check "$API_URL/health" "api" || fail=1
-          check "$WEB_URL" "web" || fail=1
-          check "$LITELLM_URL/health/liveliness" "litellm" || fail=1
+          check "$API_URL/health" "api" 200 || fail=1
+          check "$WEB_URL" "web" 499 || fail=1
+          check "$LITELLM_URL/health/liveliness" "litellm" 499 || fail=1
           if [ "$fail" = 1 ]; then
             NS_ID="$(terraform output -raw container_namespace_id)"; NS_ID="${NS_ID#*/}"
             echo "— Statut des conteneurs (API Scaleway) —"

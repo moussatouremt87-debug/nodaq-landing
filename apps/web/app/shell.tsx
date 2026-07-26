@@ -42,6 +42,10 @@ export function Shell({ children }: { children: ReactNode }) {
   }, [onLogin, pathname, router]);
 
   const activeOrg = me?.memberships.find((m) => m.tenantId === me.activeOrganizationId);
+  // Fail-closed for real: business pages only mount once the session is
+  // confirmed — otherwise they would fire their own API calls in parallel
+  // with getMe(), sidebar on screen, while the redirect is still in flight.
+  const gated = onLogin || me !== null;
 
   async function signOut(): Promise<void> {
     await fetch("/api/auth/sign-out", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
@@ -78,7 +82,9 @@ export function Shell({ children }: { children: ReactNode }) {
           )}
         </div>
       </aside>
-      <main className="content">{children}</main>
+      <main className="content">
+        {gated ? children : <p className="empty">Vérification de la session…</p>}
+      </main>
     </div>
   );
 }

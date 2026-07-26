@@ -252,21 +252,41 @@ describe("ScalewaySecretProvider — writes (fake Secret Manager server)", () =>
 describe("defaultWritableProvider", () => {
   it("Scaleway when configured, file vault in dev, refusal in production", () => {
     expect(
-      defaultWritableProvider({ SCW_SECRET_KEY: "k" } as NodeJS.ProcessEnv),
+      defaultWritableProvider({
+        SCW_SECRET_KEY: "k",
+        SCW_DEFAULT_PROJECT_ID: "proj-1",
+      } as NodeJS.ProcessEnv),
     ).toBeInstanceOf(ScalewaySecretProvider);
     expect(defaultWritableProvider({} as NodeJS.ProcessEnv)).toBeInstanceOf(FileSecretProvider);
     expect(() =>
       defaultWritableProvider({ NODE_ENV: "production" } as NodeJS.ProcessEnv),
     ).toThrow(/Secret Manager/);
   });
+
+  it("refuses the Scaleway vault without project scoping", () => {
+    expect(() => defaultWritableProvider({ SCW_SECRET_KEY: "k" } as NodeJS.ProcessEnv)).toThrow(
+      /SCW_DEFAULT_PROJECT_ID/,
+    );
+  });
 });
 
 describe("defaultProvider", () => {
   it("uses Scaleway when SCW_SECRET_KEY is set, env otherwise", () => {
     expect(
-      defaultProvider({ SCW_SECRET_KEY: "k" } as NodeJS.ProcessEnv),
+      defaultProvider({
+        SCW_SECRET_KEY: "k",
+        SCW_DEFAULT_PROJECT_ID: "proj-1",
+      } as NodeJS.ProcessEnv),
     ).toBeInstanceOf(ScalewaySecretProvider);
     expect(defaultProvider({} as NodeJS.ProcessEnv)).toBeInstanceOf(EnvSecretProvider);
+  });
+
+  it("refuses the Scaleway vault without project scoping (fail-closed)", () => {
+    // Unscoped reads would hit the IAM key's DEFAULT project: either missing
+    // secrets (crash-loop) or a same-named secret from another project.
+    expect(() => defaultProvider({ SCW_SECRET_KEY: "k" } as NodeJS.ProcessEnv)).toThrow(
+      /SCW_DEFAULT_PROJECT_ID/,
+    );
   });
 
   it("refuses to boot in production without the vault", () => {
