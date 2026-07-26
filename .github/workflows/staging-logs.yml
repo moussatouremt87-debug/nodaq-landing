@@ -68,11 +68,15 @@ jobs:
             -e AUTH_BASE_URL="${{ steps.images.outputs.api_url }}" \
             "$IMG"
           sleep 20
+          # curl AVANT docker logs : l'erreur éventuelle du /health doit être
+          # dans les logs capturés. Le corps de réponse est name-only par
+          # design (setErrorHandler), affichable sans risque.
+          echo "── /health local ──"
+          curl -s --max-time 10 http://localhost:8080/health; echo
           echo "── docker logs (60 dernières lignes) ──"
           docker logs api-repro 2>&1 | tail -60
           echo "── état ──"
           docker inspect api-repro --format 'Running={{.State.Running}} ExitCode={{.State.ExitCode}} OOM={{.State.OOMKilled}}'
-          curl -s -o /dev/null -w '/health local : HTTP %{http_code}\n' --max-time 10 http://localhost:8080/health || true
           docker rm -f api-repro >/dev/null
 
       - name: Boot litellm sur le runner

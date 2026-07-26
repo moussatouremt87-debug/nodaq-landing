@@ -137,9 +137,11 @@ resource "scaleway_container" "litellm" {
   name               = "litellm"
   namespace_id       = scaleway_container_namespace.main.id
   image              = "${local.registry}/litellm:${var.image_tag}"
-  port               = 4000
-  cpu_limit          = 500
-  memory_limit_bytes = 1073741824 # 1 GiB
+  port      = 4000
+  cpu_limit = 500
+  # 2 GiB : contraint à 1 GiB, le conteneur est OOM-killed avant même de
+  # logger (reproduit sur le runner CI : ExitCode=137, OOM=true).
+  memory_limit_bytes = 2147483648
   min_scale          = 1
   max_scale          = 1
   privacy            = "public" # protégé par LITELLM_MASTER_KEY ; réseau privé = suivi
