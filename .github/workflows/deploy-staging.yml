@@ -124,11 +124,11 @@ jobs:
           pnpm install --frozen-lockfile
           DATABASE_URL="$DB_URL" pnpm db:migrate:deploy
           # La migration crée app_user avec un mdp de dev : remplacé IMMÉDIATEMENT
-          # par celui géré par Terraform. SQL passé par stdin (pas d'argv), et
-          # log_statement coupé pour la session (le mdp ne doit pas atterrir
-          # dans les logs serveur PostgreSQL).
+          # par celui géré par Terraform. SQL passé par stdin (pas d'argv).
+          # NB : « SET log_statement » est refusé à l'admin managé Scaleway —
+          # risque résiduel accepté en staging : le DDL peut apparaître dans les
+          # logs serveur PG (accès console Scaleway uniquement).
           psql "$DB_URL" -v ON_ERROR_STOP=1 <<SQL
-          SET log_statement TO 'none';
           ALTER ROLE app_user WITH PASSWORD '$APP_PWD';
           -- Scaleway RDB : CONNECT n'est pas accordé par défaut ; sans ce
           -- GRANT, l'API (app_user) ne peut pas joindre la base au runtime.
