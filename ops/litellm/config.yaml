@@ -7,25 +7,29 @@
 #   https://www.scaleway.com/en/docs/generative-apis/reference-content/supported-models/
 
 model_list:
+  # Noms VÉRIFIÉS contre GET https://api.scaleway.ai/v1/models (2026-07) —
+  # un nom inconnu = « Une erreur est survenue côté agent » dans le chat.
   # ── Tier « interne » rapide (généraliste / edge) ─────────────────────────────
   - model_name: sovereign-fast
     litellm_params:
-      model: openai/ministral-8b-latest          # <- nom à confirmer dans Scaleway
+      model: openai/mistral-small-3.2-24b-instruct-2506
       api_base: https://api.scaleway.ai/v1
       api_key: os.environ/SCW_GENERATIVE_API_KEY
 
   # ── Tier « interne » fort (raisonnement) ─────────────────────────────────────
   - model_name: sovereign-strong
     litellm_params:
-      model: openai/mistral-small-latest          # ou un Large hébergé UE
+      model: openai/mistral-medium-3.5-128b
       api_base: https://api.scaleway.ai/v1
       api_key: os.environ/SCW_GENERATIVE_API_KEY
 
-  # ── Redondance UE (Mistral La Plateforme) ────────────────────────────────────
-  - model_name: sovereign-strong                  # même nom logique -> fallback
-    litellm_params:
-      model: mistral/mistral-small-latest
-      api_key: os.environ/MISTRAL_API_KEY
+  # ── Redondance UE (Mistral La Plateforme) — RÉACTIVER seulement avec une
+  #    vraie MISTRAL_API_KEY : le même nom logique est load-balancé
+  #    (simple-shuffle), une clé vide ferait échouer la moitié des appels.
+  # - model_name: sovereign-strong
+  #   litellm_params:
+  #     model: mistral/mistral-small-latest
+  #     api_key: os.environ/MISTRAL_API_KEY
 
   # ── Embeddings multilingues (souverains) ─────────────────────────────────────
   - model_name: embeddings
