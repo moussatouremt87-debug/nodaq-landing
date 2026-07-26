@@ -26,6 +26,14 @@ jobs:
         run: |
           [ -n "$SCW_SECRET_KEY" ] || { echo "::error::SCW_SECRET_KEY manquant"; exit 1; }
 
+      - name: Modèles disponibles sur Generative APIs
+        # Le chat échoue si un model de ops/litellm/config.yaml n'existe pas :
+        # liste OFFICIELLE côté compte (aucune donnée sensible, ids publics).
+        run: |
+          curl -s https://api.scaleway.ai/v1/models \
+            -H "Authorization: Bearer $SCW_SECRET_KEY" \
+            | jq -r '.data[]?.id // empty' | sort || true
+
       - name: Images déployées (API Scaleway)
         id: images
         run: |
