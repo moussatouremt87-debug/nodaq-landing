@@ -63,8 +63,10 @@ describe("ScalewaySecretProvider (fake Secret Manager server)", () => {
     "nodaq-test-AUTH_SECRET": "s3cret-from-vault",
   };
   let baseUrl: string;
+  let lastReadUrl = "";
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
+    lastReadUrl = url.pathname + url.search;
     if (req.headers["x-auth-token"] !== "scw-key-ok") {
       res.writeHead(401).end(JSON.stringify({ message: "unauthorized" }));
       return;
@@ -108,6 +110,28 @@ describe("ScalewaySecretProvider (fake Secret Manager server)", () => {
 
     const badKey = new ScalewaySecretProvider({ secretKey: "wrong", baseUrl });
     await expect(badKey.get("AUTH_SECRET")).rejects.toThrow(/HTTP 401/);
+  });
+
+  it("scopes reads to the project when configured (project_id in the query)", async () => {
+    const provider = new ScalewaySecretProvider({
+      secretKey: "scw-key-ok",
+      prefix: "nodaq-test-",
+      projectId: "proj-42",
+      baseUrl,
+    });
+    expect(await provider.get("AUTH_SECRET")).toBe("s3cret-from-vault");
+    expect(lastReadUrl).toContain("project_id=proj-42");
+  });
+
+  it("defaultProvider passes SCW_DEFAULT_PROJECT_ID down to reads", async () => {
+    const provider = defaultProvider({
+      SCW_SECRET_KEY: "scw-key-ok",
+      SCW_SECRET_PREFIX: "nodaq-test-",
+      SCW_DEFAULT_PROJECT_ID: "proj-42",
+      SCW_API_URL: baseUrl,
+    } as NodeJS.ProcessEnv);
+    expect(await provider.get("AUTH_SECRET")).toBe("s3cret-from-vault");
+    expect(lastReadUrl).toContain("project_id=proj-42");
   });
 
   it("end to end: loadSecrets through the Scaleway provider", async () => {
@@ -228,21 +252,41 @@ describe("ScalewaySecretProvider — writes (fake Secret Manager server)", () =>
 describe("defaultWritableProvider", () => {
   it("Scaleway when configured, file vault in dev, refusal in production", () => {
     expect(
-      defaultWritableProvider({ SCW_SECRET_KEY: "k" } as NodeJS.ProcessEnv),
+      defaultWritableProvider({
+        SCW_SECRET_KEY: "k",
+        SCW_DEFAULT_PROJECT_ID: "proj-1",
+      } as NodeJS.ProcessEnv),
     ).toBeInstanceOf(ScalewaySecretProvider);
     expect(defaultWritableProvider({} as NodeJS.ProcessEnv)).toBeInstanceOf(FileSecretProvider);
     expect(() =>
       defaultWritableProvider({ NODE_ENV: "production" } as NodeJS.ProcessEnv),
     ).toThrow(/Secret Manager/);
   });
+
+  it("refuses the Scaleway vault without project scoping", () => {
+    expect(() => defaultWritableProvider({ SCW_SECRET_KEY: "k" } as NodeJS.ProcessEnv)).toThrow(
+      /SCW_DEFAULT_PROJECT_ID/,
+    );
+  });
 });
 
 describe("defaultProvider", () => {
   it("uses Scaleway when SCW_SECRET_KEY is set, env otherwise", () => {
     expect(
-      defaultProvider({ SCW_SECRET_KEY: "k" } as NodeJS.ProcessEnv),
+      defaultProvider({
+        SCW_SECRET_KEY: "k",
+        SCW_DEFAULT_PROJECT_ID: "proj-1",
+      } as NodeJS.ProcessEnv),
     ).toBeInstanceOf(ScalewaySecretProvider);
     expect(defaultProvider({} as NodeJS.ProcessEnv)).toBeInstanceOf(EnvSecretProvider);
+  });
+
+  it("refuses the Scaleway vault without project scoping (fail-closed)", () => {
+    // Unscoped reads would hit the IAM key's DEFAULT project: either missing
+    // secrets (crash-loop) or a same-named secret from another project.
+    expect(() => defaultProvider({ SCW_SECRET_KEY: "k" } as NodeJS.ProcessEnv)).toThrow(
+      /SCW_DEFAULT_PROJECT_ID/,
+    );
   });
 
   it("refuses to boot in production without the vault", () => {

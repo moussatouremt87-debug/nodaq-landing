@@ -158,6 +158,48 @@ jobs:
             -var "project_id=$SCW_DEFAULT_PROJECT_ID" -var "image_tag=${GITHUB_SHA::12}" \
             -var "api_base_url=$API_URL" -var "web_origin=$WEB_URL"
 
+      - name: Smoke test — conteneurs réellement prêts
+        # Terraform ne FAIL PAS quand un conteneur finit en statut "error"
+        # (simple warning) : le run #6 est passé au vert avec api+litellm
+        # crashés. Ici on sonde les endpoints ; tout code < 500 prouve que le
+        # process répond (401/404 inclus). En échec : statuts + messages
+        # d'erreur des conteneurs via l'API Scaleway (jamais les env/secrets).
+        run: |
+          API_URL="$(terraform output -raw api_url)"
+          WEB_URL="$(terraform output -raw web_url)"
+          LITELLM_URL="$(terraform output -raw litellm_url)"
+          # error_message est du texte libre Scaleway : on masque préventivement
+          # les secrets générés qui pourraient s'y retrouver.
+          AUTH_SECRET="$(terraform output -raw auth_secret)"
+          LITELLM_KEY="$(terraform output -raw litellm_master_key)"
+          echo "::add-mask::$AUTH_SECRET"; echo "::add-mask::$LITELLM_KEY"
+          # max=200 : /health de l'api doit répondre 200 (401/404 = API mal
+          # câblée) ; web/litellm tolèrent tout < 500 (preuve que le process vit).
+          check() {
+            local url="$1" name="$2" max="$3" code=000
+            for _ in $(seq 1 18); do
+              code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" || echo 000)"
+              if [ "$code" -ge 200 ] && [ "$code" -le "$max" ]; then
+                echo "✅ $name répond (HTTP $code)"; return 0
+              fi
+              sleep 10
+            done
+            echo "::error::$name ne répond pas (dernier code: $code) — $url"
+            return 1
+          }
+          fail=0
+          check "$API_URL/health" "api" 200 || fail=1
+          check "$WEB_URL" "web" 499 || fail=1
+          check "$LITELLM_URL/health/liveliness" "litellm" 499 || fail=1
+          if [ "$fail" = 1 ]; then
+            NS_ID="$(terraform output -raw container_namespace_id)"; NS_ID="${NS_ID#*/}"
+            echo "— Statut des conteneurs (API Scaleway) —"
+            curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
+              "https://api.scaleway.com/containers/v1beta1/regions/fr-par/containers?namespace_id=$NS_ID&page_size=50" \
+              | jq -r '.containers[] | "\(.name): \(.status) — \(.error_message // "aucun message")"'
+            exit 1
+          fi
+
       - name: URL de staging
         run: |
           echo "## 🚀 NODAQ staging" >> "$GITHUB_STEP_SUMMARY"

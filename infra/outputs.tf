@@ -16,6 +16,12 @@ output "litellm_url" {
   value = local.litellm_url
 }
 
+# Consommé par le smoke test du workflow (liste des statuts de conteneurs
+# en cas d'échec). Format provider : "fr-par/<uuid>".
+output "container_namespace_id" {
+  value = scaleway_container_namespace.main.id
+}
+
 output "db_host" {
   value = local.db_host
 }
@@ -24,8 +30,20 @@ output "db_port" {
   value = local.db_port
 }
 
-# Sensibles : consommés par le workflow (migrations + ALTER ROLE), masqués dans
-# les logs via ::add-mask:: — jamais affichés.
+# Sensibles : consommés par le workflow (migrations + ALTER ROLE + masquage
+# des logs du smoke test), masqués via ::add-mask:: — jamais affichés. Le
+# smoke test réémet l'error_message des conteneurs (texte libre Scaleway) :
+# tout secret généré susceptible d'y apparaître doit être masquable.
+output "auth_secret" {
+  value     = random_password.auth_secret.result
+  sensitive = true
+}
+
+output "litellm_master_key" {
+  value     = random_password.litellm_master_key.result
+  sensitive = true
+}
+
 output "database_url" {
   value     = local.database_url
   sensitive = true

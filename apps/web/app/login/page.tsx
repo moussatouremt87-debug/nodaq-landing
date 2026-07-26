@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 /*
@@ -40,6 +40,14 @@ export default function LoginPage() {
   const [orgName, setOrgName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [serviceDown, setServiceDown] = useState(false);
+
+  // The shell redirects here with ?service=down when the API answers 5xx
+  // (window is unavailable at render time — hence the effect, not useSearchParams
+  // which would force a Suspense boundary for this one flag).
+  useEffect(() => {
+    setServiceDown(new URLSearchParams(window.location.search).get("service") === "down");
+  }, []);
 
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
@@ -51,11 +59,14 @@ export default function LoginPage() {
           ? await authPost("sign-in/email", { email, password })
           : await authPost("sign-up/email", { email, password, name });
       if (!auth.ok) {
-        // One generic message for both flows: no user enumeration.
+        // 5xx = the API is down, not a credentials problem; otherwise one
+        // generic message for both flows (no user enumeration).
         setError(
-          mode === "signin"
-            ? "Connexion refusée : vérifiez vos identifiants."
-            : "Inscription impossible avec ces informations.",
+          auth.status >= 500
+            ? "Service momentanément indisponible — réessayez dans un instant."
+            : mode === "signin"
+              ? "Connexion refusée : vérifiez vos identifiants."
+              : "Inscription impossible avec ces informations.",
         );
         return;
       }
@@ -83,6 +94,12 @@ export default function LoginPage() {
           ? "Reprenez la main sur votre cockpit."
           : "Votre organisation devient votre espace isolé (tenant)."}
       </p>
+      {serviceDown && (
+        <p className="error-line" role="alert">
+          Le service est momentanément indisponible (API injoignable). Réessayez dans un
+          instant.
+        </p>
+      )}
       <form className="form-card" onSubmit={(e) => void submit(e)}>
         {mode === "signup" && (
           <label>

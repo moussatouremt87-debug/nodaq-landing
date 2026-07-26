@@ -34,11 +34,18 @@ export function Shell({ children }: { children: ReactNode }) {
         else setMe(session);
       })
       .catch((error: unknown) => {
-        if (error instanceof ApiError && error.status === 401) router.replace("/login");
+        // Fail-closed: no confirmed session -> no business page. A 502/503
+        // (API down) must not leave the cockpit shell on screen.
+        const down = !(error instanceof ApiError) || error.status !== 401;
+        router.replace(down ? "/login?service=down" : "/login");
       });
   }, [onLogin, pathname, router]);
 
   const activeOrg = me?.memberships.find((m) => m.tenantId === me.activeOrganizationId);
+  // Fail-closed for real: business pages only mount once the session is
+  // confirmed — otherwise they would fire their own API calls in parallel
+  // with getMe(), sidebar on screen, while the redirect is still in flight.
+  const gated = onLogin || me !== null;
 
   async function signOut(): Promise<void> {
     await fetch("/api/auth/sign-out", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
@@ -75,7 +82,9 @@ export function Shell({ children }: { children: ReactNode }) {
           )}
         </div>
       </aside>
-      <main className="content">{children}</main>
+      <main className="content">
+        {gated ? children : <p className="empty">Vérification de la session…</p>}
+      </main>
     </div>
   );
 }

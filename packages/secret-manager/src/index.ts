@@ -23,6 +23,20 @@ export interface SecretSpec {
  * In production the Scaleway provider is mandatory: refusing to boot beats
  * silently falling back to plaintext env secrets.
  */
+/**
+ * Fail-closed project scoping: with the Scaleway vault active, name lookups
+ * MUST be pinned to our project. Without it they silently run against the IAM
+ * key's default project — either "missing required secrets" (boot crash-loop)
+ * or, worse, a same-named secret from ANOTHER project resolving unnoticed.
+ */
+function requireProjectId(env: NodeJS.ProcessEnv): string {
+  const projectId = env.SCW_DEFAULT_PROJECT_ID;
+  if (!projectId) {
+    throw new Error("Scaleway Secret Manager requires SCW_DEFAULT_PROJECT_ID (project scoping)");
+  }
+  return projectId;
+}
+
 export function defaultProvider(env: NodeJS.ProcessEnv = process.env): SecretProvider {
   const scwKey = env.SCW_SECRET_KEY;
   if (scwKey) {
@@ -30,6 +44,7 @@ export function defaultProvider(env: NodeJS.ProcessEnv = process.env): SecretPro
       secretKey: scwKey,
       region: env.SCW_DEFAULT_REGION ?? "fr-par",
       prefix: env.SCW_SECRET_PREFIX ?? "",
+      projectId: requireProjectId(env),
       ...(env.SCW_API_URL ? { baseUrl: env.SCW_API_URL } : {}),
     });
   }
@@ -55,7 +70,7 @@ export function defaultWritableProvider(
       secretKey: scwKey,
       region: env.SCW_DEFAULT_REGION ?? "fr-par",
       prefix: env.SCW_SECRET_PREFIX ?? "",
-      ...(env.SCW_DEFAULT_PROJECT_ID ? { projectId: env.SCW_DEFAULT_PROJECT_ID } : {}),
+      projectId: requireProjectId(env),
       ...(env.SCW_API_URL ? { baseUrl: env.SCW_API_URL } : {}),
     });
   }
