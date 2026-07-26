@@ -143,6 +143,10 @@ resource "scaleway_container" "litellm" {
   min_scale          = 1
   max_scale          = 1
   privacy            = "public" # protégé par LITELLM_MASTER_KEY ; réseau privé = suivi
+  # L'image boote parfaitement en docker standard (reproduit sur le runner CI)
+  # mais crashe « exit code 128 » dans la sandbox par défaut de Scaleway :
+  # v2 (micro-VM) offre une meilleure compatibilité syscalls.
+  sandbox = "v2"
 
   environment_variables = {
     # Fallback Mistral La Plateforme non provisionné en staging : la config
@@ -173,6 +177,9 @@ resource "scaleway_container" "api" {
   min_scale          = 1
   max_scale          = 2
   privacy            = "public"
+  # Même politique que litellm : le moteur natif Prisma (lib .so) tourne dans
+  # la sandbox v2 (micro-VM), compatibilité maximale.
+  sandbox = "v2"
 
   environment_variables = {
     NODE_ENV               = "production"
