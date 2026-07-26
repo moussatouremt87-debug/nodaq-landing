@@ -72,11 +72,30 @@ resource "scaleway_rdb_database" "appdb" {
 # Scaleway RDB n'accorde AUCUN privilège sur une base créée via l'API — même
 # pas CONNECT pour l'utilisateur initial (« permission denied for database »,
 # run #5 des migrations). On attribue tout à nodaq_admin explicitement.
-# app_user (créé par NOS migrations SQL, invisible de l'API Scaleway) reçoit
-# son GRANT CONNECT via psql dans le workflow, juste après les migrations.
 resource "scaleway_rdb_privilege" "admin_appdb" {
   instance_id   = scaleway_rdb_instance.main.id
   user_name     = scaleway_rdb_instance.main.user_name
+  database_name = scaleway_rdb_database.appdb.name
+  permission    = "all"
+}
+
+# app_user DOIT être déclaré dans le modèle Scaleway : la réconciliation des
+# privilèges RDB (déclenchée par les applies) RÉVOQUE les droits des rôles
+# qu'elle ne connaît pas — le GRANT CONNECT posé en psql disparaissait en
+# quelques minutes (« User does not have CONNECT privilege », run #8).
+# Le rôle existe déjà côté PG (créé par les migrations SQL) : le workflow
+# fait un `terraform import` idempotent avant l'apply. NOSUPERUSER : la RLS
+# (FORCE) reste le rempart — « all » ne la contourne pas.
+resource "scaleway_rdb_user" "app" {
+  instance_id = scaleway_rdb_instance.main.id
+  name        = "app_user"
+  password    = random_password.db_app.result
+  is_admin    = false
+}
+
+resource "scaleway_rdb_privilege" "app_appdb" {
+  instance_id   = scaleway_rdb_instance.main.id
+  user_name     = scaleway_rdb_user.app.name
   database_name = scaleway_rdb_database.appdb.name
   permission    = "all"
 }
