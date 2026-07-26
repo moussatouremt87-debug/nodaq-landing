@@ -45,30 +45,38 @@ jobs:
           echo "::add-mask::$TOKEN_SECRET"
           # La source de données logs porte sa propre URL (schéma récent
           # <ds-id>.logs.cockpit...) ; repli sur l'URL historique sinon.
-          DS_URL="$(curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
-            "$API/data-sources?project_id=$SCW_DEFAULT_PROJECT_ID&types=logs" \
-            | jq -r '.data_sources[0].url // empty')"
+          DS_JSON="$(curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
+            "$API/data-sources?project_id=$SCW_DEFAULT_PROJECT_ID&types=logs")"
+          echo "Sources de données logs : $(echo "$DS_JSON" | jq -r '.total_count // "?"')"
+          echo "$DS_JSON" | jq -r '.data_sources[]? | "- \(.name) [\(.type)] \(.url)"' || true
+          DS_URL="$(echo "$DS_JSON" | jq -r '.data_sources[0].url // empty')"
           [ -n "$DS_URL" ] || DS_URL="https://logs.cockpit.fr-par.scw.cloud"
+          echo "URL interrogée : $DS_URL"
           END="$(date +%s)000000000"
           START="$(( $(date +%s) - 7200 ))000000000"
+          BODY="$(mktemp)"
           for NAME in ${{ inputs.containers || 'api litellm' }}; do
             echo "═══ Derniers logs « $NAME » (2 h) ═══"
-            RESP="$(curl -sG "$DS_URL/loki/api/v1/query_range" \
-              -H "X-Token: $TOKEN_SECRET" \
-              --data-urlencode "query={resource_type=\"serverless_container\", resource_name=\"$NAME\"}" \
-              --data-urlencode "limit=60" \
-              --data-urlencode "start=$START" --data-urlencode "end=$END" \
-              --data-urlencode "direction=backward")"
-            if ! echo "$RESP" | jq -e '.data.result' >/dev/null 2>&1; then
-              echo "(réponse Loki inattendue)"; echo "$RESP" | head -c 800; echo
+            for AUTH in "X-Token: $TOKEN_SECRET" "Authorization: Bearer $TOKEN_SECRET"; do
+              CODE="$(curl -sG -o "$BODY" -w '%{http_code}' "$DS_URL/loki/api/v1/query_range" \
+                -H "$AUTH" \
+                --data-urlencode "query={resource_type=\"serverless_container\", resource_name=\"$NAME\"}" \
+                --data-urlencode "limit=60" \
+                --data-urlencode "start=$START" --data-urlencode "end=$END" \
+                --data-urlencode "direction=backward" || echo 000)"
+              echo "(auth ${AUTH%%:*} -> HTTP $CODE)"
+              [ "$CODE" = "401" ] || [ "$CODE" = "403" ] || break
+            done
+            if ! jq -e '.data.result' "$BODY" >/dev/null 2>&1; then
+              echo "(réponse Loki inattendue, HTTP $CODE)"; head -c 800 "$BODY"; echo
               continue
             fi
-            COUNT="$(echo "$RESP" | jq '[.data.result[].values[]] | length')"
+            COUNT="$(jq '[.data.result[].values[]] | length' "$BODY")"
             if [ "$COUNT" = "0" ]; then
               echo "(AUCUN log applicatif — le process ne démarre probablement même pas :"
               echo " échec avant exec — image/plateforme/stockage.)"
             else
-              echo "$RESP" | jq -r '[.data.result[].values[]] | sort_by(.[0]) | .[][1]'
+              jq -r '[.data.result[].values[]] | sort_by(.[0]) | .[][1]' "$BODY"
             fi
             echo
           done
