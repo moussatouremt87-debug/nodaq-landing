@@ -66,9 +66,12 @@ afterAll(async () => {
 });
 
 describe("pnpm seed:demo", () => {
-  it("garde production : refus sans DEMO_SEED_ALLOWED", () => {
+  it("garde fail-closed : refus en production ET en environnement inconnu", () => {
     expect(() => runSeed({ NODE_ENV: "production", DEMO_SEED_ALLOWED: "" })).toThrow();
-  }, 60_000);
+    // NODE_ENV absent (poste inconnu, DATABASE_URL pointant n'importe où) :
+    // liste blanche -> refus sans flag explicite.
+    expect(() => runSeed({ NODE_ENV: "", DEMO_SEED_ALLOWED: "" })).toThrow();
+  }, 120_000);
 
   it("crée le tenant démo conforme au kit, puis le RESTAURE à l'identique", async () => {
     runSeed();
@@ -128,4 +131,18 @@ describe("pnpm seed:demo", () => {
     expect(actions).toHaveLength(1);
     expect(actions[0]?.status).toBe("pending");
   });
+
+  it("refuse de réécrire le mot de passe d'un compte lié à d'autres organisations", async () => {
+    const user = await admin.user.findUniqueOrThrow({ where: { email: "demo@nodaq.fr" } });
+    const foreign = await admin.membership.create({
+      data: { tenantId: otherTenantId, userId: user.id, role: "member" },
+    });
+    try {
+      expect(() => runSeed()).toThrow();
+    } finally {
+      await admin.membership.delete({ where: { id: foreign.id } });
+    }
+    // Redevenu strictement démo -> le seed repasse.
+    runSeed();
+  }, 120_000);
 });

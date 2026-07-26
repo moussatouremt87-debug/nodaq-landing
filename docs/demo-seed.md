@@ -8,8 +8,11 @@ le kit de démo. À lancer **avant chaque rendez-vous** : les validations faites
 ## Quand et comment
 
 ```bash
-# Local (infra ops/ démarrée, migrations appliquées)
-DEMO_USER_PASSWORD='un-mot-de-passe-fort' pnpm seed:demo
+# Local (infra ops/ démarrée, migrations appliquées).
+# `read -s` : le mot de passe ne finit ni dans l'historique du shell ni dans
+# la ligne de commande visible — ne le passez pas en préfixe de commande.
+read -s DEMO_USER_PASSWORD && export DEMO_USER_PASSWORD
+pnpm seed:demo
 ```
 
 - **Connexion** : `demo@nodaq.fr` / le mot de passe passé en env (jamais en dur).

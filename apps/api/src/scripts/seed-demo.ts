@@ -23,6 +23,7 @@ import {
 } from "@nodaq/mcp-connectors";
 import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
+import { defaultWritableProvider } from "@nodaq/secrets";
 
 export const DEMO_TENANT_NAME = "Élec Provence";
 export const DEMO_TENANT_SLUG = "elec-provence-demo";
@@ -91,8 +92,18 @@ function dunningActions() {
 }
 
 async function main(): Promise<void> {
-  if (process.env.NODE_ENV === "production" && process.env.DEMO_SEED_ALLOWED !== "true") {
-    fail("refus : NODE_ENV=production sans DEMO_SEED_ALLOWED=true (garde staging/prod)");
+  // Garde FAIL-CLOSED (audit RGPD) : liste blanche — un environnement non
+  // identifié (NODE_ENV absent, DATABASE_URL pointant n'importe où) est
+  // refusé ; seuls dev/test passent sans flag, tout le reste exige
+  // DEMO_SEED_ALLOWED=true explicite (staging).
+  const nodeEnv = process.env.NODE_ENV ?? "";
+  const allowed =
+    process.env.DEMO_SEED_ALLOWED === "true" || nodeEnv === "development" || nodeEnv === "test";
+  if (!allowed) {
+    fail(
+      `refus : NODE_ENV="${nodeEnv}" hors {development, test} sans DEMO_SEED_ALLOWED=true ` +
+        "(le script détruit et recrée les données du tenant démo)",
+    );
   }
   const password = process.env.DEMO_USER_PASSWORD;
   if (!password || password.length < 8) {
@@ -115,6 +126,20 @@ async function main(): Promise<void> {
     const tenantId = tenant.id;
 
     // ── User démo + compte credential (hash better-auth) + membership owner ──
+    // Assertion d'identité symétrique à celle du tenant (audit RGPD) : si un
+    // user demo@nodaq.fr existe déjà avec des memberships vers d'AUTRES
+    // organisations, réécrire son mot de passe serait une primitive de reset —
+    // on refuse.
+    const existingUser = await admin.user.findUnique({
+      where: { email: DEMO_USER_EMAIL },
+      include: { memberships: { where: { tenantId: { not: tenantId } }, select: { tenantId: true } } },
+    });
+    if (existingUser && existingUser.memberships.length > 0) {
+      fail(
+        `abort : "${DEMO_USER_EMAIL}" appartient à ${existingUser.memberships.length} autre(s) ` +
+          "organisation(s) — ce script ne réécrit pas le mot de passe d'un compte non-démo",
+      );
+    }
     const user = await admin.user.upsert({
       where: { email: DEMO_USER_EMAIL },
       update: { name: "Démo NODAQ", emailVerified: true },
@@ -172,6 +197,25 @@ async function main(): Promise<void> {
         },
       },
     ];
+
+    // Purge du coffre (audit RGPD) : si le tenant démo a déjà servi à montrer
+    // l'onboarding avec de VRAIS identifiants (statut "active"), la bascule en
+    // "demo" doit supprimer le secret — l'UI affichera « données fictives,
+    // zéro secret » et ce doit être vrai. Hors transaction (IO externe), et
+    // uniquement des refs du namespace du tenant démo.
+    const previousConnectors = await withTenant(tenantId, (tx) => tx.connector.findMany({}));
+    const toPurge = previousConnectors.filter(
+      (row) =>
+        row.status !== DEMO_CONNECTOR_STATUS &&
+        row.credentialsRef.startsWith(`connector/${tenantId}/`),
+    );
+    if (toPurge.length > 0) {
+      const vault = defaultWritableProvider();
+      for (const row of toPurge) {
+        await vault.delete(row.credentialsRef);
+        console.log(`[seed:demo] secret purgé du coffre : ${row.credentialsRef}`);
+      }
+    }
 
     const summary = await withTenant(tenantId, async (tx) => {
       await tx.pendingAction.deleteMany({});

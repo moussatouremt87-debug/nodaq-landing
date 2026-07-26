@@ -194,7 +194,9 @@ model Connector {
   type            String
   /// Secret NAME in the vault (Scaleway Secret Manager in prod) — never the credential itself.
   credentialsRef  String   @map("credentials_ref")
-  /// 'active' | 'disabled'
+  /// 'active' | 'disabled' | 'demo' — validé côté app. 'demo' n'est posé QUE
+  /// par le script de seed démo (clients-fixtures, jamais une vraie connexion) ;
+  /// l'API d'onboarding ne crée que 'active'.
   status          String   @default("active")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
