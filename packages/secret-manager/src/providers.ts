@@ -34,7 +34,12 @@ export interface ScalewayProviderOptions {
   region?: string;
   /** Secret name prefix in the vault, e.g. "nodaq-prod-" -> nodaq-prod-AUTH_SECRET. */
   prefix?: string;
-  /** Scaleway project — required only for set()/delete() (writes). */
+  /**
+   * Scaleway project. Required for set() (creates), and STRONGLY recommended
+   * for reads too: without it, name lookups run against the IAM key's default
+   * project — a key whose default project differs from the app's would make
+   * every secret look missing (boot refused in prod).
+   */
   projectId?: string;
   /** Override for tests (fake server). Defaults to the public Scaleway API. */
   baseUrl?: string;
@@ -78,10 +83,18 @@ export class ScalewaySecretProvider implements WritableSecretProvider {
     return (this.prefix + name).replaceAll("/", "-");
   }
 
+  /** `&project_id=…` when configured — scopes name lookups to OUR project. */
+  private projectParam(): string {
+    return this.options.projectId
+      ? `&project_id=${encodeURIComponent(this.options.projectId)}`
+      : "";
+  }
+
   async get(name: string): Promise<string | undefined> {
     const url =
       `${this.root()}/secrets-by-path/versions/latest/access` +
-      `?secret_name=${encodeURIComponent(this.fullName(name))}`;
+      `?secret_name=${encodeURIComponent(this.fullName(name))}` +
+      this.projectParam();
     const response = await this.fetchFn(url, {
       headers: { "X-Auth-Token": this.options.secretKey },
     });
@@ -106,7 +119,8 @@ export class ScalewaySecretProvider implements WritableSecretProvider {
     for (let page = 1; ; page++) {
       const url =
         `${this.root()}/secrets?name=${encodeURIComponent(fullName)}` +
-        `&page=${page}&page_size=${pageSize}`;
+        `&page=${page}&page_size=${pageSize}` +
+        this.projectParam();
       const response = await this.fetchFn(url, { headers: this.headers() });
       if (!response.ok) {
         throw new Error(`Secret Manager list error for "${fullName}": HTTP ${response.status}`);

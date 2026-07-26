@@ -34,7 +34,10 @@ export function Shell({ children }: { children: ReactNode }) {
         else setMe(session);
       })
       .catch((error: unknown) => {
-        if (error instanceof ApiError && error.status === 401) router.replace("/login");
+        // Fail-closed: no confirmed session -> no business page. A 502/503
+        // (API down) must not leave the cockpit shell on screen.
+        const down = !(error instanceof ApiError) || error.status !== 401;
+        router.replace(down ? "/login?service=down" : "/login");
       });
   }, [onLogin, pathname, router]);
 

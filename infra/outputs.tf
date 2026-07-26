@@ -16,6 +16,12 @@ output "litellm_url" {
   value = local.litellm_url
 }
 
+# Consommé par le smoke test du workflow (liste des statuts de conteneurs
+# en cas d'échec). Format provider : "fr-par/<uuid>".
+output "container_namespace_id" {
+  value = scaleway_container_namespace.main.id
+}
+
 output "db_host" {
   value = local.db_host
 }

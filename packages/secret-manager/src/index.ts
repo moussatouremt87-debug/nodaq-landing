@@ -30,6 +30,9 @@ export function defaultProvider(env: NodeJS.ProcessEnv = process.env): SecretPro
       secretKey: scwKey,
       region: env.SCW_DEFAULT_REGION ?? "fr-par",
       prefix: env.SCW_SECRET_PREFIX ?? "",
+      // Scope name lookups to OUR project: an IAM key whose default project
+      // differs would otherwise resolve nothing (missing required secrets).
+      ...(env.SCW_DEFAULT_PROJECT_ID ? { projectId: env.SCW_DEFAULT_PROJECT_ID } : {}),
       ...(env.SCW_API_URL ? { baseUrl: env.SCW_API_URL } : {}),
     });
   }
