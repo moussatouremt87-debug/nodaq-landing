@@ -72,11 +72,30 @@ resource "scaleway_rdb_database" "appdb" {
 # Scaleway RDB n'accorde AUCUN privilège sur une base créée via l'API — même
 # pas CONNECT pour l'utilisateur initial (« permission denied for database »,
 # run #5 des migrations). On attribue tout à nodaq_admin explicitement.
-# app_user (créé par NOS migrations SQL, invisible de l'API Scaleway) reçoit
-# son GRANT CONNECT via psql dans le workflow, juste après les migrations.
 resource "scaleway_rdb_privilege" "admin_appdb" {
   instance_id   = scaleway_rdb_instance.main.id
   user_name     = scaleway_rdb_instance.main.user_name
+  database_name = scaleway_rdb_database.appdb.name
+  permission    = "all"
+}
+
+# app_user DOIT être déclaré dans le modèle Scaleway : la réconciliation des
+# privilèges RDB (déclenchée par les applies) RÉVOQUE les droits des rôles
+# qu'elle ne connaît pas — le GRANT CONNECT posé en psql disparaissait en
+# quelques minutes (« User does not have CONNECT privilege », run #8).
+# Le rôle existe déjà côté PG (créé par les migrations SQL) : le workflow
+# fait un `terraform import` idempotent avant l'apply. NOSUPERUSER : la RLS
+# (FORCE) reste le rempart — « all » ne la contourne pas.
+resource "scaleway_rdb_user" "app" {
+  instance_id = scaleway_rdb_instance.main.id
+  name        = "app_user"
+  password    = random_password.db_app.result
+  is_admin    = false
+}
+
+resource "scaleway_rdb_privilege" "app_appdb" {
+  instance_id   = scaleway_rdb_instance.main.id
+  user_name     = scaleway_rdb_user.app.name
   database_name = scaleway_rdb_database.appdb.name
   permission    = "all"
 }
@@ -137,9 +156,11 @@ resource "scaleway_container" "litellm" {
   name               = "litellm"
   namespace_id       = scaleway_container_namespace.main.id
   image              = "${local.registry}/litellm:${var.image_tag}"
-  port               = 4000
-  cpu_limit          = 500
-  memory_limit_bytes = 1073741824 # 1 GiB
+  port      = 4000
+  cpu_limit = 500
+  # 2 GiB : contraint à 1 GiB, le conteneur est OOM-killed avant même de
+  # logger (reproduit sur le runner CI : ExitCode=137, OOM=true).
+  memory_limit_bytes = 2147483648
   min_scale          = 1
   max_scale          = 1
   privacy            = "public" # protégé par LITELLM_MASTER_KEY ; réseau privé = suivi

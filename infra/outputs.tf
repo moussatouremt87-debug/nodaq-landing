@@ -26,6 +26,12 @@ output "db_host" {
   value = local.db_host
 }
 
+# Consommé par le workflow pour l'import idempotent de scaleway_rdb_user.app
+# (format fr-par/<uuid>).
+output "rdb_instance_id" {
+  value = scaleway_rdb_instance.main.id
+}
+
 output "db_port" {
   value = local.db_port
 }
