@@ -204,6 +204,60 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     },
   );
 
+  // Draft edit BEFORE decision (owner-only, still pending). The human can
+  // rework the prepared text; ONLY `payload.draft` is writable — invoice
+  // facts, risk score and extraction stay exactly as the agent produced
+  // them, and the edit is attributed (draftEditedBy) for the audit trail.
+  app.patch(
+    "/pending-actions/:id/draft",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const params = z.object({ id: Uuid }).safeParse(request.params);
+      if (!params.success) {
+        return reply.code(400).send({ error: "invalid pending action id" });
+      }
+      const body = z
+        .object({ draft: z.string().trim().min(1).max(20_000) })
+        .safeParse(request.body);
+      if (!body.success) {
+        return reply.code(400).send({ error: "invalid draft" });
+      }
+      return withTenant(request.tenantId, async (tx) => {
+        const action = await tx.pendingAction.findUnique({
+          where: { id: params.data.id },
+          select: { status: true, payload: true },
+        });
+        if (!action) return reply.code(404).send({ error: "pending action not found" });
+        if (action.status !== "pending") {
+          return reply.code(409).send({ error: `already ${action.status}` });
+        }
+        const payload = action.payload as Record<string, unknown> | null;
+        if (typeof payload?.draft !== "string") {
+          return reply.code(422).send({ error: "this action has no editable draft" });
+        }
+        // Conditional update: if a decision slipped in since the read, the
+        // status filter makes this a no-op and the conflict surfaces.
+        const { count } = await tx.pendingAction.updateMany({
+          where: { id: params.data.id, status: "pending" },
+          data: {
+            payload: {
+              ...payload,
+              draft: body.data.draft,
+              draftEditedBy: request.authSession.user.id,
+              draftEditedAt: new Date().toISOString(),
+            },
+          },
+        });
+        if (count === 0) return reply.code(409).send({ error: "already decided" });
+        return reply.send({
+          id: params.data.id,
+          status: "pending",
+          draft: body.data.draft,
+        });
+      });
+    },
+  );
+
   const decide = (decision: "approved" | "rejected") =>
     async (request: FastifyRequest, reply: FastifyReply) => {
       const params = z.object({ id: Uuid }).safeParse(request.params);

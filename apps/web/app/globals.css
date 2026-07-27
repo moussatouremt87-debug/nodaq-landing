@@ -293,13 +293,25 @@ button.danger:hover:not(:disabled) {
 }
 
 input,
-select {
+select,
+textarea {
   font: inherit;
   border: 1px solid var(--rule);
   background: var(--paper-raised);
   padding: 9px 12px;
   width: 100%;
   color: var(--ink);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 140px;
+  line-height: 1.5;
+}
+
+textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
 }
 
 input:focus {
@@ -383,6 +395,19 @@ label .overline {
 
 .chat-input input {
   flex: 1;
+}
+
+/* Faits d'une action en attente (détail de la file de validation). */
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px 18px;
+  margin: 0 0 6px;
+}
+
+.facts dd {
+  margin: 2px 0 0;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Misc ──────────────────────────────────────────────────────────────── */

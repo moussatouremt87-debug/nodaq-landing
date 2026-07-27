@@ -83,6 +83,29 @@ export const getKpis = (): Promise<CockpitKpis> => call(CockpitKpis, "/cockpit/k
 export const listPendingActions = (): Promise<PendingActionSummary[]> =>
   call(z.array(PendingActionSummary), "/pending-actions");
 
+// Owner-gated detail: the payload carries the confidential draft the human
+// reviews (and may edit) before deciding.
+export const PendingActionDetail = PendingActionSummary.extend({
+  payload: z.unknown(),
+});
+export type PendingActionDetail = z.infer<typeof PendingActionDetail>;
+
+export const getPendingAction = (id: string): Promise<PendingActionDetail> =>
+  call(PendingActionDetail, `/pending-actions/${id}`);
+
+export const DraftUpdate = z.object({
+  id: z.string(),
+  status: z.string(),
+  draft: z.string(),
+});
+export type DraftUpdate = z.infer<typeof DraftUpdate>;
+
+export const updatePendingActionDraft = (id: string, draft: string): Promise<DraftUpdate> =>
+  call(DraftUpdate, `/pending-actions/${id}/draft`, {
+    method: "PATCH",
+    body: JSON.stringify({ draft }),
+  });
+
 // Approval executes (ticket 1.6): the response carries the outcome fields.
 export const PendingActionDecision = z.object({
   id: z.string(),
