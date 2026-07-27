@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, decidePendingAction, listPendingActions } from "../../lib/api";
 import type { PendingActionSummary } from "../../lib/api";
+import { actionStatusLabel, actionTypeLabel } from "../../lib/labels";
 
 /*
  * File de validation 1-clic (CLAUDE.md rule #4, UI side). The agent PREPARES;
@@ -81,7 +82,7 @@ export default function ValidationPage() {
           <tbody>
             {waiting.map((action) => (
               <tr key={action.id}>
-                <td className="figure">{action.type}</td>
+                <td>{actionTypeLabel(action.type)}</td>
                 <td>{new Date(action.createdAt).toLocaleString("fr-FR")}</td>
                 <td>
                   <button
@@ -122,9 +123,9 @@ export default function ValidationPage() {
           <tbody>
             {done.map((action) => (
               <tr key={action.id}>
-                <td className="figure">{action.type}</td>
+                <td>{actionTypeLabel(action.type)}</td>
                 <td>
-                  <span className={`badge ${action.status}`}>{action.status}</span>
+                  <span className={`badge ${action.status}`}>{actionStatusLabel(action.status)}</span>
                 </td>
                 <td>
                   {action.validatedAt ? new Date(action.validatedAt).toLocaleString("fr-FR") : "—"}

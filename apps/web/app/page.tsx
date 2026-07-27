@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { formatEuroCents, getKpis, listConnectors, listPendingActions } from "../lib/api";
 import type { CockpitKpis, PendingActionSummary } from "../lib/api";
+import { actionStatusLabel, actionTypeLabel } from "../lib/labels";
 
 /*
  * Cockpit v0 (ticket 1.7) — the owner's ledger view: treasury projection
@@ -128,9 +129,9 @@ export default function CockpitPage() {
           <tbody>
             {recent.map((action) => (
               <tr key={action.id}>
-                <td className="figure">{action.type}</td>
+                <td>{actionTypeLabel(action.type)}</td>
                 <td>
-                  <span className={`badge ${action.status}`}>{action.status}</span>
+                  <span className={`badge ${action.status}`}>{actionStatusLabel(action.status)}</span>
                 </td>
                 <td>{new Date(action.createdAt).toLocaleString("fr-FR")}</td>
               </tr>
