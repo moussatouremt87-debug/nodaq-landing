@@ -91,7 +91,7 @@ export const PendingActionDetail = PendingActionSummary.extend({
 export type PendingActionDetail = z.infer<typeof PendingActionDetail>;
 
 export const getPendingAction = (id: string): Promise<PendingActionDetail> =>
-  call(PendingActionDetail, `/pending-actions/${id}`);
+  call(PendingActionDetail, `/pending-actions/${encodeURIComponent(id)}`);
 
 export const DraftUpdate = z.object({
   id: z.string(),
@@ -101,7 +101,7 @@ export const DraftUpdate = z.object({
 export type DraftUpdate = z.infer<typeof DraftUpdate>;
 
 export const updatePendingActionDraft = (id: string, draft: string): Promise<DraftUpdate> =>
-  call(DraftUpdate, `/pending-actions/${id}/draft`, {
+  call(DraftUpdate, `/pending-actions/${encodeURIComponent(id)}/draft`, {
     method: "PATCH",
     body: JSON.stringify({ draft }),
   });

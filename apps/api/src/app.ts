@@ -218,23 +218,32 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       }
       const body = z
         .object({ draft: z.string().trim().min(1).max(20_000) })
+        .strict()
         .safeParse(request.body);
       if (!body.success) {
         return reply.code(400).send({ error: "invalid draft" });
       }
-      return withTenant(request.tenantId, async (tx) => {
+      // The reply is sent AFTER withTenant returns: a 200 must mean the
+      // edit is COMMITTED (the human then approves what is really stored).
+      const outcome = await withTenant(request.tenantId, async (tx) => {
         const action = await tx.pendingAction.findUnique({
           where: { id: params.data.id },
           select: { status: true, payload: true },
         });
-        if (!action) return reply.code(404).send({ error: "pending action not found" });
+        if (!action) return { code: 404 as const, error: "pending action not found" };
         if (action.status !== "pending") {
-          return reply.code(409).send({ error: `already ${action.status}` });
+          return { code: 409 as const, error: `already ${action.status}` };
         }
         const payload = action.payload as Record<string, unknown> | null;
         if (typeof payload?.draft !== "string") {
-          return reply.code(422).send({ error: "this action has no editable draft" });
+          return { code: 422 as const, error: "this action has no editable draft" };
         }
+        // Append-only audit trail: the agent's original text is kept once
+        // (machine vs human attribution must stay provable), every edit adds
+        // a {by, at} entry — nothing is ever erased.
+        const originalDraft =
+          typeof payload.originalDraft === "string" ? payload.originalDraft : payload.draft;
+        const draftEdits = Array.isArray(payload.draftEdits) ? payload.draftEdits : [];
         // Conditional update: if a decision slipped in since the read, the
         // status filter makes this a no-op and the conflict surfaces.
         const { count } = await tx.pendingAction.updateMany({
@@ -243,18 +252,21 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             payload: {
               ...payload,
               draft: body.data.draft,
-              draftEditedBy: request.authSession.user.id,
-              draftEditedAt: new Date().toISOString(),
+              originalDraft,
+              draftEdits: [
+                ...draftEdits,
+                { by: request.authSession.user.id, at: new Date().toISOString() },
+              ],
             },
           },
         });
-        if (count === 0) return reply.code(409).send({ error: "already decided" });
-        return reply.send({
-          id: params.data.id,
-          status: "pending",
-          draft: body.data.draft,
-        });
+        if (count === 0) return { code: 409 as const, error: "already decided" };
+        return { code: 200 as const };
       });
+      if (outcome.code !== 200) {
+        return reply.code(outcome.code).send({ error: outcome.error });
+      }
+      return reply.send({ id: params.data.id, status: "pending", draft: body.data.draft });
     },
   );
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   decidePendingAction,
@@ -87,7 +87,11 @@ export default function ValidationPage() {
   const [notice, setNotice] = useState<string | null>(null);
 
   // Detail of the OPEN row (one at a time): fetched payload + draft editor.
+  // The ref mirrors openId so a SLOW detail response for a previously opened
+  // row can never overwrite the row currently open (confidential drafts must
+  // never bleed from one action into another).
   const [openId, setOpenId] = useState<string | null>(null);
+  const openIdRef = useRef<string | null>(null);
   const [detail, setDetail] = useState<PendingActionDetail | null>(null);
   const [detailNotice, setDetailNotice] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -103,6 +107,7 @@ export default function ValidationPage() {
   useEffect(refresh, [refresh]);
 
   const closeDetail = useCallback(() => {
+    openIdRef.current = null;
     setOpenId(null);
     setDetail(null);
     setDetailNotice(null);
@@ -111,19 +116,31 @@ export default function ValidationPage() {
   }, []);
 
   async function toggleDetail(id: string): Promise<void> {
+    // Closing (or switching away from) a modified, unsaved draft must be a
+    // conscious choice — otherwise the correction is silently thrown away
+    // and "Valider" would execute the original text.
+    if (openId !== null && draft !== savedDraft) {
+      const discard = window.confirm(
+        "Brouillon modifié non enregistré — fermer et perdre la modification ?",
+      );
+      if (!discard) return;
+    }
     if (openId === id) {
       closeDetail();
       return;
     }
     closeDetail();
+    openIdRef.current = id;
     setOpenId(id);
     try {
       const loaded = await getPendingAction(id);
+      if (openIdRef.current !== id) return; // stale response: row changed since
       setDetail(loaded);
       const text = asString(asDict(loaded.payload)?.draft) ?? "";
       setDraft(text);
       setSavedDraft(text);
     } catch (error) {
+      if (openIdRef.current !== id) return;
       setDetailNotice(
         error instanceof ApiError && error.status === 403
           ? "Détail réservé au rôle owner."
