@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   decidePendingAction,
@@ -10,14 +10,14 @@ import {
   updatePendingActionDraft,
 } from "../../lib/api";
 import type { PendingActionDetail, PendingActionSummary } from "../../lib/api";
-import { actionStatusLabel, actionTypeLabel } from "../../lib/labels";
+import { actionChipLabel, actionStatusLabel, actionTypeLabel, timeAgo } from "../../lib/labels";
 
 /*
- * File de validation 1-clic (CLAUDE.md rule #4, UI side). The agent PREPARES;
- * only a human decides here. Approve = the single execution point (idempotent
- * server-side: a double click gets a 409, never a double send). The list is
- * metadata-only; opening a row fetches the owner-gated detail so the human
- * can READ the draft — and rework it — before deciding.
+ * File de validation (UI v2, maquette Figma) — master-detail. The agent
+ * PREPARES; only a human decides here. Selecting an action loads its
+ * owner-gated payload: the human READS the draft (email preview), can rework
+ * it (Modifier -> Enregistrer, PR #29 API), then validates — the single,
+ * idempotent execution point (double click = 409, never a double send).
  */
 
 type Dict = Record<string, unknown>;
@@ -26,125 +26,156 @@ const asDict = (value: unknown): Dict | null =>
 const asString = (value: unknown): string | null => (typeof value === "string" ? value : null);
 const asNumber = (value: unknown): number | null => (typeof value === "number" ? value : null);
 
-/** Facts the agent grounded the action on — read-only, never editable. */
-function ActionFacts({ payload }: { payload: Dict }) {
-  const invoice = asDict(payload.invoice);
-  const risk = asDict(payload.risk);
-  const quote = asDict(payload.quote);
-  const reconciliation = asDict(payload.reconciliation);
-  const rows: [string, string][] = [];
+const TABS = [
+  { key: "all", label: "Toutes", types: null },
+  { key: "dunning", label: "Relances", types: ["send_dunning"] },
+  { key: "quote", label: "Devis", types: ["create_quote"] },
+  { key: "entries", label: "Écritures", types: ["submit_reconciliation", "book_invoice"] },
+] as const;
 
+/** Titre + méta d'une action pour la liste (payload owner-gated si chargé). */
+function actionLine(action: PendingActionSummary, detail: PendingActionDetail | undefined) {
+  const payload = detail ? asDict(detail.payload) : null;
+  const invoice = asDict(payload?.invoice);
+  const quote = asDict(payload?.quote);
+  const reconciliation = asDict(payload?.reconciliation);
   if (invoice) {
-    const number = asString(invoice.number) ?? asString(invoice.id);
-    if (number) rows.push(["Facture", number]);
-    const customer = asString(invoice.customer);
-    if (customer) rows.push(["Client", customer]);
-    const label = asString(invoice.label);
-    if (label) rows.push(["Objet", label]);
-    const amount = asNumber(invoice.amountCents);
-    if (amount !== null) rows.push(["Montant", formatEuroCents(amount)]);
-    const daysOverdue = asNumber(risk?.daysOverdue);
-    if (daysOverdue !== null) rows.push(["Retard", `${daysOverdue} jours`]);
+    const days = asNumber(asDict(payload?.risk)?.daysOverdue);
+    return {
+      title: `Relance — Facture ${asString(invoice.number) ?? ""}`.trim(),
+      meta: [
+        asString(invoice.customer),
+        asNumber(invoice.amountCents) !== null
+          ? formatEuroCents(asNumber(invoice.amountCents) ?? 0)
+          : null,
+        days !== null ? `${days} j de retard` : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
   }
   if (quote) {
-    const number = asString(quote.number);
-    if (number) rows.push(["Devis", number]);
-    const customer = asString(quote.customer);
-    if (customer) rows.push(["Client", customer]);
-    const label = asString(quote.label);
-    if (label) rows.push(["Objet", label]);
-    const amount = asNumber(quote.amountCents);
-    if (amount !== null) rows.push(["Montant", formatEuroCents(amount)]);
+    return {
+      title: `Devis ${asString(quote.number) ?? ""}`.trim(),
+      meta: [
+        asString(quote.customer),
+        asNumber(quote.amountCents) !== null
+          ? formatEuroCents(asNumber(quote.amountCents) ?? 0)
+          : null,
+        asString(quote.label),
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
   }
   if (reconciliation) {
-    const items = Array.isArray(reconciliation.items) ? reconciliation.items : [];
-    for (const item of items) {
-      const entry = asDict(item);
-      const label = asString(entry?.label);
-      const amount = asNumber(entry?.amountCents);
-      if (label && amount !== null) rows.push([label, formatEuroCents(amount)]);
-    }
+    const entries = asNumber(reconciliation.entries);
     const total = asNumber(reconciliation.totalCents);
-    if (total !== null) rows.push(["Total", formatEuroCents(total)]);
+    return {
+      title: "Rapprochement bancaire",
+      meta: [
+        entries !== null ? `${entries} écritures à rapprocher` : null,
+        total !== null ? formatEuroCents(total) : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
   }
+  return { title: actionTypeLabel(action.type), meta: "" };
+}
 
-  if (rows.length === 0) return null;
-  return (
-    <dl className="facts">
-      {rows.map(([term, value], index) => (
-        <div key={`${term}-${index}`}>
-          <dt className="overline">{term}</dt>
-          <dd>{value}</dd>
-        </div>
-      ))}
-    </dl>
-  );
+/** Objet d'e-mail dérivé des faits (le brouillon est le corps). */
+function subjectFor(payload: Dict | null): string | null {
+  const invoice = asDict(payload?.invoice);
+  if (invoice) {
+    const number = asString(invoice.number);
+    return number ? `Relance — facture n°${number.replace(/^#/, "")} échue` : "Relance de facture";
+  }
+  const quote = asDict(payload?.quote);
+  if (quote) {
+    return [`Devis ${asString(quote.number) ?? ""}`.trim(), asString(quote.customer)]
+      .filter(Boolean)
+      .join(" — ");
+  }
+  return null;
 }
 
 export default function ValidationPage() {
   const [actions, setActions] = useState<PendingActionSummary[]>([]);
+  const [details, setDetails] = useState<Record<string, PendingActionDetail>>({});
+  const [tab, setTab] = useState<(typeof TABS)[number]["key"]>("all");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // Detail of the OPEN row (one at a time): fetched payload + draft editor.
-  // The ref mirrors openId so a SLOW detail response for a previously opened
-  // row can never overwrite the row currently open (confidential drafts must
-  // never bleed from one action into another).
-  const [openId, setOpenId] = useState<string | null>(null);
-  const openIdRef = useRef<string | null>(null);
+  // Détail SÉLECTIONNÉ. La ref miroir empêche une réponse tardive d'une
+  // sélection précédente d'écraser la ligne courante (aucune fuite de
+  // brouillon confidentiel d'une action vers une autre).
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedRef = useRef<string | null>(null);
   const [detail, setDetail] = useState<PendingActionDetail | null>(null);
   const [detailNotice, setDetailNotice] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [savedDraft, setSavedDraft] = useState("");
   const [saving, setSaving] = useState(false);
 
   const refresh = useCallback(() => {
     listPendingActions()
-      .then(setActions)
+      .then((list) => {
+        setActions(list);
+        void Promise.allSettled(
+          list
+            .filter((a) => a.status === "pending")
+            .slice(0, 12)
+            .map((a) => getPendingAction(a.id)),
+        ).then((results) => {
+          const loaded: Record<string, PendingActionDetail> = {};
+          for (const result of results) {
+            if (result.status === "fulfilled") loaded[result.value.id] = result.value;
+          }
+          setDetails(loaded);
+        });
+      })
       .catch(() => setNotice("Impossible de charger la file."));
   }, []);
 
   useEffect(refresh, [refresh]);
 
-  const closeDetail = useCallback(() => {
-    openIdRef.current = null;
-    setOpenId(null);
+  const clearSelection = useCallback(() => {
+    selectedRef.current = null;
+    setSelectedId(null);
     setDetail(null);
     setDetailNotice(null);
+    setEditing(false);
     setDraft("");
     setSavedDraft("");
   }, []);
 
-  async function toggleDetail(id: string): Promise<void> {
-    // Closing (or switching away from) a modified, unsaved draft must be a
-    // conscious choice — otherwise the correction is silently thrown away
-    // and "Valider" would execute the original text.
-    if (openId !== null && draft !== savedDraft) {
+  async function select(id: string): Promise<void> {
+    // Quitter un brouillon modifié non enregistré = choix conscient.
+    if (selectedId !== null && draft !== savedDraft) {
       const discard = window.confirm(
-        "Brouillon modifié non enregistré — fermer et perdre la modification ?",
+        "Brouillon modifié non enregistré — changer d'action et perdre la modification ?",
       );
       if (!discard) return;
     }
-    if (openId === id) {
-      closeDetail();
-      return;
-    }
-    closeDetail();
-    openIdRef.current = id;
-    setOpenId(id);
+    if (selectedId === id) return;
+    clearSelection();
+    selectedRef.current = id;
+    setSelectedId(id);
     try {
       const loaded = await getPendingAction(id);
-      if (openIdRef.current !== id) return; // stale response: row changed since
+      if (selectedRef.current !== id) return; // réponse tardive : sélection changée
       setDetail(loaded);
       const text = asString(asDict(loaded.payload)?.draft) ?? "";
       setDraft(text);
       setSavedDraft(text);
     } catch (error) {
-      if (openIdRef.current !== id) return;
+      if (selectedRef.current !== id) return;
       setDetailNotice(
         error instanceof ApiError && error.status === 403
-          ? "Détail réservé au rôle owner."
-          : "Impossible de charger le détail.",
+          ? "Aperçu réservé au rôle owner."
+          : "Impossible de charger l'aperçu.",
       );
     }
   }
@@ -156,6 +187,7 @@ export default function ValidationPage() {
       const updated = await updatePendingActionDraft(id, draft);
       setSavedDraft(updated.draft);
       setDraft(updated.draft);
+      setEditing(false);
       setDetailNotice("Brouillon enregistré — c'est ce texte qui partira à la validation.");
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
@@ -183,7 +215,7 @@ export default function ValidationPage() {
             : "Action validée — l'exécution a échoué, voir le détail."
           : "Action rejetée, rien n'a été exécuté.",
       );
-      closeDetail();
+      clearSelection();
       refresh();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
@@ -201,138 +233,276 @@ export default function ValidationPage() {
 
   const waiting = actions.filter((a) => a.status === "pending");
   const done = actions.filter((a) => a.status !== "pending");
+  const activeTab = TABS.find((t) => t.key === tab) ?? TABS[0];
+  const visible = activeTab.types
+    ? waiting.filter((a) => (activeTab.types as readonly string[]).includes(a.type))
+    : waiting;
+
   const detailPayload = detail ? asDict(detail.payload) : null;
   const hasDraft = asString(detailPayload?.draft) !== null;
   const dirty = draft !== savedDraft;
+  const selectedSummary = waiting.find((a) => a.id === selectedId) ?? null;
+  const selectedLine = selectedSummary ? actionLine(selectedSummary, detail ?? undefined) : null;
+  const subject = subjectFor(detailPayload);
+  const invoice = asDict(detailPayload?.invoice);
+  const quote = asDict(detailPayload?.quote);
+  const reconciliation = asDict(detailPayload?.reconciliation);
+  const daysOverdue = asNumber(asDict(detailPayload?.risk)?.daysOverdue);
 
   return (
     <>
-      <h1 className="page-title">File de validation</h1>
+      <h1 className="page-title">
+        {waiting.length} action{waiting.length > 1 ? "s" : ""} à valider
+      </h1>
       <p className="page-sub">
-        Les employés virtuels préparent — vous décidez. Ouvrez une action pour lire (et corriger)
-        le brouillon avant de valider : une validation exécute l&apos;action une seule fois.
+        Préparées par vos employés virtuels. Relisez, puis validez en un clic — rien n&apos;est
+        envoyé sans vous.
       </p>
 
       {notice && <p className="error-line">{notice}</p>}
 
-      <h2 className="overline" style={{ margin: "24px 0 12px" }}>
-        En attente ({waiting.length})
-      </h2>
-      {waiting.length === 0 ? (
-        <p className="empty">Rien à valider.</p>
-      ) : (
-        <table className="ledger">
-          <thead>
-            <tr>
-              <th>Type</th>
-              <th>Préparée le</th>
-              <th style={{ width: 300 }}>Décision</th>
-            </tr>
-          </thead>
-          <tbody>
-            {waiting.map((action) => (
-              <Fragment key={action.id}>
-                <tr>
-                  <td>{actionTypeLabel(action.type)}</td>
-                  <td>{new Date(action.createdAt).toLocaleString("fr-FR")}</td>
-                  <td>
-                    <button onClick={() => void toggleDetail(action.id)}>
-                      {openId === action.id ? "Fermer" : "Voir"}
-                    </button>{" "}
+      <div className="tabs">
+        {TABS.map((t) => {
+          const count = t.types
+            ? waiting.filter((a) => (t.types as readonly string[]).includes(a.type)).length
+            : waiting.length;
+          if (t.types && count === 0) return null;
+          return (
+            <button
+              key={t.key}
+              className={tab === t.key ? "active" : ""}
+              onClick={() => setTab(t.key)}
+            >
+              {t.label} <span className="c">{count}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="validation-cols">
+        <div>
+          {visible.length === 0 ? (
+            <p className="empty">Rien à valider.</p>
+          ) : (
+            visible.map((action) => {
+              const line = actionLine(action, details[action.id]);
+              return (
+                <button
+                  key={action.id}
+                  className={`action-card ${selectedId === action.id ? "selected" : ""}`}
+                  onClick={() => void select(action.id)}
+                >
+                  <div className="trow">
+                    <span className={`chip ${action.type}`}>{actionChipLabel(action.type)}</span>
+                    <span className="when">{timeAgo(action.createdAt)}</span>
+                  </div>
+                  <div className="atitle">{line.title}</div>
+                  {line.meta && <div className="ameta">{line.meta}</div>}
+                </button>
+              );
+            })
+          )}
+
+          {done.length > 0 && (
+            <>
+              <h2 className="overline" style={{ margin: "26px 0 10px", display: "block" }}>
+                Historique
+              </h2>
+              <table className="ledger">
+                <tbody>
+                  {done.slice(0, 8).map((action) => (
+                    <tr key={action.id}>
+                      <td>{actionTypeLabel(action.type)}</td>
+                      <td>
+                        <span className={`badge ${action.status}`}>
+                          {actionStatusLabel(action.status)}
+                        </span>
+                      </td>
+                      <td style={{ color: "var(--ink-faint)", fontSize: 12 }}>
+                        {action.validatedAt
+                          ? new Date(action.validatedAt).toLocaleString("fr-FR")
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+        </div>
+
+        <div className="detail-panel">
+          {selectedId === null ? (
+            <div className="card">
+              <p className="empty" style={{ padding: "40px 0", textAlign: "center" }}>
+                Sélectionnez une action pour relire son contenu avant de décider.
+              </p>
+            </div>
+          ) : (
+            <div className="card">
+              <div className="card-header">
+                <div className="titles">
+                  <div className="title">Aperçu — {selectedLine?.title ?? "…"}</div>
+                </div>
+                <span className="tag-souverain">Souverain · rédigé par Mistral EU</span>
+              </div>
+
+              {detailNotice && <p className="hint">{detailNotice}</p>}
+              {!detail && !detailNotice && <p className="hint">Chargement…</p>}
+
+              {detailPayload && (
+                <>
+                  <div className="meta-row">
+                    {invoice && (
+                      <>
+                        <div className="meta">
+                          <span className="overline">Destinataire</span>
+                          <div className="value">{asString(invoice.customer) ?? "—"}</div>
+                        </div>
+                        <div className="meta">
+                          <span className="overline">Montant dû</span>
+                          <div className="value">
+                            {asNumber(invoice.amountCents) !== null
+                              ? formatEuroCents(asNumber(invoice.amountCents) ?? 0)
+                              : "—"}
+                          </div>
+                        </div>
+                        <div className="meta">
+                          <span className="overline">Échéance</span>
+                          <div className="value">
+                            {daysOverdue !== null ? `Dépassée de ${daysOverdue} j` : "—"}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                    {quote && (
+                      <>
+                        <div className="meta">
+                          <span className="overline">Client</span>
+                          <div className="value">{asString(quote.customer) ?? "—"}</div>
+                        </div>
+                        <div className="meta">
+                          <span className="overline">Montant</span>
+                          <div className="value">
+                            {asNumber(quote.amountCents) !== null
+                              ? formatEuroCents(asNumber(quote.amountCents) ?? 0)
+                              : "—"}
+                          </div>
+                        </div>
+                        <div className="meta">
+                          <span className="overline">Objet</span>
+                          <div className="value">{asString(quote.label) ?? "—"}</div>
+                        </div>
+                      </>
+                    )}
+                    {reconciliation && (
+                      <>
+                        <div className="meta">
+                          <span className="overline">Écritures</span>
+                          <div className="value">{asNumber(reconciliation.entries) ?? "—"}</div>
+                        </div>
+                        <div className="meta">
+                          <span className="overline">Total</span>
+                          <div className="value">
+                            {asNumber(reconciliation.totalCents) !== null
+                              ? formatEuroCents(asNumber(reconciliation.totalCents) ?? 0)
+                              : "—"}
+                          </div>
+                        </div>
+                        <div className="meta" />
+                      </>
+                    )}
+                  </div>
+
+                  {hasDraft ? (
+                    <div className="email-preview">
+                      {subject && (
+                        <>
+                          <span className="overline">Objet</span>
+                          <div className="subj">{subject}</div>
+                        </>
+                      )}
+                      {editing ? (
+                        <textarea
+                          value={draft}
+                          rows={10}
+                          onChange={(event) => setDraft(event.target.value)}
+                          aria-label="Brouillon modifiable"
+                        />
+                      ) : (
+                        <div className="body">{draft}</div>
+                      )}
+                    </div>
+                  ) : reconciliation ? (
+                    <div className="email-preview">
+                      <span className="overline">Écritures à rapprocher</span>
+                      <div className="body" style={{ borderTop: "none", paddingTop: 8 }}>
+                        {(Array.isArray(reconciliation.items) ? reconciliation.items : []).map(
+                          (item, index) => {
+                            const entry = asDict(item);
+                            return (
+                              <div
+                                key={index}
+                                style={{ display: "flex", justifyContent: "space-between" }}
+                              >
+                                <span>{asString(entry?.label) ?? "—"}</span>
+                                <span className="figure">
+                                  {asNumber(entry?.amountCents) !== null
+                                    ? formatEuroCents(asNumber(entry?.amountCents) ?? 0)
+                                    : ""}
+                                </span>
+                              </div>
+                            );
+                          },
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="reassure">
+                    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden>
+                      <rect x="1" y="1" width="11" height="11" rx="3" stroke="currentColor" strokeWidth="1.5" />
+                      <path d="m4 6.7 1.8 1.8L9.2 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                    Vous validez — l&apos;employé virtuel n&apos;envoie jamais seul.
+                  </div>
+
+                  <div className="action-bar">
                     <button
-                      className="primary"
-                      disabled={busyId === action.id || (openId === action.id && dirty)}
+                      className="primary grow"
+                      disabled={busyId === selectedId || (editing && dirty)}
                       title={
-                        openId === action.id && dirty
-                          ? "Enregistrez d'abord votre brouillon modifié."
-                          : undefined
+                        editing && dirty ? "Enregistrez d'abord votre brouillon modifié." : undefined
                       }
-                      onClick={() => void decide(action.id, "approve")}
+                      onClick={() => void decide(selectedId, "approve")}
                     >
-                      Valider
-                    </button>{" "}
+                      Valider et envoyer
+                    </button>
+                    {hasDraft &&
+                      (editing ? (
+                        <button
+                          disabled={!dirty || saving || draft.trim().length === 0}
+                          onClick={() => void saveDraft(selectedId)}
+                        >
+                          {saving ? "Enregistrement…" : "Enregistrer"}
+                        </button>
+                      ) : (
+                        <button onClick={() => setEditing(true)}>Modifier</button>
+                      ))}
                     <button
                       className="danger"
-                      disabled={busyId === action.id}
-                      onClick={() => void decide(action.id, "reject")}
+                      disabled={busyId === selectedId}
+                      onClick={() => void decide(selectedId, "reject")}
                     >
                       Rejeter
                     </button>
-                  </td>
-                </tr>
-                {openId === action.id && (
-                  <tr>
-                    <td colSpan={3}>
-                      <div className="card" style={{ margin: "4px 0 12px" }}>
-                        {detailNotice && <p className="hint">{detailNotice}</p>}
-                        {!detail && !detailNotice && <p className="hint">Chargement…</p>}
-                        {detailPayload && (
-                          <>
-                            <ActionFacts payload={detailPayload} />
-                            {hasDraft ? (
-                              <label style={{ marginTop: 14 }}>
-                                <span className="overline">Brouillon (modifiable)</span>
-                                <textarea
-                                  value={draft}
-                                  rows={8}
-                                  onChange={(event) => setDraft(event.target.value)}
-                                />
-                              </label>
-                            ) : (
-                              <p className="hint" style={{ marginTop: 10 }}>
-                                Pas de brouillon libre pour ce type d&apos;action — les éléments
-                                ci-dessus sont exactement ce qui sera exécuté.
-                              </p>
-                            )}
-                            {hasDraft && (
-                              <button
-                                disabled={!dirty || saving || draft.trim().length === 0}
-                                onClick={() => void saveDraft(action.id)}
-                              >
-                                {saving ? "Enregistrement…" : "Enregistrer le brouillon"}
-                              </button>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      <h2 className="overline" style={{ margin: "34px 0 12px" }}>
-        Historique
-      </h2>
-      {done.length === 0 ? (
-        <p className="empty">Aucune décision passée.</p>
-      ) : (
-        <table className="ledger">
-          <thead>
-            <tr>
-              <th>Type</th>
-              <th>Statut</th>
-              <th>Décidée le</th>
-            </tr>
-          </thead>
-          <tbody>
-            {done.map((action) => (
-              <tr key={action.id}>
-                <td>{actionTypeLabel(action.type)}</td>
-                <td>
-                  <span className={`badge ${action.status}`}>{actionStatusLabel(action.status)}</span>
-                </td>
-                <td>
-                  {action.validatedAt ? new Date(action.validatedAt).toLocaleString("fr-FR") : "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </>
   );
 }

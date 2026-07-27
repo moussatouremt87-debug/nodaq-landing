@@ -1,27 +1,125 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { formatEuroCents, getKpis, listConnectors, listPendingActions } from "../lib/api";
-import type { CockpitKpis, PendingActionSummary } from "../lib/api";
-import { actionStatusLabel, actionTypeLabel } from "../lib/labels";
+import { useCallback, useEffect, useState } from "react";
+import {
+  formatEuroCents,
+  getKpis,
+  getMe,
+  getPendingAction,
+  decidePendingAction,
+  listConnectors,
+  listPendingActions,
+} from "../lib/api";
+import type { CockpitKpis, PendingActionDetail, PendingActionSummary } from "../lib/api";
+import { actionChipLabel, actionTypeLabel } from "../lib/labels";
 
 /*
- * Cockpit v0 (ticket 1.7) — the owner's ledger view: treasury projection
- * (30/60/90 d), validation queue pressure, agent activity. Metadata only:
- * payloads stay behind the owner-gated detail endpoint.
+ * Cockpit (UI v2, maquette Figma) — the owner's view: greeting, KPI cards,
+ * treasury projection chart, and the validation queue side card with 1-click
+ * decisions. Every figure comes from the API; the 90-day bars interpolate the
+ * SAME linear model the API projects with (avg daily net flow) — no invented
+ * data. Payload details (amounts, customers) are owner-gated: non-owners get
+ * type + date only.
  */
+
+type Dict = Record<string, unknown>;
+const asDict = (value: unknown): Dict | null =>
+  value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Dict) : null;
+const asString = (value: unknown): string | null => (typeof value === "string" ? value : null);
+const asNumber = (value: unknown): number | null => (typeof value === "number" ? value : null);
+
+const CHART_BARS = 22;
+const HORIZON_DAYS = 90;
+
+/** Card line for one pending action, from its (owner-gated) payload. */
+function actionLine(action: PendingActionSummary, detail: PendingActionDetail | undefined) {
+  const payload = detail ? asDict(detail.payload) : null;
+  const invoice = asDict(payload?.invoice);
+  const quote = asDict(payload?.quote);
+  const reconciliation = asDict(payload?.reconciliation);
+  if (invoice) {
+    const risk = asDict(payload?.risk);
+    const days = asNumber(risk?.daysOverdue);
+    return {
+      title: `Relance — Facture ${asString(invoice.number) ?? ""}`.trim(),
+      meta: [
+        asString(invoice.customer),
+        asNumber(invoice.amountCents) !== null
+          ? formatEuroCents(asNumber(invoice.amountCents) ?? 0)
+          : null,
+        days !== null ? `${days} j de retard` : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
+  if (quote) {
+    return {
+      title: `Devis ${asString(quote.number) ?? ""}`.trim(),
+      meta: [
+        asString(quote.customer),
+        asNumber(quote.amountCents) !== null
+          ? formatEuroCents(asNumber(quote.amountCents) ?? 0)
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
+  if (reconciliation) {
+    const entries = asNumber(reconciliation.entries);
+    const total = asNumber(reconciliation.totalCents);
+    return {
+      title: "Rapprochement bancaire",
+      meta: [
+        entries !== null ? `${entries} écritures` : null,
+        total !== null ? formatEuroCents(total) : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
+  return {
+    title: actionTypeLabel(action.type),
+    meta: `préparée le ${new Date(action.createdAt).toLocaleDateString("fr-FR")}`,
+  };
+}
 
 export default function CockpitPage() {
   const [kpis, setKpis] = useState<CockpitKpis | null>(null);
-  const [recent, setRecent] = useState<PendingActionSummary[]>([]);
+  const [firstName, setFirstName] = useState<string | null>(null);
+  const [pending, setPending] = useState<PendingActionSummary[]>([]);
+  const [details, setDetails] = useState<Record<string, PendingActionDetail>>({});
   const [connectorCount, setConnectorCount] = useState<number | null>(null);
   const [demoMode, setDemoMode] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
-  useEffect(() => {
+  const refresh = useCallback(() => {
     getKpis().then(setKpis).catch(() => undefined);
     listPendingActions()
-      .then((actions) => setRecent(actions.slice(0, 5)))
+      .then((actions) => {
+        const waiting = actions.filter((a) => a.status === "pending");
+        setPending(waiting);
+        // Owner-gated payloads (titles, amounts). A 403 (member/accountant)
+        // simply leaves the fallback lines — never an error on screen.
+        void Promise.allSettled(
+          waiting.slice(0, 8).map((a) => getPendingAction(a.id)),
+        ).then((results) => {
+          const loaded: Record<string, PendingActionDetail> = {};
+          for (const result of results) {
+            if (result.status === "fulfilled") loaded[result.value.id] = result.value;
+          }
+          setDetails(loaded);
+        });
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    getMe()
+      .then((session) => setFirstName(session.name?.split(" ")[0] ?? null))
       .catch(() => undefined);
     listConnectors()
       .then((connectors) => {
@@ -31,114 +129,237 @@ export default function CockpitPage() {
         setDemoMode(connectors.some((connector) => connector.status === "demo"));
       })
       .catch(() => undefined);
-  }, []);
+  }, [refresh]);
 
-  const pending = kpis?.pendingActions.pending ?? 0;
+  async function decide(id: string, decision: "approve" | "reject"): Promise<void> {
+    setBusyId(id);
+    try {
+      await decidePendingAction(id, decision);
+    } catch {
+      /* conflits (déjà traitée) et 403 : la liste rafraîchie fait foi */
+    } finally {
+      setBusyId(null);
+      refresh();
+    }
+  }
+
+  const treasury = kpis?.treasury ?? null;
   const executed = kpis?.pendingActions.executed ?? 0;
+
+  // Projection linéaire — exactement le modèle de l'API (flux net moyen/j).
+  const balance = treasury?.currentBalanceCents ?? 0;
+  const daily = treasury?.avgDailyNetFlowCents ?? 0;
+  const p90 =
+    treasury?.points.find((p) => p.horizonDays === HORIZON_DAYS)?.projectedBalanceCents ?? null;
+  const series = Array.from({ length: CHART_BARS }, (_, i) => {
+    const day = Math.round((i * HORIZON_DAYS) / (CHART_BARS - 1));
+    return { day, value: balance + daily * day };
+  });
+  const minIndex = series.reduce((min, p, i) => (p.value < series[min]!.value ? i : min), 0);
+  const minPoint = series[minIndex]!;
+  const maxValue = Math.max(...series.map((p) => p.value), 1);
+  const lowDate = new Date(Date.now() + minPoint.day * 86_400_000).toLocaleDateString("fr-FR", {
+    day: "numeric",
+    month: "long",
+  });
+
+  // Impayés relancés par l'employé (payloads owner-gated des relances).
+  const dunnings = pending.filter((a) => a.type === "send_dunning");
+  const lateCents = dunnings.reduce((sum, a) => {
+    const invoice = asDict(asDict(details[a.id]?.payload)?.invoice);
+    return sum + (asNumber(invoice?.amountCents) ?? 0);
+  }, 0);
+  const delta90 = p90 !== null ? p90 - balance : null;
 
   return (
     <>
-      <h1 className="page-title">Cockpit</h1>
-      <p className="page-sub">La journée de vos employés virtuels, en un coup d&apos;œil.</p>
-      {demoMode && (
-        <p className="hint" style={{ marginTop: -12, marginBottom: 20 }}>
-          Mode démo — données fictives (aucune connexion bancaire réelle).
-        </p>
-      )}
+      <div className="cockpit-header">
+        <div className="hc">
+          <h1 className="page-title">{firstName ? `Bonjour ${firstName}` : "Bonjour"}</h1>
+          <p className="page-sub" style={{ margin: 0 }}>
+            Voici votre situation financière —{" "}
+            {new Date().toLocaleDateString("fr-FR", {
+              weekday: "long",
+              day: "numeric",
+              month: "long",
+              year: "numeric",
+            })}
+            {demoMode && " · mode démo, données fictives"}
+          </p>
+        </div>
+        <span className="tag-souverain">Projection · 90 jours</span>
+      </div>
 
       {connectorCount === 0 && (
-        <div className="card signal" style={{ marginBottom: 24 }}>
+        <div className="card" style={{ marginBottom: 20 }}>
           <span className="overline">Bienvenue — dernière étape</span>
-          <p className="hint" style={{ margin: "6px 0 10px" }}>
+          <p className="hint" style={{ margin: "6px 0 12px" }}>
             Aucun outil connecté : reliez Qonto et Pennylane pour que l&apos;employé Compta voie
             votre trésorerie et vos factures.
           </p>
-          <Link href="/connecteurs" className="btn">
-            → Connecter mes outils
+          <Link href="/connecteurs" className="btn primary">
+            Connecter mes outils
           </Link>
         </div>
       )}
 
       <div className="kpi-grid">
-        <div className={pending > 0 ? "card signal" : "card"}>
-          <span className="overline">À valider</span>
-          <div className="big">{pending}</div>
-          <div className="hint">
-            {pending > 0 ? (
-              <Link href="/validation">→ ouvrir la file de validation</Link>
-            ) : (
-              "Aucune action en attente."
-            )}
-          </div>
+        <div className="card">
+          <span className="overline">Solde prévisionnel à 90 j</span>
+          <div className="big">{p90 !== null ? formatEuroCents(p90) : "—"}</div>
+          {delta90 !== null && (
+            <span className={`delta ${delta90 >= 0 ? "up" : "down"}`}>
+              {delta90 >= 0 ? "▲ +" : "▼ "}
+              {formatEuroCents(delta90)} vs aujourd&apos;hui
+            </span>
+          )}
+          {p90 === null && <div className="hint">Connectez Qonto (owner) pour la projection.</div>}
+        </div>
+        <div className="card">
+          <span className="overline">Impayés à relancer</span>
+          <div className="big">{lateCents > 0 ? formatEuroCents(lateCents) : dunnings.length}</div>
+          <span className={`delta ${dunnings.length > 0 ? "down" : "up"}`}>
+            {dunnings.length > 0
+              ? `${dunnings.length} relance${dunnings.length > 1 ? "s" : ""} préparée${dunnings.length > 1 ? "s" : ""}`
+              : "Aucune relance en attente"}
+          </span>
         </div>
         <div className="card">
           <span className="overline">Actions exécutées</span>
           <div className="big">{executed}</div>
-          <div className="hint">Après votre validation, jamais avant.</div>
-        </div>
-        <div className="card accent">
-          <span className="overline">Conversations agent</span>
-          <div className="big">{kpis?.conversations ?? 0}</div>
-          <div className="hint">
-            <Link href="/chat">→ parler à l&apos;employé Compta</Link>
-          </div>
+          <span className="delta up">Après votre validation, jamais avant</span>
         </div>
       </div>
 
-      <h2 className="overline" style={{ marginBottom: 12 }}>
-        Trésorerie — projection
-      </h2>
-      {kpis?.treasury ? (
-        <div className="card accent" style={{ marginBottom: 40 }}>
-          <span className="overline">Compte {kpis.treasury.account}</span>
-          <div className="big">{formatEuroCents(kpis.treasury.currentBalanceCents)}</div>
-          <div className="spark">
-            {kpis.treasury.points.map((point) => (
-              <div key={point.horizonDays}>
-                <span className="overline">J+{point.horizonDays}</span>
-                {formatEuroCents(point.projectedBalanceCents)}
+      <div className="cockpit-cols">
+        <div className="card">
+          <div className="card-header">
+            <div className="titles">
+              <div className="title">Prévision de trésorerie</div>
+              <div className="sub">
+                {treasury
+                  ? `Compte ${treasury.account} · solde projeté · 90 jours`
+                  : "Solde bancaire projeté · 90 jours"}
               </div>
-            ))}
+            </div>
+            <span className="tag-souverain">Souverain · Mistral EU</span>
           </div>
-          <div className="hint">
-            Flux net moyen {formatEuroCents(kpis.treasury.avgDailyNetFlowCents)}/j, observé sur{" "}
-            {kpis.treasury.observedDays} j.
-          </div>
+          {treasury ? (
+            <>
+              <div className="chart" role="img" aria-label="Projection de trésorerie sur 90 jours">
+                {series.map((point, index) => (
+                  <div
+                    key={point.day}
+                    className={`bar ${index === 0 ? "today" : ""} ${
+                      index === minIndex && minIndex !== 0 ? "low" : ""
+                    }`}
+                    style={{ height: `${Math.max(4, (point.value / maxValue) * 100)}%` }}
+                    title={`J+${point.day} : ${formatEuroCents(Math.round(point.value))}`}
+                  />
+                ))}
+              </div>
+              <div className="xlabels">
+                <span>Aujourd&apos;hui</span>
+                <span>+30 j</span>
+                <span>+60 j</span>
+                <span>+90 j</span>
+              </div>
+              {minPoint.day > 0 && minPoint.value < balance && (
+                <div className="annotation">
+                  <span className="dot" aria-hidden />
+                  <span>
+                    Point bas prévu le {lowDate} : {formatEuroCents(Math.round(minPoint.value))}
+                    {lateCents > 0 && " — relancer les impayés couvrirait le creux."}
+                  </span>
+                </div>
+              )}
+              <hr className="divider" />
+              <div className="mini-stats">
+                <div className="ms">
+                  <div className="label">Solde actuel</div>
+                  <div className="value">{formatEuroCents(balance)}</div>
+                </div>
+                <div className="ms">
+                  <div className="label">Flux net moyen</div>
+                  <div className="value">
+                    {daily >= 0 ? "+" : ""}
+                    {formatEuroCents(daily)}/j
+                  </div>
+                  <div className="note">observé sur {treasury.observedDays} j</div>
+                </div>
+                <div className="ms">
+                  <div className="label">Autonomie</div>
+                  <div className="value">
+                    {daily < 0
+                      ? `${(balance / -daily / 30).toFixed(1).replace(".", ",")} mois`
+                      : "—"}
+                  </div>
+                  {daily >= 0 && <div className="note">▲ trésorerie stable</div>}
+                </div>
+              </div>
+            </>
+          ) : (
+            <p className="empty">
+              Projection indisponible — connectez Qonto (ou vous n&apos;êtes pas owner de
+              l&apos;organisation).
+            </p>
+          )}
         </div>
-      ) : (
-        <p className="empty" style={{ marginBottom: 40 }}>
-          Projection indisponible — connectez Qonto (ou vous n&apos;êtes pas owner de
-          l&apos;organisation).
-        </p>
-      )}
 
-      <h2 className="overline" style={{ marginBottom: 12 }}>
-        Dernières actions préparées
-      </h2>
-      {recent.length === 0 ? (
-        <p className="empty">Rien pour l&apos;instant — demandez une relance à l&apos;employé Compta.</p>
-      ) : (
-        <table className="ledger">
-          <thead>
-            <tr>
-              <th>Type</th>
-              <th>Statut</th>
-              <th>Préparée le</th>
-            </tr>
-          </thead>
-          <tbody>
-            {recent.map((action) => (
-              <tr key={action.id}>
-                <td>{actionTypeLabel(action.type)}</td>
-                <td>
-                  <span className={`badge ${action.status}`}>{actionStatusLabel(action.status)}</span>
-                </td>
-                <td>{new Date(action.createdAt).toLocaleString("fr-FR")}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+        <div className="card">
+          <div className="card-header">
+            <div className="titles">
+              <div className="title">À valider</div>
+              <div className="sub">Préparé par l&apos;employé Compta</div>
+            </div>
+            {pending.length > 0 && <span className="count-pill">{pending.length} en attente</span>}
+          </div>
+          {pending.length === 0 ? (
+            <p className="empty">
+              Rien à valider — demandez une relance à l&apos;
+              <Link href="/chat" style={{ color: "var(--accent)" }}>
+                employé Compta
+              </Link>
+              .
+            </p>
+          ) : (
+            <>
+              {pending.slice(0, 3).map((action) => {
+                const line = actionLine(action, details[action.id]);
+                return (
+                  <div key={action.id} className="action-card">
+                    <div className="trow">
+                      <span className={`chip ${action.type}`}>{actionChipLabel(action.type)}</span>
+                    </div>
+                    <div className="atitle">{line.title}</div>
+                    <div className="ameta">{line.meta}</div>
+                    <div className="buttons">
+                      <button
+                        className="primary grow"
+                        disabled={busyId === action.id}
+                        onClick={() => void decide(action.id, "approve")}
+                      >
+                        Valider
+                      </button>
+                      <button
+                        disabled={busyId === action.id}
+                        onClick={() => void decide(action.id, "reject")}
+                      >
+                        Rejeter
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="card-foot">
+                <Link href="/validation">
+                  Voir les {pending.length} action{pending.length > 1 ? "s" : ""} à valider →
+                </Link>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
     </>
   );
 }

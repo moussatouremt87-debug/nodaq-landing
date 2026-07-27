@@ -155,6 +155,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     });
     return {
       userId: request.authSession.user.id,
+      // Display name only (greeting in the cockpit) — never an identifier.
+      name: request.authSession.user.name ?? null,
       activeOrganizationId: request.authSession.session.activeOrganizationId ?? null,
       memberships,
     };

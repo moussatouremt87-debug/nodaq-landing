@@ -87,20 +87,29 @@ export default function LoginPage() {
   }
 
   return (
-    <>
-      <h1 className="page-title">{mode === "signin" ? "Connexion" : "Créer un compte"}</h1>
-      <p className="page-sub">
-        {mode === "signin"
-          ? "Reprenez la main sur votre cockpit."
-          : "Votre organisation devient votre espace isolé (tenant)."}
-      </p>
+    <div className="login-wrap">
+      <div className="login-brand">
+        <span className="logo" aria-hidden />
+        <span className="wordmark">nodaq</span>
+        <span className="pill-souverain" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
+          Souverain
+        </span>
+      </div>
+      <div style={{ textAlign: "center" }}>
+        <h1 className="page-title">{mode === "signin" ? "Connexion" : "Créer un compte"}</h1>
+        <p className="page-sub" style={{ margin: 0 }}>
+          {mode === "signin"
+            ? "Reprenez la main sur votre cockpit."
+            : "Votre organisation devient votre espace isolé (tenant)."}
+        </p>
+      </div>
       {serviceDown && (
         <p className="error-line" role="alert">
           Le service est momentanément indisponible (API injoignable). Réessayez dans un
           instant.
         </p>
       )}
-      <form className="form-card" onSubmit={(e) => void submit(e)}>
+      <form className="form-card" style={{ width: "100%" }} onSubmit={(e) => void submit(e)}>
         {mode === "signup" && (
           <label>
             <span className="overline">Nom</span>
@@ -155,6 +164,6 @@ export default function LoginPage() {
           )}
         </p>
       </form>
-    </>
+    </div>
   );
 }
