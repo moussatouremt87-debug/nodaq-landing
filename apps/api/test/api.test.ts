@@ -239,7 +239,11 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
     // An agent prepared two pending actions (simulated).
     const [pa1, pa2] = await withTenant(orgA, async (tx) => [
       await tx.pendingAction.create({
-        data: { tenantId: orgA, type: "send_dunning", payload: { draft: "..." } },
+        data: {
+          tenantId: orgA,
+          type: "send_dunning",
+          payload: { draft: "...", invoice: { number: "F-2026-001", amountCents: 12_345 } },
+        },
       }),
       await tx.pendingAction.create({
         data: { tenantId: orgA, type: "book_invoice", payload: { invoice: {} } },
@@ -281,7 +285,70 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       headers: { cookie: cookieA },
     });
     expect(ownerDetail.statusCode).toBe(200);
-    expect(ownerDetail.json().payload).toEqual({ draft: "..." });
+    expect(ownerDetail.json().payload).toEqual({
+      draft: "...",
+      invoice: { number: "F-2026-001", amountCents: 12_345 },
+    });
+
+    // Draft edit BEFORE decision: the human can adjust the prepared text.
+    // Member => 403 (owner-only, like the detail it derives from).
+    const memberEdit = await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${pa1!.id}/draft`,
+      headers: { cookie: cookieM },
+      payload: { draft: "tentative membre" },
+    });
+    expect(memberEdit.statusCode).toBe(403);
+
+    // Owner edits: only payload.draft moves, the rest of the payload stays.
+    const ownerEdit = await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${pa1!.id}/draft`,
+      headers: { cookie: cookieA },
+      payload: { draft: "Relance éditée par le dirigeant." },
+    });
+    expect(ownerEdit.statusCode).toBe(200);
+    expect(ownerEdit.json()).toMatchObject({
+      id: pa1!.id,
+      status: "pending",
+      draft: "Relance éditée par le dirigeant.",
+    });
+    const ownerId = (
+      await app.inject({ method: "GET", url: "/me", headers: { cookie: cookieA } })
+    ).json().userId as string;
+    const afterEdit = await app.inject({
+      method: "GET",
+      url: `/pending-actions/${pa1!.id}`,
+      headers: { cookie: cookieA },
+    });
+    expect(afterEdit.json().payload.draft).toBe("Relance éditée par le dirigeant.");
+    // The FACTS the agent grounded the action on are untouched, the agent's
+    // original text survives, and the edit is attributed to the owner.
+    expect(afterEdit.json().payload.invoice).toEqual({
+      number: "F-2026-001",
+      amountCents: 12_345,
+    });
+    expect(afterEdit.json().payload.originalDraft).toBe("...");
+    expect(afterEdit.json().payload.draftEdits).toHaveLength(1);
+    expect(afterEdit.json().payload.draftEdits[0].by).toBe(ownerId);
+
+    // An action whose payload has no draft is not editable (422).
+    const noDraft = await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${pa2!.id}/draft`,
+      headers: { cookie: cookieA },
+      payload: { draft: "n'importe" },
+    });
+    expect(noDraft.statusCode).toBe(422);
+
+    // Malformed body (empty draft) => 400.
+    const emptyDraft = await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${pa1!.id}/draft`,
+      headers: { cookie: cookieA },
+      payload: { draft: "   " },
+    });
+    expect(emptyDraft.statusCode).toBe(400);
 
     // Cross-tenant: Bob's list never contains Alice's queue (RLS).
     const bobList = await app.inject({
@@ -329,6 +396,16 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
     });
     expect(again.statusCode).toBe(409);
 
+    // Editing after the decision is a conflict too: what was approved is
+    // exactly what ran, nothing can be rewritten afterwards.
+    const editAfter = await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${pa1!.id}/draft`,
+      headers: { cookie: cookieA },
+      payload: { draft: "trop tard" },
+    });
+    expect(editAfter.statusCode).toBe(409);
+
     // Reject path.
     const reject = await app.inject({
       method: "POST",
@@ -349,6 +426,15 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       headers: { cookie: cookieA },
     });
     expect(cross.statusCode).toBe(404);
+
+    // Same blindness for the draft edit (RLS: someone else's id = missing).
+    const crossEdit = await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${paB.id}/draft`,
+      headers: { cookie: cookieA },
+      payload: { draft: "intrusion" },
+    });
+    expect(crossEdit.statusCode).toBe(404);
 
     // Malformed id => 400.
     const bad = await app.inject({
