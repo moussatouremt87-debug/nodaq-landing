@@ -39,6 +39,7 @@ async function call<T>(schema: z.ZodType<T>, path: string, init?: RequestInit): 
 
 export const Me = z.object({
   userId: z.string(),
+  name: z.string().nullable().optional(),
   activeOrganizationId: z.string().nullable(),
   memberships: z.array(
     z.object({

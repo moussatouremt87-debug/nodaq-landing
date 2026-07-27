@@ -4,26 +4,65 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { ApiError, getMe } from "../lib/api";
+import { ApiError, getMe, listPendingActions } from "../lib/api";
 import type { Me } from "../lib/api";
 
 /*
- * App shell: sidebar + session gate. Business pages need a session AND an
- * active organization (the tenant) — otherwise the user is sent to /login.
- * The shell only ever renders metadata (org name, role), never business data.
+ * App shell (UI v2, maquette Figma) : sidebar marine + topbar, gate de
+ * session. Business pages need a session AND an active organization (the
+ * tenant) — otherwise the user is sent to /login. The shell only ever
+ * renders metadata (org name, role, pending COUNT), never business data.
  */
 
+const ICONS: Record<string, ReactNode> = {
+  cockpit: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <rect x="1" y="1" width="5.5" height="5.5" rx="1.5" fill="currentColor" />
+      <rect x="8.5" y="1" width="5.5" height="5.5" rx="1.5" fill="currentColor" opacity="0.55" />
+      <rect x="1" y="8.5" width="5.5" height="5.5" rx="1.5" fill="currentColor" opacity="0.55" />
+      <rect x="8.5" y="8.5" width="5.5" height="5.5" rx="1.5" fill="currentColor" />
+    </svg>
+  ),
+  employes: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <circle cx="7.5" cy="4.5" r="3" fill="currentColor" />
+      <path d="M1.5 13.5c0-2.8 2.7-4.5 6-4.5s6 1.7 6 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  ),
+  connecteurs: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M4.5 1.5v4M10.5 1.5v4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <path d="M2.5 5.5h10v2a5 5 0 0 1-10 0v-2Z" fill="currentColor" />
+      <path d="M7.5 12.5v2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  ),
+  validation: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <rect x="1.5" y="1.5" width="12" height="12" rx="3" stroke="currentColor" strokeWidth="1.6" />
+      <path d="m4.6 7.6 2 2 3.8-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+};
+
 const LINKS = [
-  { href: "/", label: "Cockpit" },
-  { href: "/validation", label: "File de validation" },
-  { href: "/chat", label: "Employé Compta" },
-  { href: "/connecteurs", label: "Connecteurs" },
+  { href: "/", label: "Cockpit", icon: "cockpit" },
+  { href: "/chat", label: "Employé Compta", icon: "employes" },
+  { href: "/connecteurs", label: "Connecteurs", icon: "connecteurs" },
+  { href: "/validation", label: "File de validation", icon: "validation" },
 ];
+
+const TITLES: Record<string, string> = {
+  "/": "Cockpit",
+  "/chat": "Employé Compta",
+  "/connecteurs": "Connecteurs",
+  "/validation": "File de validation",
+};
 
 export function Shell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [me, setMe] = useState<Me | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
   const onLogin = pathname === "/login";
 
   useEffect(() => {
@@ -41,6 +80,14 @@ export function Shell({ children }: { children: ReactNode }) {
       });
   }, [onLogin, pathname, router]);
 
+  // Badge « N » sur la file de validation — métadonnées seulement (count).
+  useEffect(() => {
+    if (onLogin || me === null) return;
+    listPendingActions()
+      .then((actions) => setPendingCount(actions.filter((a) => a.status === "pending").length))
+      .catch(() => undefined);
+  }, [onLogin, me, pathname]);
+
   const activeOrg = me?.memberships.find((m) => m.tenantId === me.activeOrganizationId);
   // Fail-closed for real: business pages only mount once the session is
   // confirmed — otherwise they would fire their own API calls in parallel
@@ -48,16 +95,27 @@ export function Shell({ children }: { children: ReactNode }) {
   const gated = onLogin || me !== null;
 
   async function signOut(): Promise<void> {
-    await fetch("/api/auth/sign-out", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    await fetch("/api/auth/sign-out", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
     router.replace("/login");
   }
+
+  if (onLogin) {
+    return <div className="shell bare">{children}</div>;
+  }
+
+  const initial = (me?.name ?? activeOrg?.tenant.name ?? "•").trim().charAt(0).toUpperCase();
 
   return (
     <div className="shell">
       <aside className="sidebar">
         <div className="brand">
-          NODAQ
-          <small>Employés virtuels souverains</small>
+          <span className="logo" aria-hidden />
+          <span className="wordmark">nodaq</span>
+          <span className="pill-souverain">Souverain</span>
         </div>
         <nav className="nav">
           {LINKS.map((link) => (
@@ -66,25 +124,50 @@ export function Shell({ children }: { children: ReactNode }) {
               href={link.href}
               className={pathname === link.href ? "active" : ""}
             >
-              {link.label}
+              {ICONS[link.icon]}
+              <span className="nav-label">{link.label}</span>
+              {link.href === "/validation" && pendingCount > 0 && (
+                <span className="nav-badge">{pendingCount}</span>
+              )}
             </Link>
           ))}
         </nav>
         <div className="session">
           {activeOrg ? (
             <>
-              <div>{activeOrg.tenant.name}</div>
-              <div className="overline">{activeOrg.role}</div>
-              <button onClick={() => void signOut()}>Se déconnecter</button>
+              <span className="avatar" aria-hidden>
+                {initial}
+              </span>
+              <span className="who">
+                <span className="org">{me?.name ?? activeOrg.tenant.name}</span>
+                <span className="role">
+                  {activeOrg.role === "owner" ? "Dirigeant" : activeOrg.role} ·{" "}
+                  {activeOrg.tenant.name}
+                </span>
+              </span>
+              <button onClick={() => void signOut()} title="Se déconnecter">
+                Quitter
+              </button>
             </>
           ) : (
             <span>—</span>
           )}
         </div>
       </aside>
-      <main className="content">
-        {gated ? children : <p className="empty">Vérification de la session…</p>}
-      </main>
+      <div className="main-col">
+        <header className="topbar">
+          <span className="topbar-title">{TITLES[pathname] ?? "NODAQ"}</span>
+          {activeOrg && (
+            <span className="org-chip">
+              <span className="dot" aria-hidden />
+              {activeOrg.tenant.name}
+            </span>
+          )}
+        </header>
+        <main className="content">
+          {gated ? children : <p className="empty">Vérification de la session…</p>}
+        </main>
+      </div>
     </div>
   );
 }
