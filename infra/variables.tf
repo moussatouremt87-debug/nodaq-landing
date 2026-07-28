@@ -38,9 +38,9 @@ variable "dns_zone_project_id" {
 }
 
 variable "web_subdomain" {
-  description = "Sous-domaine du front dans dns_zone ('' = pas de domaine custom, retour à l'URL Scaleway). Désactivé tant que la zone nodaq.fr n'est pas accessible au projet (deploy #17 : 403 domain not found)."
+  description = "Sous-domaine du front dans dns_zone ('' = pas de domaine custom, retour à l'URL Scaleway). Prérequis : la clé IAM du CI doit avoir DomainsDNSFullAccess sur le projet de la zone (sinon 403 « domain not found », cf. deploy #17)."
   type        = string
-  default     = ""
+  default     = "app"
 
   # Alimente WEB_ORIGIN (trustedOrigins better-auth) : une valeur malformée
   # doit échouer AU PLAN, pas au boot de l'API.
