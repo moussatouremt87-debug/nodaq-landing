@@ -28,6 +28,19 @@ const nextConfig: NextConfig = {
       })),
     ];
   },
+  async redirects() {
+    return [
+      // Canonique : l'endpoint Scaleway natif reste vivant mais n'est plus
+      // dans trustedOrigins — un signet sur l'ancienne URL donnerait une app
+      // à l'auth cassée (403). On redirige vers le domaine custom.
+      {
+        source: "/:path*",
+        has: [{ type: "host", value: "(?<scw>.*\\.scw\\.cloud)" }],
+        destination: "https://app.nodaq.fr/:path*",
+        permanent: false,
+      },
+    ];
+  },
   async headers() {
     return [
       {
@@ -38,6 +51,11 @@ const nextConfig: NextConfig = {
           { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          // Domaine custom (Certificate Transparency rend l'hôte découvrable) :
+          // HTTPS forcé, et une app derrière login n'a rien à faire dans un
+          // index de recherche.
+          { key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
         ],
       },
     ];

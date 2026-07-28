@@ -47,4 +47,21 @@ création) : base+API+LiteLLM → migrations Prisma + rotation du mot de passe
   console Scaleway Generative APIs (ils évoluent).
 - Conteneurs publics (protégés par auth applicative / clé maître) — réseau
   privé + LB à faire en durcissement.
-- Pas de domaine custom ni de Langfuse déployé.
+- Pas de Langfuse déployé.
+- Domaine custom : le front vit sur **app.nodaq.fr** (`web_subdomain`/`dns_zone`
+  dans `variables.tf`). La zone DNS de nodaq.fr est hébergée chez Scaleway dans
+  le même projet (`project_id` épinglé sur l'enregistrement) : le CNAME et le
+  domaine conteneur (certificat TLS automatique) sont gérés par Terraform.
+  `web_url` est dérivé de la RESSOURCE domaine (pas de la variable) : si le
+  domaine n'a pas pu être créé, `WEB_ORIGIN` retombe sur l'URL Scaleway au
+  lieu d'annoncer une origine que personne ne sert. L'API reste sur son URL
+  Scaleway (appelée via le proxy Next, jamais directement par le navigateur).
+  - **Retour arrière** : exporter `TF_VAR_web_subdomain=""` sur les steps
+    d'apply du workflow (ou passer `-var web_subdomain=`) — pas de
+    `prevent_destroy` sur l'enregistrement, précisément pour que ce chemin
+    reste possible sans chirurgie de state.
+  - **Enregistrement `app` préexistant dans la zone** : l'apply échouera en
+    conflit — importer (`terraform import 'scaleway_domain_record.web[0]'
+    <id-du-record>`) ou supprimer l'enregistrement avant.
+  - Premier apply : l'émission Let's Encrypt peut prendre quelques minutes —
+    le smoke test web a un budget de 6 min pour ça.

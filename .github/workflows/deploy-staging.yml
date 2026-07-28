@@ -177,8 +177,8 @@ jobs:
           # max=200 : /health de l'api doit répondre 200 (401/404 = API mal
           # câblée) ; web/litellm tolèrent tout < 500 (preuve que le process vit).
           check() {
-            local url="$1" name="$2" max="$3" code=000
-            for _ in $(seq 1 18); do
+            local url="$1" name="$2" max="$3" attempts="${4:-18}" code=000
+            for _ in $(seq 1 "$attempts"); do
               code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" || echo 000)"
               if [ "$code" -ge 200 ] && [ "$code" -le "$max" ]; then
                 echo "✅ $name répond (HTTP $code)"; return 0
@@ -190,7 +190,9 @@ jobs:
           }
           fail=0
           check "$API_URL/health" "api" 200 || fail=1
-          check "$WEB_URL" "web" 499 || fail=1
+          # web = domaine custom : la 1re émission du certificat Let's Encrypt
+          # peut prendre plusieurs minutes (curl 000 en attendant) — budget 6 min.
+          check "$WEB_URL" "web" 499 36 || fail=1
           check "$LITELLM_URL/health/liveliness" "litellm" 499 || fail=1
           if [ "$fail" = 1 ]; then
             NS_ID="$(terraform output -raw container_namespace_id)"; NS_ID="${NS_ID#*/}"
