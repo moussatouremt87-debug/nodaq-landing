@@ -106,20 +106,24 @@ function importFec(content: string, cookie: string, fileName = "123456789FEC2025
   });
 }
 
+// Identifiants uniques par exécution : pas de purge globale des users (elle
+// entrerait en course avec api.test.ts qui tourne en parallèle).
+const RUN = Date.now().toString(36);
+
 beforeAll(async () => {
   admin = createAdminClient();
   await admin.fecInvoice.deleteMany();
   await admin.fecImport.deleteMany();
-  await admin.connector.deleteMany();
+  await admin.connector.deleteMany({ where: { type: "fec" } });
   app = buildApp();
   await app.ready();
 
-  ownerCookie = await signup("fec-owner@example.com", "Fec Owner");
-  orgA = await createOrg(ownerCookie, "Org Fec", "org-fec");
-  otherCookie = await signup("fec-other@example.com", "Fec Other");
-  await createOrg(otherCookie, "Org Fec B", "org-fec-b");
+  ownerCookie = await signup(`fec-owner-${RUN}@example.com`, "Fec Owner");
+  orgA = await createOrg(ownerCookie, `Org Fec ${RUN}`, `org-fec-${RUN}`);
+  otherCookie = await signup(`fec-other-${RUN}@example.com`, "Fec Other");
+  await createOrg(otherCookie, `Org Fec B ${RUN}`, `org-fec-b-${RUN}`);
 
-  memberCookie = await signup("fec-member@example.com", "Fec Member");
+  memberCookie = await signup(`fec-member-${RUN}@example.com`, "Fec Member");
   const memberId = (
     await app.inject({ method: "GET", url: "/me", headers: { cookie: memberCookie } })
   ).json().userId as string;

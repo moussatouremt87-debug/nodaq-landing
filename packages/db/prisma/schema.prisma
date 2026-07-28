@@ -196,7 +196,7 @@ model Connector {
   type            String
   /// Secret NAME in the vault (Scaleway Secret Manager in prod) — never the credential itself.
   credentialsRef  String   @map("credentials_ref")
-  /// 'active' | 'disabled' | 'demo' — validé côté app. 'demo' n'est posé QUE
+  /// 'active' | 'disabled' | 'demo' | 'file' (import FEC) — validé côté app. 'demo' n'est posé QUE
   /// par le script de seed démo (clients-fixtures, jamais une vraie connexion) ;
   /// l'API d'onboarding ne crée que 'active'.
   status          String   @default("active")
@@ -353,7 +353,7 @@ model FecImport {
   customerCount Int          @map("customer_count")
   invoiceCount  Int          @map("invoice_count")
   overdueCount  Int          @map("overdue_count")
-  overdueCents  Int          @map("overdue_cents")
+  overdueCents  BigInt       @map("overdue_cents")
   warnings      Json         @default("[]")
   importedAt    DateTime     @default(now()) @map("imported_at")
   tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -378,8 +378,8 @@ model FecInvoice {
   number        String
   issuedDate    DateTime  @map("issued_date") @db.Date
   dueDate       DateTime  @map("due_date") @db.Date
-  amountCents   Int       @map("amount_cents")
-  residualCents Int       @map("residual_cents")
+  amountCents   BigInt    @map("amount_cents")
+  residualCents BigInt    @map("residual_cents")
   settled       Boolean
   tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   import        FecImport @relation(fields: [importId], references: [id], onDelete: Cascade)

@@ -106,15 +106,18 @@ export async function getPennylaneClient(
   tenantId: string,
   options: RegistryOptions = {},
 ): Promise<PennylaneClient> {
-  let row;
-  try {
-    row = await loadConnectorRow(tenantId, "pennylane");
-  } catch (error) {
-    if (error instanceof ConnectorNotConfiguredError && (await loadFecRow(tenantId))) {
-      return new FecPennylaneClient(tenantId);
-    }
-    throw error;
+  // Repli AVANT loadConnectorRow (pas d'exception pilote, pas de fausse
+  // alerte [CONNECTOR-UNAVAILABLE] pour un tenant en mode FEC seul).
+  const pennylaneRow = await withTenant(tenantId, (tx) =>
+    tx.connector.findUnique({
+      where: { tenantId_type: { tenantId, type: "pennylane" } },
+      select: { id: true },
+    }),
+  );
+  if (!pennylaneRow && (await loadFecRow(tenantId))) {
+    return new FecPennylaneClient(tenantId);
   }
+  const row = await loadConnectorRow(tenantId, "pennylane");
   if (row.status === DEMO_CONNECTOR_STATUS) return new DemoPennylaneClient();
   const credentials = PennylaneCredentials.parse(
     await resolveCredentials(tenantId, "pennylane", options, row.credentialsRef),

@@ -114,14 +114,6 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const agentContext = { secretProvider: vault, ...options.agentContext };
   const app = Fastify({ logger: process.env.NODE_ENV !== "test" });
 
-  // Upload binaire (import FEC) : le corps arrive en Buffer brut, jamais
-  // parsé ni loggé. La limite de taille est portée par la route.
-  app.addContentTypeParser(
-    "application/octet-stream",
-    { parseAs: "buffer" },
-    (_request, body, done) => done(null, body),
-  );
-
   // Last rampart against detail leaks: an unhandled error must never echo its
   // message (internal URLs, secret refs) to the client — name only, log full.
   app.setErrorHandler((error: unknown, request, reply) => {
@@ -581,116 +573,172 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return { imported: lastImport !== null, lastImport };
   });
 
-  app.post(
-    "/connectors/fec/import",
-    {
-      preHandler: [...businessRoute, requireRole(["owner"])],
-      bodyLimit: 50 * 1024 * 1024,
-    },
-    async (request, reply) => {
-      const body = request.body;
-      if (!Buffer.isBuffer(body) || body.length === 0) {
-        return reply
-          .code(400)
-          .send({ error: "fichier FEC attendu (corps application/octet-stream)" });
-      }
+  // Le parser binaire est CANTONNÉ à cette route (plugin encapsulé) : le
+  // reste de l'API n'accepte pas de corps octet-stream.
+  void app.register(async (fec) => {
+    fec.addContentTypeParser(
+      "application/octet-stream",
+      { parseAs: "buffer" },
+      (_request, body, done) => done(null, body),
+    );
 
-      // Idempotence par empreinte : ré-importer le même fichier = no-op signalé.
-      const fileHash = createHash("sha256").update(body).digest("hex");
-      const existing = await withTenant(request.tenantId, (tx) =>
-        tx.fecImport.findUnique({
-          where: { tenantId_fileHash: { tenantId: request.tenantId, fileHash } },
-        }),
-      );
-      if (existing) {
-        return reply.send({
-          alreadyImported: true,
-          entryCount: existing.entryCount,
-          customerCount: existing.customerCount,
-          invoiceCount: existing.invoiceCount,
-          overdueCount: existing.overdueCount,
-          overdueCents: existing.overdueCents,
-          warnings: z.array(z.string()).catch([]).parse(existing.warnings),
-        });
-      }
-
-      const parsed = parseFec(new Uint8Array(body));
-      if (!parsed.ok) {
-        // Numéros de ligne et messages génériques UNIQUEMENT — jamais le contenu.
-        return reply.code(422).send({ error: "FEC invalide", details: parsed.errors });
-      }
-      const derivation = deriveReceivables(parsed.entries);
-
-      // Métadonnée d'affichage : nom de fichier assaini, optionnel.
-      let fileName: string | null = null;
-      const rawName = request.headers["x-fec-filename"];
-      if (typeof rawName === "string") {
-        try {
-          fileName =
-            decodeURIComponent(rawName)
-              .replace(/[^\p{L}\p{N} ._()-]/gu, "")
-              .slice(0, 120) || null;
-        } catch {
-          fileName = null;
+    fec.post(
+      "/connectors/fec/import",
+      {
+        preHandler: [...businessRoute, requireRole(["owner"])],
+        bodyLimit: 50 * 1024 * 1024,
+      },
+      async (request, reply) => {
+        const body = request.body;
+        if (!Buffer.isBuffer(body) || body.length === 0) {
+          return reply
+            .code(400)
+            .send({ error: "fichier FEC attendu (corps application/octet-stream)" });
         }
-      }
 
-      const warnings = [...parsed.warnings, ...derivation.warnings];
-      await withTenant(request.tenantId, async (tx) => {
-        // Remplacement intégral : la cascade purge les factures dérivées.
-        await tx.fecImport.deleteMany({});
-        const imported = await tx.fecImport.create({
-          data: {
-            tenantId: request.tenantId,
-            fileHash,
-            fileName,
-            entryCount: parsed.entries.length,
-            customerCount: derivation.customers.length,
-            invoiceCount: derivation.invoices.length,
-            overdueCount: derivation.overdueCount,
-            overdueCents: derivation.overdueCents,
-            warnings,
-          },
-        });
-        if (derivation.invoices.length > 0) {
-          await tx.fecInvoice.createMany({
-            data: derivation.invoices.map((invoice) => ({
-              tenantId: request.tenantId,
-              importId: imported.id,
-              customerRef: invoice.customerRef,
-              customerName: invoice.customerName,
-              number: invoice.number,
-              issuedDate: new Date(`${invoice.issuedDate}T00:00:00Z`),
-              dueDate: new Date(`${invoice.dueDate}T00:00:00Z`),
-              amountCents: invoice.amountCents,
-              residualCents: invoice.residualCents,
-              settled: invoice.settled,
-            })),
+        const fileHash = createHash("sha256").update(body).digest("hex");
+        // Parse + dérivation AVANT la transaction (aucun IO DB pendant).
+        const parsed = parseFec(new Uint8Array(body));
+        if (!parsed.ok) {
+          // Numéros de ligne et messages génériques UNIQUEMENT — jamais le contenu.
+          return reply.code(422).send({ error: "FEC invalide", details: parsed.errors });
+        }
+        const derivation = deriveReceivables(parsed.entries);
+
+        // Métadonnée d'affichage : nom de fichier assaini, optionnel.
+        let fileName: string | null = null;
+        const rawName = request.headers["x-fec-filename"];
+        if (typeof rawName === "string") {
+          try {
+            fileName =
+              decodeURIComponent(rawName)
+                .replace(/[^\p{L}\p{N} ._()-]/gu, "")
+                .slice(0, 120) || null;
+          } catch {
+            fileName = null;
+          }
+        }
+
+        const warnings = [...parsed.warnings, ...derivation.warnings];
+        type Outcome =
+          | { kind: "already"; existing: { entryCount: number; customerCount: number; invoiceCount: number; overdueCount: number; overdueCents: bigint; warnings: unknown } }
+          | { kind: "created" };
+        let outcome: Outcome;
+        try {
+          outcome = await withTenant(
+            request.tenantId,
+            async (tx) => {
+              // Sérialise les imports du tenant (verrou transactionnel) :
+              // contrôle d'empreinte et écriture dans la MÊME transaction,
+              // jamais deux imports vivants (audit RGPD 2.14).
+              await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${request.tenantId} || ':fec-import'))`;
+              const existing = await tx.fecImport.findUnique({
+                where: { tenantId_fileHash: { tenantId: request.tenantId, fileHash } },
+              });
+              if (existing) return { kind: "already", existing } satisfies Outcome;
+              // deleteMany SCOPÉ tenant : la RLS reste le dernier rempart,
+              // pas la seule barrière (défense en profondeur).
+              await tx.fecImport.deleteMany({ where: { tenantId: request.tenantId } });
+              const imported = await tx.fecImport.create({
+                data: {
+                  tenantId: request.tenantId,
+                  fileHash,
+                  fileName,
+                  entryCount: parsed.entries.length,
+                  customerCount: derivation.customers.length,
+                  invoiceCount: derivation.invoices.length,
+                  overdueCount: derivation.overdueCount,
+                  overdueCents: BigInt(derivation.overdueCents),
+                  warnings,
+                },
+              });
+              // Écriture par lots : borne la taille de chaque requête.
+              for (let i = 0; i < derivation.invoices.length; i += 5000) {
+                await tx.fecInvoice.createMany({
+                  data: derivation.invoices.slice(i, i + 5000).map((invoice) => ({
+                    tenantId: request.tenantId,
+                    importId: imported.id,
+                    customerRef: invoice.customerRef,
+                    customerName: invoice.customerName,
+                    number: invoice.number,
+                    issuedDate: new Date(`${invoice.issuedDate}T00:00:00Z`),
+                    dueDate: new Date(`${invoice.dueDate}T00:00:00Z`),
+                    amountCents: BigInt(invoice.amountCents),
+                    residualCents: BigInt(invoice.residualCents),
+                    settled: invoice.settled,
+                  })),
+                });
+              }
+              // Le « connecteur fichier » : statut "file" (jamais "active" —
+              // rien n'est connecté), posé UNIQUEMENT ici. Aucun secret associé.
+              await tx.connector.upsert({
+                where: {
+                  tenantId_type: { tenantId: request.tenantId, type: FEC_CONNECTOR_TYPE },
+                },
+                update: { status: FEC_CONNECTOR_STATUS },
+                create: {
+                  tenantId: request.tenantId,
+                  type: FEC_CONNECTOR_TYPE,
+                  status: FEC_CONNECTOR_STATUS,
+                  credentialsRef: connectorSecretName(request.tenantId, FEC_CONNECTOR_TYPE),
+                },
+              });
+              return { kind: "created" } satisfies Outcome;
+            },
+            { timeoutMs: 30_000 },
+          );
+        } catch (error) {
+          // Une erreur Prisma peut citer ses arguments (valeurs du FEC) : on
+          // logue le NOM et des compteurs, jamais l'objet d'erreur complet.
+          request.log.error(
+            {
+              err: error instanceof Error ? error.name : "Error",
+              invoices: derivation.invoices.length,
+            },
+            "fec import failed",
+          );
+          return reply.code(500).send({ error: "import failed" });
+        }
+
+        if (outcome.kind === "already") {
+          return reply.send({
+            alreadyImported: true,
+            entryCount: outcome.existing.entryCount,
+            customerCount: outcome.existing.customerCount,
+            invoiceCount: outcome.existing.invoiceCount,
+            overdueCount: outcome.existing.overdueCount,
+            overdueCents: Number(outcome.existing.overdueCents),
+            warnings: z.array(z.string()).catch([]).parse(outcome.existing.warnings),
           });
         }
-        // Le « connecteur fichier » : statut "file" (jamais "active" — rien
-        // n'est connecté), posé UNIQUEMENT ici. Aucun secret associé.
-        await tx.connector.upsert({
-          where: { tenantId_type: { tenantId: request.tenantId, type: FEC_CONNECTOR_TYPE } },
-          update: { status: FEC_CONNECTOR_STATUS },
-          create: {
-            tenantId: request.tenantId,
-            type: FEC_CONNECTOR_TYPE,
-            status: FEC_CONNECTOR_STATUS,
-            credentialsRef: connectorSecretName(request.tenantId, FEC_CONNECTOR_TYPE),
-          },
+        return reply.code(201).send({
+          alreadyImported: false,
+          entryCount: parsed.entries.length,
+          customerCount: derivation.customers.length,
+          invoiceCount: derivation.invoices.length,
+          overdueCount: derivation.overdueCount,
+          overdueCents: derivation.overdueCents,
+          warnings,
         });
-      });
+      },
+    );
+  });
 
-      return reply.code(201).send({
-        alreadyImported: false,
-        entryCount: parsed.entries.length,
-        customerCount: derivation.customers.length,
-        invoiceCount: derivation.invoices.length,
-        overdueCount: derivation.overdueCount,
-        overdueCents: derivation.overdueCents,
-        warnings,
+  // Droit à l'effacement (RGPD art. 17) : purge des données dérivées du FEC
+  // (imports + factures via cascade) et du connecteur fichier. Owner only.
+  app.delete(
+    "/connectors/fec",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const removed = await withTenant(request.tenantId, async (tx) => {
+        const { count } = await tx.fecImport.deleteMany({
+          where: { tenantId: request.tenantId },
+        });
+        await tx.connector.deleteMany({ where: { type: FEC_CONNECTOR_TYPE } });
+        return count;
       });
+      if (removed === 0) return reply.code(404).send({ error: "no fec import" });
+      return reply.code(204).send();
     },
   );
 

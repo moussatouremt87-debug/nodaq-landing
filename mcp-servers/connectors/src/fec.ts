@@ -27,15 +27,25 @@ export class FecPennylaneClient extends PennylaneClient {
 
   override async listCustomerInvoices(options: { limit?: number; cursor?: string } = {}) {
     const limit = Math.min(options.limit ?? 25, PAGE_SIZE_MAX);
-    const offset = options.cursor ? Number.parseInt(options.cursor, 10) || 0 : 0;
+    const offset = options.cursor
+      ? Math.max(0, Number.parseInt(options.cursor, 10) || 0)
+      : 0;
     const todayIso = new Date().toISOString().slice(0, 10);
-    const rows = await withTenant(this.tenantId, (tx) =>
-      tx.fecInvoice.findMany({
+    const rows = await withTenant(this.tenantId, async (tx) => {
+      // Seul le DERNIER import fait foi : si un import concurrent a laissé
+      // une ligne orpheline, ses factures ne sont jamais servies.
+      const latest = await tx.fecImport.findFirst({
+        orderBy: { importedAt: "desc" },
+        select: { id: true },
+      });
+      if (!latest) return [];
+      return tx.fecInvoice.findMany({
+        where: { importId: latest.id },
         orderBy: [{ issuedDate: "desc" }, { number: "asc" }],
         skip: offset,
         take: limit + 1,
-      }),
-    );
+      });
+    });
     const page = rows.slice(0, limit);
     return {
       items: page.map((row) => {
@@ -43,13 +53,13 @@ export class FecPennylaneClient extends PennylaneClient {
         return {
           id: row.id,
           invoice_number: row.number,
-          amount: (row.amountCents / 100).toFixed(2),
+          amount: (Number(row.amountCents) / 100).toFixed(2),
           currency: "EUR",
           date: row.issuedDate.toISOString().slice(0, 10),
           deadline: dueIso,
           status: row.settled
             ? "paid"
-            : row.residualCents > 0 && dueIso < todayIso
+            : row.residualCents > 0n && dueIso < todayIso
               ? "late"
               : "pending",
         };
@@ -60,14 +70,20 @@ export class FecPennylaneClient extends PennylaneClient {
 
   override async listCustomers(options: { limit?: number; cursor?: string } = {}) {
     const limit = Math.min(options.limit ?? 25, PAGE_SIZE_MAX);
-    const rows = await withTenant(this.tenantId, (tx) =>
-      tx.fecInvoice.findMany({
+    const rows = await withTenant(this.tenantId, async (tx) => {
+      const latest = await tx.fecImport.findFirst({
+        orderBy: { importedAt: "desc" },
+        select: { id: true },
+      });
+      if (!latest) return [];
+      return tx.fecInvoice.findMany({
+        where: { importId: latest.id },
         select: { customerRef: true, customerName: true },
         distinct: ["customerRef"],
         orderBy: { customerRef: "asc" },
         take: limit,
-      }),
-    );
+      });
+    });
     return {
       items: rows.map((row) => ({
         id: row.customerRef,

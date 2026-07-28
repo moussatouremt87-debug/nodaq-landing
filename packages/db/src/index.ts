@@ -39,13 +39,23 @@ export type TenantClient = Prisma.TransactionClient;
  * le pooling de connexions Prisma). TOUTE requête applicative sur une table métier
  * passe par ce helper — jamais de `prisma.note.*` direct.
  */
+export interface WithTenantOptions {
+  /** Durée max de la transaction en ms (défaut Prisma : 5 000). Pour les
+   * écritures en masse (ex. import FEC) qui dépasseraient le défaut. */
+  timeoutMs?: number;
+}
+
 export async function withTenant<T>(
   tenantId: string,
   fn: (tx: TenantClient) => Promise<T>,
+  options: WithTenantOptions = {},
 ): Promise<T> {
   const id = TenantId.parse(tenantId);
-  return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT set_config('app.current_tenant_id', ${id}, true)`;
-    return fn(tx);
-  });
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT set_config('app.current_tenant_id', ${id}, true)`;
+      return fn(tx);
+    },
+    options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : undefined,
+  );
 }

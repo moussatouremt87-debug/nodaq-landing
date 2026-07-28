@@ -75,6 +75,11 @@ export type FecParseResult = FecParseOk | FecParseFail;
 /** Plafond d'erreurs détaillées dans le rapport (le rejet reste total). */
 const MAX_ERRORS = 50;
 
+/** Plafond de lignes : borne le coût CPU/mémoire d'un parse (l'event loop
+ * n'est pas cédé pendant l'analyse — un fichier hors gabarit est rejeté
+ * AVANT tout travail lourd). */
+const MAX_LINES = 500_000;
+
 const CANONICAL_HEADER = [
   "journalcode",
   "journallib",
@@ -180,6 +185,12 @@ export function parseFec(input: Uint8Array | string): FecParseResult {
   while (lines.length > 0 && lines[lines.length - 1]!.trim() === "") lines.pop();
   if (lines.length < 2) {
     return { ok: false, errors: [{ line: 1, message: "fichier vide ou sans écritures" }] };
+  }
+  if (lines.length - 1 > MAX_LINES) {
+    return {
+      ok: false,
+      errors: [{ line: 0, message: `fichier trop volumineux (${MAX_LINES} écritures max)` }],
+    };
   }
 
   const headerLine = lines[0]!;

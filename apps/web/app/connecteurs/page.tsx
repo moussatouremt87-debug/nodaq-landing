@@ -162,6 +162,30 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
 
   useEffect(refresh, [refresh]);
 
+  async function purge(): Promise<void> {
+    if (!window.confirm("Supprimer toutes les données dérivées du FEC importé ?")) return;
+    setBusy(true);
+    setNotice(null);
+    setReport(null);
+    try {
+      const response = await fetch("/backend/connectors/fec", { method: "DELETE" });
+      if (!response.ok && response.status !== 404) {
+        throw new ApiError(response.status, `HTTP ${response.status}`);
+      }
+      setStatus({ imported: false, lastImport: null });
+      setNotice("Données importées supprimées.");
+      onChanged();
+    } catch (error) {
+      setNotice(
+        error instanceof ApiError && error.status === 403
+          ? "Suppression réservée au rôle owner."
+          : "Échec de la suppression.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function upload(file: File): Promise<void> {
     setBusy(true);
     setNotice(null);
@@ -203,12 +227,23 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
         dans le cockpit, sans rien connecter.
       </p>
       {status?.lastImport && (
-        <p className="hint">
-          Dernier import le {new Date(status.lastImport.importedAt).toLocaleDateString("fr-FR")} —{" "}
-          {status.lastImport.entryCount} écritures, {status.lastImport.invoiceCount} factures,{" "}
-          {status.lastImport.overdueCount} impayé{status.lastImport.overdueCount > 1 ? "s" : ""}.
-          Ré-importer remplace ces données.
-        </p>
+        <>
+          <p className="hint">
+            Dernier import{status.lastImport.fileName ? ` (${status.lastImport.fileName})` : ""} le{" "}
+            {new Date(status.lastImport.importedAt).toLocaleDateString("fr-FR")} —{" "}
+            {status.lastImport.entryCount} écritures, {status.lastImport.invoiceCount} factures,{" "}
+            {status.lastImport.overdueCount} impayé{status.lastImport.overdueCount > 1 ? "s" : ""}.
+            Ré-importer remplace ces données.
+          </p>
+          <button
+            className="danger"
+            disabled={busy}
+            onClick={() => void purge()}
+            style={{ marginBottom: 6 }}
+          >
+            Supprimer les données importées
+          </button>
+        </>
       )}
       <label style={{ marginTop: 12 }}>
         <span className="overline">Fichier FEC (.txt — tabulation ou « | », 50 Mo max)</span>

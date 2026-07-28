@@ -44,6 +44,11 @@ analysées, clients, factures, impayés (nombre + montant), avertissements.
 - Tables `fec_imports`/`fec_invoices` : `tenantId` + RLS + tests d'isolation.
 - Le badge connecteur affiche « importé » (statut `file`) — jamais
   « connecté » : rien n'est branché.
+- **Conservation / effacement (art. 17)** : les données dérivées vivent
+  jusqu'au prochain import (remplacement intégral) ou jusqu'à suppression
+  explicite — bouton « Supprimer les données importées » de la carte
+  (`DELETE /connectors/fec`, owner), qui purge imports, factures dérivées et
+  connecteur fichier.
 
 ## À ne pas faire
 
