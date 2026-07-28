@@ -252,8 +252,9 @@ locals {
 resource "scaleway_domain_record" "web" {
   count = local.web_domain != "" ? 1 : 0
   # project_id épinglé (audit RGPD) : la zone apex nodaq.fr sert aussi le
-  # site public — ce state ne doit toucher QUE la zone du projet staging.
-  project_id = var.project_id
+  # site public — ce state ne touche QUE la zone du projet désigné. La zone
+  # peut vivre dans un AUTRE projet que le staging (dns_zone_project_id).
+  project_id = var.dns_zone_project_id != "" ? var.dns_zone_project_id : var.project_id
   dns_zone   = var.dns_zone
   name       = var.web_subdomain
   type       = "CNAME"

@@ -29,14 +29,18 @@ const nextConfig: NextConfig = {
     ];
   },
   async redirects() {
+    // Canonique : l'endpoint Scaleway natif reste vivant mais n'est plus dans
+    // trustedOrigins quand un domaine custom est actif — un signet sur
+    // l'ancienne URL donnerait une app à l'auth cassée (403). La cible est
+    // FIGÉE AU BUILD via CANONICAL_HOST (workflow) : sans elle, aucune
+    // redirection — indispensable tant que le domaine custom n'existe pas.
+    const canonicalHost = process.env.CANONICAL_HOST;
+    if (!canonicalHost) return [];
     return [
-      // Canonique : l'endpoint Scaleway natif reste vivant mais n'est plus
-      // dans trustedOrigins — un signet sur l'ancienne URL donnerait une app
-      // à l'auth cassée (403). On redirige vers le domaine custom.
       {
         source: "/:path*",
         has: [{ type: "host", value: "(?<scw>.*\\.scw\\.cloud)" }],
-        destination: "https://app.nodaq.fr/:path*",
+        destination: `https://${canonicalHost}/:path*`,
         permanent: false,
       },
     ];
