@@ -31,10 +31,16 @@ variable "dns_zone" {
   }
 }
 
-variable "web_subdomain" {
-  description = "Sous-domaine du front dans dns_zone ('' = pas de domaine custom, retour à l'URL Scaleway)."
+variable "dns_zone_project_id" {
+  description = "Projet Scaleway qui possède la zone DNS ('' = même projet que le staging). Le domaine a pu être enregistré dans un autre projet du compte."
   type        = string
-  default     = "app"
+  default     = ""
+}
+
+variable "web_subdomain" {
+  description = "Sous-domaine du front dans dns_zone ('' = pas de domaine custom, retour à l'URL Scaleway). Désactivé tant que la zone nodaq.fr n'est pas accessible au projet (deploy #17 : 403 domain not found)."
+  type        = string
+  default     = ""
 
   # Alimente WEB_ORIGIN (trustedOrigins better-auth) : une valeur malformée
   # doit échouer AU PLAN, pas au boot de l'API.
