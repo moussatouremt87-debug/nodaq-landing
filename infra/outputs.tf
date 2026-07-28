@@ -2,7 +2,10 @@
 # Avec un domaine custom, web_url EST ce domaine : le workflow s'en sert pour
 # WEB_ORIGIN (trustedOrigins better-auth), le smoke test et le résumé.
 locals {
-  web_url = local.web_domain != "" ? "https://${local.web_domain}" : (startswith(scaleway_container.web.public_endpoint, "http") ? scaleway_container.web.public_endpoint : "https://${scaleway_container.web.public_endpoint}")
+  # Dérivé de la RESSOURCE (audit RGPD) : si le domaine custom n'a pas pu être
+  # créé, l'output retombe sur l'URL Scaleway au lieu d'annoncer un WEB_ORIGIN
+  # que personne ne sert (verrouillage auth silencieux sinon).
+  web_url = length(scaleway_container_domain.web) > 0 ? "https://${scaleway_container_domain.web[0].hostname}" : (startswith(scaleway_container.web.public_endpoint, "http") ? scaleway_container.web.public_endpoint : "https://${scaleway_container.web.public_endpoint}")
   api_url = startswith(scaleway_container.api.public_endpoint, "http") ? scaleway_container.api.public_endpoint : "https://${scaleway_container.api.public_endpoint}"
 }
 

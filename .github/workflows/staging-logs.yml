@@ -49,7 +49,14 @@ jobs:
             echo "api_image=$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="api") | .registry_image // .image')"
             echo "litellm_image=$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="litellm") | .registry_image // .image')"
             echo "api_url=https://$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="api") | .domain_name')"
-            echo "web_url=https://$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="web") | .domain_name')"
+            # WEB_ORIGIN du repro = le domaine CUSTOM s'il existe (sinon le
+            # natif) — le diagnostic doit répliquer l'env réel de l'api.
+            WEB_ID="$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="web") | .id')"
+            WEB_CUSTOM="$(curl -s -H "X-Auth-Token: $SCW_SECRET_KEY" \
+              "https://api.scaleway.com/containers/v1beta1/regions/fr-par/domains?container_id=$WEB_ID" \
+              | jq -r '.domains[0].hostname // empty')"
+            WEB_NATIVE="$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="web") | .domain_name')"
+            echo "web_url=https://${WEB_CUSTOM:-$WEB_NATIVE}"
             echo "litellm_url=https://$(echo "$CONT_JSON" | jq -r '.containers[] | select(.name=="litellm") | .domain_name')"
           } >> "$GITHUB_OUTPUT"
 

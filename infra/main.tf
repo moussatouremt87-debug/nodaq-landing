@@ -250,12 +250,15 @@ locals {
 }
 
 resource "scaleway_domain_record" "web" {
-  count    = local.web_domain != "" ? 1 : 0
-  dns_zone = var.dns_zone
-  name     = var.web_subdomain
-  type     = "CNAME"
-  data     = "${scaleway_container.web.domain_name}."
-  ttl      = 300
+  count = local.web_domain != "" ? 1 : 0
+  # project_id épinglé (audit RGPD) : la zone apex nodaq.fr sert aussi le
+  # site public — ce state ne doit toucher QUE la zone du projet staging.
+  project_id = var.project_id
+  dns_zone   = var.dns_zone
+  name       = var.web_subdomain
+  type       = "CNAME"
+  data       = "${scaleway_container.web.domain_name}."
+  ttl        = 300
 }
 
 resource "scaleway_container_domain" "web" {
