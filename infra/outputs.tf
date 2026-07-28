@@ -1,6 +1,8 @@
 # public_endpoint normalisé en URL https (le champ peut être nu ou préfixé).
+# Avec un domaine custom, web_url EST ce domaine : le workflow s'en sert pour
+# WEB_ORIGIN (trustedOrigins better-auth), le smoke test et le résumé.
 locals {
-  web_url = startswith(scaleway_container.web.public_endpoint, "http") ? scaleway_container.web.public_endpoint : "https://${scaleway_container.web.public_endpoint}"
+  web_url = local.web_domain != "" ? "https://${local.web_domain}" : (startswith(scaleway_container.web.public_endpoint, "http") ? scaleway_container.web.public_endpoint : "https://${scaleway_container.web.public_endpoint}")
   api_url = startswith(scaleway_container.api.public_endpoint, "http") ? scaleway_container.api.public_endpoint : "https://${scaleway_container.api.public_endpoint}"
 }
 

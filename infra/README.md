@@ -47,4 +47,11 @@ création) : base+API+LiteLLM → migrations Prisma + rotation du mot de passe
   console Scaleway Generative APIs (ils évoluent).
 - Conteneurs publics (protégés par auth applicative / clé maître) — réseau
   privé + LB à faire en durcissement.
-- Pas de domaine custom ni de Langfuse déployé.
+- Pas de Langfuse déployé.
+- Domaine custom : le front vit sur **app.nodaq.fr** (`web_subdomain`/`dns_zone`
+  dans `variables.tf`). La zone DNS de nodaq.fr est hébergée chez Scaleway dans
+  le même projet : le CNAME et le domaine conteneur (certificat TLS automatique)
+  sont gérés par Terraform. `web_url` (donc `WEB_ORIGIN`, le smoke test et le
+  résumé) pointe sur ce domaine ; remettre `web_subdomain = ""` pour revenir à
+  l'URL Scaleway. L'API reste sur son URL Scaleway (appelée via le proxy Next,
+  jamais directement par le navigateur).

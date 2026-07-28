@@ -241,6 +241,31 @@ resource "scaleway_container" "web" {
   # API_URL est figé DANS l'image (rewrites Next au build) — voir le workflow.
 }
 
+# ── Domaine custom du front (app.nodaq.fr) ────────────────────────────────
+# La zone DNS de nodaq.fr est hébergée chez Scaleway (même projet) : le
+# CNAME est géré ICI, et doit exister AVANT le domaine conteneur — Scaleway
+# le valide pour émettre le certificat TLS (Let's Encrypt automatique).
+locals {
+  web_domain = var.web_subdomain != "" ? "${var.web_subdomain}.${var.dns_zone}" : ""
+}
+
+resource "scaleway_domain_record" "web" {
+  count    = local.web_domain != "" ? 1 : 0
+  dns_zone = var.dns_zone
+  name     = var.web_subdomain
+  type     = "CNAME"
+  data     = "${scaleway_container.web.domain_name}."
+  ttl      = 300
+}
+
+resource "scaleway_container_domain" "web" {
+  count        = local.web_domain != "" ? 1 : 0
+  container_id = scaleway_container.web.id
+  hostname     = local.web_domain
+
+  depends_on = [scaleway_domain_record.web]
+}
+
 variable "scw_access_key" {
   description = "Clé d'accès Scaleway (env TF_VAR_scw_access_key dans le workflow)."
   type        = string

@@ -19,3 +19,15 @@ variable "api_base_url" {
   type        = string
   default     = ""
 }
+
+variable "dns_zone" {
+  description = "Zone DNS du domaine, hébergée chez Scaleway (même projet)."
+  type        = string
+  default     = "nodaq.fr"
+}
+
+variable "web_subdomain" {
+  description = "Sous-domaine du front dans dns_zone ('' = pas de domaine custom, retour à l'URL Scaleway)."
+  type        = string
+  default     = "app"
+}
