@@ -3,6 +3,7 @@ import { withTenant } from "@nodaq/db";
 import { defaultProvider } from "@nodaq/secrets";
 import type { SecretProvider } from "@nodaq/secrets";
 import { DemoPennylaneClient, DemoQontoClient } from "./demo.js";
+import { FEC_CONNECTOR_STATUS, FEC_CONNECTOR_TYPE, FecPennylaneClient } from "./fec.js";
 import { PennylaneClient, PennylaneCredentials } from "./pennylane.js";
 import { QontoClient, QontoCredentials } from "./qonto.js";
 
@@ -86,10 +87,36 @@ async function resolveCredentials(
   }
 }
 
+/**
+ * Repli « connecteur fichier » : sans Pennylane configuré, un import FEC
+ * (row type "fec", statut "file", posé UNIQUEMENT par l'endpoint d'import)
+ * sert les factures dérivées à travers la même interface. Le badge UI reste
+ * « importé », jamais « connecté ».
+ */
+async function loadFecRow(tenantId: string) {
+  const row = await withTenant(tenantId, (tx) =>
+    tx.connector.findUnique({
+      where: { tenantId_type: { tenantId, type: FEC_CONNECTOR_TYPE } },
+    }),
+  );
+  return row && row.status === FEC_CONNECTOR_STATUS ? row : null;
+}
+
 export async function getPennylaneClient(
   tenantId: string,
   options: RegistryOptions = {},
 ): Promise<PennylaneClient> {
+  // Repli AVANT loadConnectorRow (pas d'exception pilote, pas de fausse
+  // alerte [CONNECTOR-UNAVAILABLE] pour un tenant en mode FEC seul).
+  const pennylaneRow = await withTenant(tenantId, (tx) =>
+    tx.connector.findUnique({
+      where: { tenantId_type: { tenantId, type: "pennylane" } },
+      select: { id: true },
+    }),
+  );
+  if (!pennylaneRow && (await loadFecRow(tenantId))) {
+    return new FecPennylaneClient(tenantId);
+  }
   const row = await loadConnectorRow(tenantId, "pennylane");
   if (row.status === DEMO_CONNECTOR_STATUS) return new DemoPennylaneClient();
   const credentials = PennylaneCredentials.parse(

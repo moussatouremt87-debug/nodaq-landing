@@ -162,6 +162,71 @@ export const disconnectConnector = async (type: string): Promise<void> => {
   if (!response.ok) throw new ApiError(response.status, `HTTP ${response.status}`);
 };
 
+// Import FEC (ticket 2.14) — le « connecteur fichier » universel. Le contenu
+// du fichier voyage dans UN sens (upload) ; les réponses ne contiennent que
+// des compteurs et avertissements, jamais une ligne du journal comptable.
+export const FecImportReport = z.object({
+  alreadyImported: z.boolean(),
+  entryCount: z.number(),
+  customerCount: z.number(),
+  invoiceCount: z.number(),
+  overdueCount: z.number(),
+  overdueCents: z.number(),
+  warnings: z.array(z.string()),
+});
+export type FecImportReport = z.infer<typeof FecImportReport>;
+
+export const FecStatus = z.object({
+  imported: z.boolean(),
+  lastImport: z
+    .object({
+      importedAt: z.string(),
+      fileName: z.string().nullable(),
+      entryCount: z.number(),
+      invoiceCount: z.number(),
+      overdueCount: z.number(),
+    })
+    .nullable(),
+});
+export type FecStatus = z.infer<typeof FecStatus>;
+
+export const getFecStatus = (): Promise<FecStatus> => call(FecStatus, "/connectors/fec");
+
+export interface FecLineIssue {
+  line: number;
+  message: string;
+}
+
+/** Erreur d'import FEC : fichier invalide (422) avec rapport ligne à ligne. */
+export class FecInvalidError extends ApiError {
+  constructor(public readonly issues: FecLineIssue[]) {
+    super(422, "FEC invalide");
+    this.name = "FecInvalidError";
+  }
+}
+
+export const importFec = async (bytes: ArrayBuffer, fileName: string): Promise<FecImportReport> => {
+  const response = await fetch("/backend/connectors/fec/import", {
+    method: "POST",
+    headers: {
+      "content-type": "application/octet-stream",
+      // Métadonnée d'affichage uniquement (encodée ASCII pour l'en-tête).
+      "x-fec-filename": encodeURIComponent(fileName),
+    },
+    body: bytes,
+  });
+  if (response.status === 422) {
+    const body: unknown = await response.json().catch(() => ({}));
+    const issues =
+      body && typeof body === "object" && "details" in body && Array.isArray(body.details)
+        ? (body.details as FecLineIssue[])
+        : [];
+    throw new FecInvalidError(issues);
+  }
+  if (!response.ok) throw new ApiError(response.status, `HTTP ${response.status}`);
+  return FecImportReport.parse(await response.json());
+};
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {

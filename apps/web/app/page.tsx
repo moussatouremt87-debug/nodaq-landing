@@ -194,8 +194,9 @@ export default function CockpitPage() {
         <div className="card" style={{ marginBottom: 20 }}>
           <span className="overline">Bienvenue — dernière étape</span>
           <p className="hint" style={{ margin: "6px 0 12px" }}>
-            Aucun outil connecté : reliez Qonto et Pennylane pour que l&apos;employé Compta voie
-            votre trésorerie et vos factures.
+            Aucun outil connecté : reliez Qonto et Pennylane — ou <b>importez votre FEC</b> (le
+            fichier que tout logiciel comptable sait exporter) pour voir vos impayés sans rien
+            connecter.
           </p>
           <Link href="/connecteurs" className="btn primary">
             Connecter mes outils

@@ -69,6 +69,9 @@ importers:
       '@nodaq/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@nodaq/fec':
+        specifier: workspace:*
+        version: link:../../packages/fec
       '@nodaq/mcp-connectors':
         specifier: workspace:*
         version: link:../../mcp-servers/connectors
@@ -192,6 +195,16 @@ importers:
       prisma:
         specifier: ^6.1.0
         version: 6.19.3(typescript@5.9.3)
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
+  packages/fec:
+    dependencies:
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.1)

@@ -27,6 +27,10 @@ let pendingActionAId: string;
 let pendingActionBId: string;
 let agentConversationAId: string;
 let agentConversationBId: string;
+let fecImportAId: string;
+let fecImportBId: string;
+let fecInvoiceAId: string;
+let fecInvoiceBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -36,6 +40,9 @@ beforeAll(async () => {
   await admin.connector.deleteMany();
   await admin.pendingAction.deleteMany();
   await admin.agentConversation.deleteMany();
+  // FK order: invoices before imports.
+  await admin.fecInvoice.deleteMany();
+  await admin.fecImport.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -197,6 +204,75 @@ beforeAll(async () => {
   );
   agentConversationAId = agentConversationA.id;
   agentConversationBId = agentConversationB.id;
+
+  // fileHash/warnings sont des placeholders de test, jamais un vrai fichier FEC
+  // ni son contenu (donnée CONFIDENTIELLE — dérivée du journal comptable).
+  const fecImportA = await withTenant(tenantA, (tx) =>
+    tx.fecImport.create({
+      data: {
+        tenantId: tenantA,
+        fileHash: "hash-fec-a",
+        fileName: "fec-a.txt",
+        entryCount: 10,
+        customerCount: 2,
+        invoiceCount: 3,
+        overdueCount: 1,
+        overdueCents: 12000,
+      },
+    }),
+  );
+  const fecImportB = await withTenant(tenantB, (tx) =>
+    tx.fecImport.create({
+      data: {
+        tenantId: tenantB,
+        fileHash: "hash-fec-b",
+        fileName: "fec-b.txt",
+        entryCount: 20,
+        customerCount: 4,
+        invoiceCount: 6,
+        overdueCount: 2,
+        overdueCents: 34000,
+      },
+    }),
+  );
+  fecImportAId = fecImportA.id;
+  fecImportBId = fecImportB.id;
+
+  // customerRef/number sont des placeholders de test, jamais une vraie donnée client.
+  const fecInvoiceA = await withTenant(tenantA, (tx) =>
+    tx.fecInvoice.create({
+      data: {
+        tenantId: tenantA,
+        importId: fecImportAId,
+        customerRef: "CLI-A-1",
+        customerName: "Client A",
+        number: "FA-A-1",
+        issuedDate: new Date("2026-01-01"),
+        dueDate: new Date("2026-02-01"),
+        amountCents: 10000,
+        residualCents: 10000,
+        settled: false,
+      },
+    }),
+  );
+  const fecInvoiceB = await withTenant(tenantB, (tx) =>
+    tx.fecInvoice.create({
+      data: {
+        tenantId: tenantB,
+        importId: fecImportBId,
+        customerRef: "CLI-B-1",
+        customerName: "Client B",
+        number: "FA-B-1",
+        issuedDate: new Date("2026-01-05"),
+        dueDate: new Date("2026-02-05"),
+        amountCents: 20000,
+        residualCents: 0,
+        settled: true,
+      },
+    }),
+  );
+  fecInvoiceAId = fecInvoiceA.id;
+  fecInvoiceBId = fecInvoiceB.id;
 });
 
 afterAll(async () => {
@@ -272,6 +348,22 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur agent_conversations", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'agent_conversations'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur fec_imports", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'fec_imports'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur fec_invoices", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'fec_invoices'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -527,6 +619,82 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (fec_imports) — withTenant(A) ne voit QUE les imports de A", async () => {
+    const imports = await withTenant(tenantA, (tx) => tx.fecImport.findMany());
+    expect(imports).toHaveLength(1);
+    expect(imports[0]?.id).toBe(fecImportAId);
+    expect(imports.some((i) => i.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (fec_imports) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const imports = await prisma.fecImport.findMany();
+    expect(imports).toHaveLength(0);
+  });
+
+  it("test 3 (fec_imports) — lire l'import de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.fecImport.findUnique({ where: { id: fecImportBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (fec_imports) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.fecImport.create({
+          data: {
+            tenantId: tenantB,
+            fileHash: "hash-intrusion",
+            entryCount: 0,
+            customerCount: 0,
+            invoiceCount: 0,
+            overdueCount: 0,
+            overdueCents: 0,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 1 (fec_invoices) — withTenant(A) ne voit QUE les factures de A", async () => {
+    const invoices = await withTenant(tenantA, (tx) => tx.fecInvoice.findMany());
+    expect(invoices).toHaveLength(1);
+    expect(invoices[0]?.id).toBe(fecInvoiceAId);
+    expect(invoices.some((i) => i.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (fec_invoices) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const invoices = await prisma.fecInvoice.findMany();
+    expect(invoices).toHaveLength(0);
+  });
+
+  it("test 3 (fec_invoices) — lire la facture de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.fecInvoice.findUnique({ where: { id: fecInvoiceBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (fec_invoices) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.fecInvoice.create({
+          data: {
+            tenantId: tenantB,
+            importId: fecImportBId,
+            customerRef: "CLI-intrusion",
+            number: "FA-intrusion",
+            issuedDate: new Date("2026-01-01"),
+            dueDate: new Date("2026-02-01"),
+            amountCents: 100,
+            residualCents: 100,
+            settled: false,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -686,5 +854,45 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const conversations = await withTenant(tenantA, (tx) => tx.agentConversation.findMany());
     expect(conversations).toHaveLength(1);
+  });
+
+  it("policy désactivée sur fec_imports => la fuite se produit aussi (données CONFIDENTIELLES dérivées du journal comptable)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "fec_imports" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.fecImport.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((i) => i.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.fecImport.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "fec_imports" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "fec_imports" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const imports = await withTenant(tenantA, (tx) => tx.fecImport.findMany());
+    expect(imports).toHaveLength(1);
+  });
+
+  it("policy désactivée sur fec_invoices => la fuite se produit aussi (données CONFIDENTIELLES dérivées du journal comptable)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "fec_invoices" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.fecInvoice.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((i) => i.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.fecInvoice.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "fec_invoices" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "fec_invoices" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const invoices = await withTenant(tenantA, (tx) => tx.fecInvoice.findMany());
+    expect(invoices).toHaveLength(1);
   });
 });

@@ -1,12 +1,16 @@
+import { createHash } from "node:crypto";
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
 import { prisma, withTenant } from "@nodaq/db";
+import { deriveReceivables, parseFec } from "@nodaq/fec";
 import {
   connectorSecretName,
   ConnectorType,
+  FEC_CONNECTOR_STATUS,
+  FEC_CONNECTOR_TYPE,
   PennylaneClient,
   QontoClient,
 } from "@nodaq/mcp-connectors";
@@ -538,6 +542,202 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         tx.connector.deleteMany({ where: { type: params.data.type } }),
       );
       if (count === 0) return reply.code(404).send({ error: "connector not configured" });
+      return reply.code(204).send();
+    },
+  );
+
+  /*
+   * Import FEC (ticket 2.14) — le « connecteur fichier » universel (art.
+   * A47 A-1 du LPF). Le FEC est une donnée CONFIDENTIELLE par nature (journal
+   * comptable complet) : parsé en mémoire, JAMAIS loggé, jamais renvoyé au
+   * client ; seuls des compteurs et avertissements sortent. Le fichier brut
+   * n'est PAS conservé (minimisation — V1) : seule l'empreinte SHA-256 sert
+   * l'idempotence ; un nouvel import remplace intégralement le précédent
+   * (jamais d'ingestion partielle : le parseur rejette en bloc).
+   */
+
+  // Métadonnées du dernier import — visibles de tout membre (compteurs only).
+  app.get("/connectors/fec", { preHandler: businessRoute }, async (request) => {
+    const lastImport = await withTenant(request.tenantId, (tx) =>
+      tx.fecImport.findFirst({
+        orderBy: { importedAt: "desc" },
+        select: {
+          importedAt: true,
+          fileName: true,
+          entryCount: true,
+          invoiceCount: true,
+          overdueCount: true,
+        },
+      }),
+    );
+    return { imported: lastImport !== null, lastImport };
+  });
+
+  // Le parser binaire est CANTONNÉ à cette route (plugin encapsulé) : le
+  // reste de l'API n'accepte pas de corps octet-stream.
+  void app.register(async (fec) => {
+    fec.addContentTypeParser(
+      "application/octet-stream",
+      { parseAs: "buffer" },
+      (_request, body, done) => done(null, body),
+    );
+
+    fec.post(
+      "/connectors/fec/import",
+      {
+        preHandler: [...businessRoute, requireRole(["owner"])],
+        bodyLimit: 50 * 1024 * 1024,
+      },
+      async (request, reply) => {
+        const body = request.body;
+        if (!Buffer.isBuffer(body) || body.length === 0) {
+          return reply
+            .code(400)
+            .send({ error: "fichier FEC attendu (corps application/octet-stream)" });
+        }
+
+        const fileHash = createHash("sha256").update(body).digest("hex");
+        // Parse + dérivation AVANT la transaction (aucun IO DB pendant).
+        const parsed = parseFec(new Uint8Array(body));
+        if (!parsed.ok) {
+          // Numéros de ligne et messages génériques UNIQUEMENT — jamais le contenu.
+          return reply.code(422).send({ error: "FEC invalide", details: parsed.errors });
+        }
+        const derivation = deriveReceivables(parsed.entries);
+
+        // Métadonnée d'affichage : nom de fichier assaini, optionnel.
+        let fileName: string | null = null;
+        const rawName = request.headers["x-fec-filename"];
+        if (typeof rawName === "string") {
+          try {
+            fileName =
+              decodeURIComponent(rawName)
+                .replace(/[^\p{L}\p{N} ._()-]/gu, "")
+                .slice(0, 120) || null;
+          } catch {
+            fileName = null;
+          }
+        }
+
+        const warnings = [...parsed.warnings, ...derivation.warnings];
+        type Outcome =
+          | { kind: "already"; existing: { entryCount: number; customerCount: number; invoiceCount: number; overdueCount: number; overdueCents: bigint; warnings: unknown } }
+          | { kind: "created" };
+        let outcome: Outcome;
+        try {
+          outcome = await withTenant(
+            request.tenantId,
+            async (tx) => {
+              // Sérialise les imports du tenant (verrou transactionnel) :
+              // contrôle d'empreinte et écriture dans la MÊME transaction,
+              // jamais deux imports vivants (audit RGPD 2.14).
+              await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${request.tenantId} || ':fec-import'))`;
+              const existing = await tx.fecImport.findUnique({
+                where: { tenantId_fileHash: { tenantId: request.tenantId, fileHash } },
+              });
+              if (existing) return { kind: "already", existing } satisfies Outcome;
+              // deleteMany SCOPÉ tenant : la RLS reste le dernier rempart,
+              // pas la seule barrière (défense en profondeur).
+              await tx.fecImport.deleteMany({ where: { tenantId: request.tenantId } });
+              const imported = await tx.fecImport.create({
+                data: {
+                  tenantId: request.tenantId,
+                  fileHash,
+                  fileName,
+                  entryCount: parsed.entries.length,
+                  customerCount: derivation.customers.length,
+                  invoiceCount: derivation.invoices.length,
+                  overdueCount: derivation.overdueCount,
+                  overdueCents: BigInt(derivation.overdueCents),
+                  warnings,
+                },
+              });
+              // Écriture par lots : borne la taille de chaque requête.
+              for (let i = 0; i < derivation.invoices.length; i += 5000) {
+                await tx.fecInvoice.createMany({
+                  data: derivation.invoices.slice(i, i + 5000).map((invoice) => ({
+                    tenantId: request.tenantId,
+                    importId: imported.id,
+                    customerRef: invoice.customerRef,
+                    customerName: invoice.customerName,
+                    number: invoice.number,
+                    issuedDate: new Date(`${invoice.issuedDate}T00:00:00Z`),
+                    dueDate: new Date(`${invoice.dueDate}T00:00:00Z`),
+                    amountCents: BigInt(invoice.amountCents),
+                    residualCents: BigInt(invoice.residualCents),
+                    settled: invoice.settled,
+                  })),
+                });
+              }
+              // Le « connecteur fichier » : statut "file" (jamais "active" —
+              // rien n'est connecté), posé UNIQUEMENT ici. Aucun secret associé.
+              await tx.connector.upsert({
+                where: {
+                  tenantId_type: { tenantId: request.tenantId, type: FEC_CONNECTOR_TYPE },
+                },
+                update: { status: FEC_CONNECTOR_STATUS },
+                create: {
+                  tenantId: request.tenantId,
+                  type: FEC_CONNECTOR_TYPE,
+                  status: FEC_CONNECTOR_STATUS,
+                  credentialsRef: connectorSecretName(request.tenantId, FEC_CONNECTOR_TYPE),
+                },
+              });
+              return { kind: "created" } satisfies Outcome;
+            },
+            { timeoutMs: 30_000 },
+          );
+        } catch (error) {
+          // Une erreur Prisma peut citer ses arguments (valeurs du FEC) : on
+          // logue le NOM et des compteurs, jamais l'objet d'erreur complet.
+          request.log.error(
+            {
+              err: error instanceof Error ? error.name : "Error",
+              invoices: derivation.invoices.length,
+            },
+            "fec import failed",
+          );
+          return reply.code(500).send({ error: "import failed" });
+        }
+
+        if (outcome.kind === "already") {
+          return reply.send({
+            alreadyImported: true,
+            entryCount: outcome.existing.entryCount,
+            customerCount: outcome.existing.customerCount,
+            invoiceCount: outcome.existing.invoiceCount,
+            overdueCount: outcome.existing.overdueCount,
+            overdueCents: Number(outcome.existing.overdueCents),
+            warnings: z.array(z.string()).catch([]).parse(outcome.existing.warnings),
+          });
+        }
+        return reply.code(201).send({
+          alreadyImported: false,
+          entryCount: parsed.entries.length,
+          customerCount: derivation.customers.length,
+          invoiceCount: derivation.invoices.length,
+          overdueCount: derivation.overdueCount,
+          overdueCents: derivation.overdueCents,
+          warnings,
+        });
+      },
+    );
+  });
+
+  // Droit à l'effacement (RGPD art. 17) : purge des données dérivées du FEC
+  // (imports + factures via cascade) et du connecteur fichier. Owner only.
+  app.delete(
+    "/connectors/fec",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const removed = await withTenant(request.tenantId, async (tx) => {
+        const { count } = await tx.fecImport.deleteMany({
+          where: { tenantId: request.tenantId },
+        });
+        await tx.connector.deleteMany({ where: { type: FEC_CONNECTOR_TYPE } });
+        return count;
+      });
+      if (removed === 0) return reply.code(404).send({ error: "no fec import" });
       return reply.code(204).send();
     },
   );
