@@ -17,6 +17,8 @@ export type {
   DocumentChunk,
   PendingAction,
   AgentConversation,
+  FecImport,
+  FecInvoice,
 } from "@prisma/client";
 
 /**

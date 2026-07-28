@@ -22,5 +22,6 @@ export {
   DEMO_DIP_AT_30D_CENTS,
 } from "./demo.js";
 export type { RegistryOptions } from "./registry.js";
+export { FEC_CONNECTOR_TYPE, FEC_CONNECTOR_STATUS, FecPennylaneClient } from "./fec.js";
 export { createConnectorsMcpServer } from "./server.js";
 export type { ConnectorsServerContext } from "./server.js";

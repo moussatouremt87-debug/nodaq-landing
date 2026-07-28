@@ -1,12 +1,16 @@
+import { createHash } from "node:crypto";
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
 import { prisma, withTenant } from "@nodaq/db";
+import { deriveReceivables, parseFec } from "@nodaq/fec";
 import {
   connectorSecretName,
   ConnectorType,
+  FEC_CONNECTOR_STATUS,
+  FEC_CONNECTOR_TYPE,
   PennylaneClient,
   QontoClient,
 } from "@nodaq/mcp-connectors";
@@ -109,6 +113,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const vault = options.vault ?? defaultWritableProvider();
   const agentContext = { secretProvider: vault, ...options.agentContext };
   const app = Fastify({ logger: process.env.NODE_ENV !== "test" });
+
+  // Upload binaire (import FEC) : le corps arrive en Buffer brut, jamais
+  // parsé ni loggé. La limite de taille est portée par la route.
+  app.addContentTypeParser(
+    "application/octet-stream",
+    { parseAs: "buffer" },
+    (_request, body, done) => done(null, body),
+  );
 
   // Last rampart against detail leaks: an unhandled error must never echo its
   // message (internal URLs, secret refs) to the client — name only, log full.
@@ -539,6 +551,146 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       );
       if (count === 0) return reply.code(404).send({ error: "connector not configured" });
       return reply.code(204).send();
+    },
+  );
+
+  /*
+   * Import FEC (ticket 2.14) — le « connecteur fichier » universel (art.
+   * A47 A-1 du LPF). Le FEC est une donnée CONFIDENTIELLE par nature (journal
+   * comptable complet) : parsé en mémoire, JAMAIS loggé, jamais renvoyé au
+   * client ; seuls des compteurs et avertissements sortent. Le fichier brut
+   * n'est PAS conservé (minimisation — V1) : seule l'empreinte SHA-256 sert
+   * l'idempotence ; un nouvel import remplace intégralement le précédent
+   * (jamais d'ingestion partielle : le parseur rejette en bloc).
+   */
+
+  // Métadonnées du dernier import — visibles de tout membre (compteurs only).
+  app.get("/connectors/fec", { preHandler: businessRoute }, async (request) => {
+    const lastImport = await withTenant(request.tenantId, (tx) =>
+      tx.fecImport.findFirst({
+        orderBy: { importedAt: "desc" },
+        select: {
+          importedAt: true,
+          fileName: true,
+          entryCount: true,
+          invoiceCount: true,
+          overdueCount: true,
+        },
+      }),
+    );
+    return { imported: lastImport !== null, lastImport };
+  });
+
+  app.post(
+    "/connectors/fec/import",
+    {
+      preHandler: [...businessRoute, requireRole(["owner"])],
+      bodyLimit: 50 * 1024 * 1024,
+    },
+    async (request, reply) => {
+      const body = request.body;
+      if (!Buffer.isBuffer(body) || body.length === 0) {
+        return reply
+          .code(400)
+          .send({ error: "fichier FEC attendu (corps application/octet-stream)" });
+      }
+
+      // Idempotence par empreinte : ré-importer le même fichier = no-op signalé.
+      const fileHash = createHash("sha256").update(body).digest("hex");
+      const existing = await withTenant(request.tenantId, (tx) =>
+        tx.fecImport.findUnique({
+          where: { tenantId_fileHash: { tenantId: request.tenantId, fileHash } },
+        }),
+      );
+      if (existing) {
+        return reply.send({
+          alreadyImported: true,
+          entryCount: existing.entryCount,
+          customerCount: existing.customerCount,
+          invoiceCount: existing.invoiceCount,
+          overdueCount: existing.overdueCount,
+          overdueCents: existing.overdueCents,
+          warnings: z.array(z.string()).catch([]).parse(existing.warnings),
+        });
+      }
+
+      const parsed = parseFec(new Uint8Array(body));
+      if (!parsed.ok) {
+        // Numéros de ligne et messages génériques UNIQUEMENT — jamais le contenu.
+        return reply.code(422).send({ error: "FEC invalide", details: parsed.errors });
+      }
+      const derivation = deriveReceivables(parsed.entries);
+
+      // Métadonnée d'affichage : nom de fichier assaini, optionnel.
+      let fileName: string | null = null;
+      const rawName = request.headers["x-fec-filename"];
+      if (typeof rawName === "string") {
+        try {
+          fileName =
+            decodeURIComponent(rawName)
+              .replace(/[^\p{L}\p{N} ._()-]/gu, "")
+              .slice(0, 120) || null;
+        } catch {
+          fileName = null;
+        }
+      }
+
+      const warnings = [...parsed.warnings, ...derivation.warnings];
+      await withTenant(request.tenantId, async (tx) => {
+        // Remplacement intégral : la cascade purge les factures dérivées.
+        await tx.fecImport.deleteMany({});
+        const imported = await tx.fecImport.create({
+          data: {
+            tenantId: request.tenantId,
+            fileHash,
+            fileName,
+            entryCount: parsed.entries.length,
+            customerCount: derivation.customers.length,
+            invoiceCount: derivation.invoices.length,
+            overdueCount: derivation.overdueCount,
+            overdueCents: derivation.overdueCents,
+            warnings,
+          },
+        });
+        if (derivation.invoices.length > 0) {
+          await tx.fecInvoice.createMany({
+            data: derivation.invoices.map((invoice) => ({
+              tenantId: request.tenantId,
+              importId: imported.id,
+              customerRef: invoice.customerRef,
+              customerName: invoice.customerName,
+              number: invoice.number,
+              issuedDate: new Date(`${invoice.issuedDate}T00:00:00Z`),
+              dueDate: new Date(`${invoice.dueDate}T00:00:00Z`),
+              amountCents: invoice.amountCents,
+              residualCents: invoice.residualCents,
+              settled: invoice.settled,
+            })),
+          });
+        }
+        // Le « connecteur fichier » : statut "file" (jamais "active" — rien
+        // n'est connecté), posé UNIQUEMENT ici. Aucun secret associé.
+        await tx.connector.upsert({
+          where: { tenantId_type: { tenantId: request.tenantId, type: FEC_CONNECTOR_TYPE } },
+          update: { status: FEC_CONNECTOR_STATUS },
+          create: {
+            tenantId: request.tenantId,
+            type: FEC_CONNECTOR_TYPE,
+            status: FEC_CONNECTOR_STATUS,
+            credentialsRef: connectorSecretName(request.tenantId, FEC_CONNECTOR_TYPE),
+          },
+        });
+      });
+
+      return reply.code(201).send({
+        alreadyImported: false,
+        entryCount: parsed.entries.length,
+        customerCount: derivation.customers.length,
+        invoiceCount: derivation.invoices.length,
+        overdueCount: derivation.overdueCount,
+        overdueCents: derivation.overdueCents,
+        warnings,
+      });
     },
   );
 

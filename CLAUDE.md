@@ -20,6 +20,10 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > de validation 1-clic, chat SSE, onboarding connecteurs (identifiants Zod + TESTÉS contre
 > le fournisseur puis coffre inscriptible `defaultWritableProvider` — Scaleway en prod,
 > `.dev-vault.json` en dev — jamais renvoyés) ; API via le proxy de `next.config.ts`.
+> **Import FEC (2.14)** : `packages/fec` (parseur A47 A-1 + dérivation 411/lettrage),
+> connecteur fichier (statut `file`, posé UNIQUEMENT par `POST /connectors/fec/import`,
+> owner, 50 Mo) — données CONFIDENTIELLES : jamais une ligne du journal dans les
+> logs/erreurs/réponses ; repli registre vers l'interface Pennylane (`docs/fec-import.md`).
 
 ---
 

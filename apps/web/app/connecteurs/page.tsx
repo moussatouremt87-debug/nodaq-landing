@@ -2,8 +2,17 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { ApiError, connectConnector, disconnectConnector, listConnectors } from "../../lib/api";
-import type { ConnectorSummary } from "../../lib/api";
+import {
+  ApiError,
+  FecInvalidError,
+  connectConnector,
+  disconnectConnector,
+  formatEuroCents,
+  getFecStatus,
+  importFec,
+  listConnectors,
+} from "../../lib/api";
+import type { ConnectorSummary, FecImportReport, FecStatus } from "../../lib/api";
 
 /*
  * Connector onboarding (ticket 1.8). The credentials travel ONE way: entered
@@ -132,6 +141,111 @@ function ConnectorCard({
   );
 }
 
+/*
+ * Import FEC (ticket 2.14) : le « connecteur fichier » universel — le FEC que
+ * tout logiciel comptable français sait exporter (art. A47 A-1 du LPF). Le
+ * fichier part en un clic, seuls des COMPTEURS reviennent (jamais une ligne
+ * du journal). Owner uniquement.
+ */
+function FecCard({ onChanged }: { onChanged: () => void }) {
+  const [status, setStatus] = useState<FecStatus | null>(null);
+  const [report, setReport] = useState<FecImportReport | null>(null);
+  const [issues, setIssues] = useState<{ line: number; message: string }[] | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(() => {
+    getFecStatus()
+      .then(setStatus)
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(refresh, [refresh]);
+
+  async function upload(file: File): Promise<void> {
+    setBusy(true);
+    setNotice(null);
+    setIssues(null);
+    setReport(null);
+    try {
+      const outcome = await importFec(await file.arrayBuffer(), file.name);
+      setReport(outcome);
+      setNotice(
+        outcome.alreadyImported
+          ? "Fichier déjà importé — données inchangées (idempotence par empreinte)."
+          : null,
+      );
+      refresh();
+      onChanged();
+    } catch (error) {
+      if (error instanceof FecInvalidError) {
+        setIssues(error.issues.slice(0, 5));
+        setNotice("FEC invalide — rien n'a été importé.");
+      } else if (error instanceof ApiError && error.status === 403) {
+        setNotice("Import réservé au rôle owner.");
+      } else if (error instanceof ApiError && error.status === 413) {
+        setNotice("Fichier trop volumineux (50 Mo maximum).");
+      } else {
+        setNotice("Échec de l'import.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ maxWidth: 430 }}>
+      <span className="overline">
+        Import FEC — {status?.imported ? "importé" : "aucun import"}
+      </span>
+      <p className="hint" style={{ margin: "4px 0 14px" }}>
+        Le fichier des écritures comptables que tout logiciel sait exporter : vos impayés réels
+        dans le cockpit, sans rien connecter.
+      </p>
+      {status?.lastImport && (
+        <p className="hint">
+          Dernier import le {new Date(status.lastImport.importedAt).toLocaleDateString("fr-FR")} —{" "}
+          {status.lastImport.entryCount} écritures, {status.lastImport.invoiceCount} factures,{" "}
+          {status.lastImport.overdueCount} impayé{status.lastImport.overdueCount > 1 ? "s" : ""}.
+          Ré-importer remplace ces données.
+        </p>
+      )}
+      <label style={{ marginTop: 12 }}>
+        <span className="overline">Fichier FEC (.txt — tabulation ou « | », 50 Mo max)</span>
+        <input
+          type="file"
+          accept=".txt,.csv,.fec,text/plain"
+          disabled={busy}
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (file) void upload(file);
+          }}
+        />
+      </label>
+      {busy && <p className="hint">Analyse en cours…</p>}
+      {report && !report.alreadyImported && (
+        <p className="hint">
+          ✅ {report.entryCount} écritures analysées — {report.customerCount} clients,{" "}
+          {report.invoiceCount} factures, dont {report.overdueCount} impayé
+          {report.overdueCount > 1 ? "s" : ""} ({formatEuroCents(report.overdueCents)}).
+          {report.warnings.length > 0 && ` ${report.warnings.length} avertissement(s).`}
+        </p>
+      )}
+      {issues && issues.length > 0 && (
+        <ul className="hint" style={{ paddingLeft: 18 }}>
+          {issues.map((issue, index) => (
+            <li key={index}>
+              ligne {issue.line} : {issue.message}
+            </li>
+          ))}
+        </ul>
+      )}
+      {notice && <p className="error-line">{notice}</p>}
+    </div>
+  );
+}
+
 export default function ConnecteursPage() {
   const [connectors, setConnectors] = useState<ConnectorSummary[]>([]);
 
@@ -159,6 +273,7 @@ export default function ConnecteursPage() {
             onChanged={refresh}
           />
         ))}
+        <FecCard onChanged={refresh} />
       </div>
     </>
   );

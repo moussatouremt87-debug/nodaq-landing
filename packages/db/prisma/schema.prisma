@@ -31,6 +31,8 @@ model Tenant {
   documentChunks  DocumentChunk[]
   pendingActions  PendingAction[]
   agentConversations AgentConversation[]
+  fecImports      FecImport[]
+  fecInvoices     FecInvoice[]
 
   @@map("tenants")
 }
@@ -334,4 +336,55 @@ model AgentConversation {
 
   @@index([tenantId])
   @@map("agent_conversations")
+}
+
+/// Ticket 2.14 — import FEC (données CONFIDENTIELLES : dérivées du journal
+/// comptable). Écriture uniquement via le script d'import, lecture via
+/// withTenant. One row per imported FEC file; `fileHash` (sha256) is the
+/// idempotency key per tenant — re-importing the same file is a no-op.
+/// Sealed by RLS (see the migration `rls_fec_import`).
+model FecImport {
+  id            String       @id @default(uuid()) @db.Uuid
+  tenantId      String       @map("tenant_id") @db.Uuid
+  /// sha256 of the raw FEC file — idempotency key (see @@unique below).
+  fileHash      String       @map("file_hash")
+  fileName      String?      @map("file_name")
+  entryCount    Int          @map("entry_count")
+  customerCount Int          @map("customer_count")
+  invoiceCount  Int          @map("invoice_count")
+  overdueCount  Int          @map("overdue_count")
+  overdueCents  Int          @map("overdue_cents")
+  warnings      Json         @default("[]")
+  importedAt    DateTime     @default(now()) @map("imported_at")
+  tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoices      FecInvoice[]
+
+  @@unique([tenantId, fileHash])
+  @@index([tenantId])
+  @@map("fec_imports")
+}
+
+/// Ticket 2.14 — import FEC (données CONFIDENTIELLES : dérivées du journal
+/// comptable). Écriture uniquement via le script d'import, lecture via
+/// withTenant. One row per customer invoice/receivable line extracted from a
+/// `FecImport`; replacing an import purges its invoices (onDelete: Cascade).
+/// Sealed by RLS (see the migration `rls_fec_import`).
+model FecInvoice {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  importId      String    @map("import_id") @db.Uuid
+  customerRef   String    @map("customer_ref")
+  customerName  String?   @map("customer_name")
+  number        String
+  issuedDate    DateTime  @map("issued_date") @db.Date
+  dueDate       DateTime  @map("due_date") @db.Date
+  amountCents   Int       @map("amount_cents")
+  residualCents Int       @map("residual_cents")
+  settled       Boolean
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  import        FecImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, settled])
+  @@map("fec_invoices")
 }
