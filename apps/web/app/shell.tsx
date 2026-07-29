@@ -42,11 +42,23 @@ const ICONS: Record<string, ReactNode> = {
       <path d="m4.6 7.6 2 2 3.8-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+  classeur: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path
+        d="M1.5 4.5A1.5 1.5 0 0 1 3 3h2.2l1-1.3h2.6l1 1.3H12a1.5 1.5 0 0 1 1.5 1.5v6A1.5 1.5 0 0 1 12 12H3a1.5 1.5 0 0 1-1.5-1.5v-6Z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <circle cx="7.5" cy="7.5" r="2.2" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  ),
 };
 
 const LINKS = [
   { href: "/", label: "Cockpit", icon: "cockpit" },
   { href: "/chat", label: "Employé Compta", icon: "employes" },
+  { href: "/classeur", label: "Classeur", icon: "classeur" },
   { href: "/connecteurs", label: "Connecteurs", icon: "connecteurs" },
   { href: "/validation", label: "File de validation", icon: "validation" },
 ];
@@ -54,6 +66,7 @@ const LINKS = [
 const TITLES: Record<string, string> = {
   "/": "Cockpit",
   "/chat": "Employé Compta",
+  "/classeur": "Classeur",
   "/connecteurs": "Connecteurs",
   "/validation": "File de validation",
 };

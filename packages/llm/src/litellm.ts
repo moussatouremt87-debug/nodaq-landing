@@ -21,9 +21,14 @@ function config(): { baseUrl: string; masterKey: string } {
   };
 }
 
+/** OpenAI-compatible multimodal content part (text or inline data-URI image). */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | ContentPart[];
 }
 
 /** OpenAI-compatible tool definition (function calling). */

@@ -31,6 +31,8 @@ let fecImportAId: string;
 let fecImportBId: string;
 let fecInvoiceAId: string;
 let fecInvoiceBId: string;
+let classeurDocumentAId: string;
+let classeurDocumentBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -43,6 +45,7 @@ beforeAll(async () => {
   // FK order: invoices before imports.
   await admin.fecInvoice.deleteMany();
   await admin.fecImport.deleteMany();
+  await admin.classeurDocument.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -273,6 +276,37 @@ beforeAll(async () => {
   );
   fecInvoiceAId = fecInvoiceA.id;
   fecInvoiceBId = fecInvoiceB.id;
+
+  // photo est un placeholder de test (quelques octets), jamais un vrai
+  // justificatif client — donnée CONFIDENTIELLE, jamais loggée.
+  const classeurDocumentA = await withTenant(tenantA, (tx) =>
+    tx.classeurDocument.create({
+      data: {
+        tenantId: tenantA,
+        fileName: "recu-a.jpg",
+        mimeType: "image/jpeg",
+        byteSize: 4,
+        sha256: "hash-classeur-a",
+        photo: Buffer.from("secret de A"),
+        docType: "recu",
+      },
+    }),
+  );
+  const classeurDocumentB = await withTenant(tenantB, (tx) =>
+    tx.classeurDocument.create({
+      data: {
+        tenantId: tenantB,
+        fileName: "recu-b.jpg",
+        mimeType: "image/jpeg",
+        byteSize: 4,
+        sha256: "hash-classeur-b",
+        photo: Buffer.from("secret de B"),
+        docType: "facture_fournisseur",
+      },
+    }),
+  );
+  classeurDocumentAId = classeurDocumentA.id;
+  classeurDocumentBId = classeurDocumentB.id;
 });
 
 afterAll(async () => {
@@ -364,6 +398,14 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur fec_invoices", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'fec_invoices'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur classeur_documents", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'classeur_documents'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -695,6 +737,42 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (classeur_documents) — withTenant(A) ne voit QUE les documents de A", async () => {
+    const documents = await withTenant(tenantA, (tx) => tx.classeurDocument.findMany());
+    expect(documents).toHaveLength(1);
+    expect(documents[0]?.id).toBe(classeurDocumentAId);
+    expect(documents.some((d) => d.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (classeur_documents) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const documents = await prisma.classeurDocument.findMany();
+    expect(documents).toHaveLength(0);
+  });
+
+  it("test 3 (classeur_documents) — lire le document de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.classeurDocument.findUnique({ where: { id: classeurDocumentBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (classeur_documents) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.classeurDocument.create({
+          data: {
+            tenantId: tenantB,
+            fileName: "intrusion.jpg",
+            mimeType: "image/jpeg",
+            byteSize: 4,
+            sha256: "hash-intrusion",
+            photo: Buffer.from("intrusion"),
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -894,5 +972,25 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const invoices = await withTenant(tenantA, (tx) => tx.fecInvoice.findMany());
     expect(invoices).toHaveLength(1);
+  });
+
+  it("policy désactivée sur classeur_documents => la fuite se produit aussi (les photos de justificatifs des deux tenants deviennent visibles)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "classeur_documents" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.classeurDocument.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((d) => d.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.classeurDocument.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "classeur_documents" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "classeur_documents" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const documents = await withTenant(tenantA, (tx) => tx.classeurDocument.findMany());
+    expect(documents).toHaveLength(1);
   });
 });

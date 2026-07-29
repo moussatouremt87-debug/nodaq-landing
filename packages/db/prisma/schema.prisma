@@ -33,6 +33,7 @@ model Tenant {
   agentConversations AgentConversation[]
   fecImports      FecImport[]
   fecInvoices     FecInvoice[]
+  classeurDocuments ClasseurDocument[]
 
   @@map("tenants")
 }
@@ -387,4 +388,44 @@ model FecInvoice {
   @@index([tenantId])
   @@index([tenantId, settled])
   @@map("fec_invoices")
+}
+
+/// Ticket 2.16 — classeur documentaire photo (justificatifs pris en photo par
+/// l'utilisateur : factures fournisseurs, reçus, notes de frais). Données
+/// CONFIDENTIELLES : `photo` est le document lui-même, jamais loggé.
+/// `originalExtraction` est la sortie modèle FIGÉE (jamais réécrite après coup,
+/// sert de matériau d'apprentissage) ; `extraction` porte les champs courants,
+/// éventuellement corrigés par un humain — chaque correction s'ajoute à
+/// `corrections` (append-only). `sha256` est l'empreinte du fichier — idempotence
+/// par tenant (voir @@unique ci-dessous). Sealed by RLS (see the migration
+/// `rls_classeur_documents`).
+model ClasseurDocument {
+  id                    String    @id @default(uuid()) @db.Uuid
+  tenantId              String    @map("tenant_id") @db.Uuid
+  fileName              String    @map("file_name")
+  mimeType              String    @map("mime_type")
+  byteSize              Int       @map("byte_size")
+  /// sha256 of the raw file — idempotency key (see @@unique below).
+  sha256                String
+  /// The document itself (photo) — CONFIDENTIAL, never logged.
+  photo                 Bytes
+  /// 'facture_fournisseur' | 'recu' | 'note_de_frais' | 'autre' — validated app-side by Zod.
+  docType               String    @default("autre") @map("doc_type")
+  /// 'a_verifier' | 'verifie' | 'rapproche' — validated app-side by Zod.
+  status                String    @default("a_verifier")
+  /// Current extracted fields (possibly human-corrected).
+  extraction            Json?
+  /// FROZEN model output — never rewritten afterwards (learning material).
+  originalExtraction    Json?     @map("original_extraction")
+  /// Append-only list of human corrections: [{by, at, fields}].
+  corrections           Json      @default("[]")
+  matchedTransactionId  String?   @map("matched_transaction_id")
+  matchedAt             DateTime? @map("matched_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  tenant                Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, sha256])
+  @@index([tenantId, status])
+  @@map("classeur_documents")
 }

@@ -1,16 +1,19 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
 import { prisma, withTenant } from "@nodaq/db";
+import type { Prisma } from "@nodaq/db";
 import { deriveReceivables, parseFec } from "@nodaq/fec";
 import {
   connectorSecretName,
+  ConnectorNotConfiguredError,
   ConnectorType,
   FEC_CONNECTOR_STATUS,
   FEC_CONNECTOR_TYPE,
+  getQontoClient,
   PennylaneClient,
   QontoClient,
 } from "@nodaq/mcp-connectors";
@@ -18,6 +21,8 @@ import { defaultWritableProvider } from "@nodaq/secrets";
 import type { WritableSecretProvider } from "@nodaq/secrets";
 import { CreateNoteInput, TenantId, Uuid } from "@nodaq/shared";
 import { auth } from "./auth.js";
+import { DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.js";
+import type { DocExtraction } from "./classeur.js";
 import { defaultExecutors } from "./executors.js";
 import type { ExecutorRegistry } from "./executors.js";
 
@@ -738,6 +743,365 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         return count;
       });
       if (removed === 0) return reply.code(404).send({ error: "no fec import" });
+      return reply.code(204).send();
+    },
+  );
+
+  /*
+   * Classeur documentaire photo (ticket 2.16). La photo (confidentielle) vit
+   * en base sous RLS ; l'extraction passe par route() (tier souverain vision,
+   * catégorie confidentiel par construction) ; le rapprochement score les
+   * transactions bancaires. Capture/correction : tout membre (l'employé de
+   * terrain photographie). Rapprochement (données bancaires) et effacement :
+   * owner uniquement — même raisonnement tiers-délégué que la trésorerie.
+   */
+
+  const DOC_SELECT = {
+    id: true,
+    fileName: true,
+    mimeType: true,
+    byteSize: true,
+    docType: true,
+    status: true,
+    extraction: true,
+    originalExtraction: true,
+    corrections: true,
+    matchedTransactionId: true,
+    matchedAt: true,
+    createdAt: true,
+    updatedAt: true,
+  } as const; // jamais `photo` dans une liste — servie par la route dédiée
+
+  /** Formats photo acceptés, détectés sur les OCTETS (jamais l'extension). */
+  function sniffImageMime(buffer: Buffer): "image/jpeg" | "image/png" | "image/webp" | null {
+    if (buffer.length > 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+      return "image/jpeg";
+    }
+    const pngMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    if (buffer.length > 8 && buffer.subarray(0, 8).equals(pngMagic)) return "image/png";
+    if (
+      buffer.length > 12 &&
+      buffer.subarray(0, 4).toString("latin1") === "RIFF" &&
+      buffer.subarray(8, 12).toString("latin1") === "WEBP"
+    ) {
+      return "image/webp";
+    }
+    return null;
+  }
+
+  app.get("/classeur/documents", { preHandler: businessRoute }, async (request) => {
+    const documents = await withTenant(request.tenantId, (tx) =>
+      tx.classeurDocument.findMany({
+        orderBy: { createdAt: "desc" },
+        take: 200,
+        select: DOC_SELECT,
+      }),
+    );
+    return { documents };
+  });
+
+  // Le parser binaire est CANTONNÉ à cette route (plugin encapsulé).
+  void app.register(async (classeur) => {
+    classeur.addContentTypeParser(
+      "application/octet-stream",
+      { parseAs: "buffer" },
+      (_request, body, done) => done(null, body),
+    );
+
+    classeur.post(
+      "/classeur/documents",
+      // onRequest (pas preHandler) : l'auth est vérifiée AVANT que Fastify ne
+      // bufferise le corps — un anonyme ne coûte jamais 8 Mo d'allocation.
+      { onRequest: businessRoute, bodyLimit: 8 * 1024 * 1024 },
+      async (request, reply) => {
+        const body = request.body;
+        if (!Buffer.isBuffer(body) || body.length === 0) {
+          return reply.code(400).send({ error: "photo attendue (corps application/octet-stream)" });
+        }
+        // Quota par tenant : borne le stockage (≤ ~4 Go) ET les appels vision
+        // facturés — un membre ne peut pas boucler indéfiniment.
+        const documentCount = await withTenant(request.tenantId, (tx) =>
+          tx.classeurDocument.count(),
+        );
+        if (documentCount >= 500) {
+          return reply
+            .code(409)
+            .send({ error: "quota du classeur atteint (500 documents) — supprimez d'abord" });
+        }
+        const mimeType = sniffImageMime(body);
+        if (!mimeType) {
+          return reply.code(415).send({ error: "format non pris en charge (JPEG, PNG ou WebP)" });
+        }
+        const sha256 = createHash("sha256").update(body).digest("hex");
+
+        // Métadonnée d'affichage : nom de fichier assaini, optionnel.
+        let fileName: string | null = null;
+        const rawName = request.headers["x-doc-filename"];
+        if (typeof rawName === "string") {
+          try {
+            fileName =
+              decodeURIComponent(rawName)
+                .replace(/[^\p{L}\p{N} ._()-]/gu, "")
+                .slice(0, 120) || null;
+          } catch {
+            fileName = null;
+          }
+        }
+
+        // Dédup AVANT l'appel modèle : re-photographier le même fichier ne
+        // coûte ni extraction ni stockage.
+        const existing = await withTenant(request.tenantId, (tx) =>
+          tx.classeurDocument.findUnique({
+            where: { tenantId_sha256: { tenantId: request.tenantId, sha256 } },
+            select: DOC_SELECT,
+          }),
+        );
+        if (existing) return reply.send({ alreadyImported: true, document: existing });
+
+        // Extraction via le tier souverain vision — AVANT la transaction (pas
+        // d'IO DB pendant l'appel réseau). Un échec modèle n'empêche pas le
+        // classement : le document est stocké, les champs restent à saisir.
+        let extraction: DocExtraction | null = null;
+        try {
+          extraction = await extractDocumentFields(request.tenantId, `classeur-${randomUUID()}`, {
+            mimeType,
+            base64: body.toString("base64"),
+          });
+        } catch (error) {
+          // Nom d'erreur uniquement — jamais le contenu du document.
+          request.log.warn(
+            { err: error instanceof Error ? error.name : "Error" },
+            "classeur extraction failed",
+          );
+        }
+
+        try {
+          const document = await withTenant(request.tenantId, (tx) =>
+            tx.classeurDocument.create({
+              data: {
+                tenantId: request.tenantId,
+                fileName: fileName ?? "",
+                mimeType,
+                byteSize: body.length,
+                sha256,
+                photo: new Uint8Array(body),
+                ...(extraction
+                  ? {
+                      docType: extraction.docType,
+                      extraction,
+                      originalExtraction: extraction,
+                    }
+                  : {}),
+              },
+              select: DOC_SELECT,
+            }),
+          );
+          return reply.code(201).send({ alreadyImported: false, document });
+        } catch (error) {
+          request.log.error(
+            { err: error instanceof Error ? error.name : "Error" },
+            "classeur upload failed",
+          );
+          return reply.code(500).send({ error: "upload failed" });
+        }
+      },
+    );
+  });
+
+  app.get(
+    "/classeur/documents/:id/photo",
+    { preHandler: businessRoute },
+    async (request, reply) => {
+      const { id } = z.object({ id: Uuid }).parse(request.params);
+      const document = await withTenant(request.tenantId, (tx) =>
+        tx.classeurDocument.findUnique({
+          where: { id },
+          select: { photo: true, mimeType: true },
+        }),
+      );
+      if (!document) return reply.code(404).send({ error: "not found" });
+      return reply
+        .header("content-type", document.mimeType)
+        .header("cache-control", "private, no-store")
+        .header("x-content-type-options", "nosniff")
+        .header("content-disposition", "inline")
+        .send(Buffer.from(document.photo));
+    },
+  );
+
+  // Correction des champs extraits (apprentissage V1) : l'extraction d'origine
+  // est FIGÉE, chaque correction est journalisée en append-only — c'est le
+  // futur jeu d'apprentissage. Statut => "verifie".
+  const CorrectionBody = z
+    .object({
+      docType: z.enum(DOC_TYPES).optional(),
+      supplierName: z.string().max(300).nullable().optional(),
+      pieceNumber: z.string().max(120).nullable().optional(),
+      docDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .nullable()
+        .optional(),
+      currency: z.string().max(10).nullable().optional(),
+      totalExclTax: z.number().finite().nullable().optional(),
+      totalTax: z.number().finite().nullable().optional(),
+      totalInclTax: z.number().finite().nullable().optional(),
+    })
+    .strict();
+
+  app.patch("/classeur/documents/:id", { preHandler: businessRoute }, async (request, reply) => {
+    const { id } = z.object({ id: Uuid }).parse(request.params);
+    const parsed = CorrectionBody.safeParse(request.body);
+    if (!parsed.success || Object.keys(parsed.data).length === 0) {
+      return reply.code(400).send({ error: "invalid correction" });
+    }
+    const fields = parsed.data;
+
+    let updated: unknown;
+    try {
+      updated = await withTenant(request.tenantId, async (tx) => {
+        const document = await tx.classeurDocument.findUnique({
+          where: { id },
+          select: { extraction: true, corrections: true, docType: true, status: true },
+        });
+        if (!document) return null;
+        // Append-only FAIL-CLOSED : un historique corrompu (pas un tableau)
+        // ne doit JAMAIS être remplacé silencieusement — on refuse d'écrire.
+        if (!Array.isArray(document.corrections)) {
+          throw new Error("corrections history is not an array");
+        }
+        if (document.corrections.length >= 200) return "cap" as const;
+        const extraction = {
+          ...(typeof document.extraction === "object" && document.extraction !== null
+            ? document.extraction
+            : {}),
+          ...fields,
+        };
+        const corrections = [
+          ...document.corrections,
+          { by: request.authSession.user.id, at: new Date().toISOString(), fields },
+        ] as Prisma.InputJsonValue;
+        return tx.classeurDocument.update({
+          where: { id },
+          data: {
+            extraction,
+            corrections,
+            docType: fields.docType ?? document.docType,
+            // Un document rapproché RESTE rapproché : corriger un champ ne
+            // défait pas silencieusement le rapprochement fait par l'owner.
+            status: document.status === "rapproche" ? "rapproche" : "verifie",
+          },
+          select: DOC_SELECT,
+        });
+      });
+    } catch (error) {
+      // Une erreur Prisma peut citer ses arguments (champs du justificatif) :
+      // nom d'erreur uniquement, jamais l'objet complet.
+      request.log.error(
+        { err: error instanceof Error ? error.name : "Error" },
+        "classeur correction failed",
+      );
+      return reply.code(500).send({ error: "correction failed" });
+    }
+    if (updated === null) return reply.code(404).send({ error: "not found" });
+    if (updated === "cap") {
+      return reply.code(409).send({ error: "trop de corrections sur ce document" });
+    }
+    return { document: updated };
+  });
+
+  // Rapprochement bancaire — owner only (labels/montants de transactions).
+  app.get(
+    "/classeur/documents/:id/candidates",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const { id } = z.object({ id: Uuid }).parse(request.params);
+      const document = await withTenant(request.tenantId, (tx) =>
+        tx.classeurDocument.findUnique({ where: { id }, select: { extraction: true } }),
+      );
+      if (!document) return reply.code(404).send({ error: "not found" });
+      const extraction = z
+        .object({ totalInclTax: z.number().nullable().catch(null), docDate: z.string().nullable().catch(null) })
+        .catch({ totalInclTax: null, docDate: null })
+        .parse(document.extraction ?? {});
+
+      let bank: QontoClient;
+      try {
+        bank = await getQontoClient(request.tenantId);
+      } catch (error) {
+        if (error instanceof ConnectorNotConfiguredError) {
+          return { candidates: [], reason: "no-bank" };
+        }
+        throw error;
+      }
+      const { transactions } = await bank.listTransactions({ perPage: 100 });
+      return {
+        candidates: matchTransactions(
+          extraction,
+          transactions.map((tx) => ({
+            transaction_id: tx.transaction_id ?? null,
+            id: tx.id ?? null,
+            amount_cents: tx.amount_cents ?? null,
+            side: tx.side ?? null,
+            settled_at: tx.settled_at ?? null,
+            label: tx.label ?? null,
+          })),
+        ),
+      };
+    },
+  );
+
+  const MatchBody = z
+    .object({ transactionId: z.string().min(1).max(200).nullable() })
+    .strict();
+
+  app.post(
+    "/classeur/documents/:id/match",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const { id } = z.object({ id: Uuid }).parse(request.params);
+      const parsed = MatchBody.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: "invalid match" });
+      const { transactionId } = parsed.data;
+
+      let updated: unknown;
+      try {
+        updated = await withTenant(request.tenantId, async (tx) => {
+          const exists = await tx.classeurDocument.findUnique({
+            where: { id },
+            select: { id: true },
+          });
+          if (!exists) return null;
+          return tx.classeurDocument.update({
+            where: { id },
+            data: transactionId
+              ? { matchedTransactionId: transactionId, matchedAt: new Date(), status: "rapproche" }
+              : { matchedTransactionId: null, matchedAt: null, status: "verifie" },
+            select: DOC_SELECT,
+          });
+        });
+      } catch (error) {
+        request.log.error(
+          { err: error instanceof Error ? error.name : "Error" },
+          "classeur match failed",
+        );
+        return reply.code(500).send({ error: "match failed" });
+      }
+      if (!updated) return reply.code(404).send({ error: "not found" });
+      return { document: updated };
+    },
+  );
+
+  // Droit à l'effacement (art. 17) — owner only, photo comprise.
+  app.delete(
+    "/classeur/documents/:id",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const { id } = z.object({ id: Uuid }).parse(request.params);
+      const { count } = await withTenant(request.tenantId, (tx) =>
+        tx.classeurDocument.deleteMany({ where: { id, tenantId: request.tenantId } }),
+      );
+      if (count === 0) return reply.code(404).send({ error: "not found" });
       return reply.code(204).send();
     },
   );

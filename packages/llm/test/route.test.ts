@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
-import { SovereigntyViolationError, embed, route } from "../src/index.js";
+import { SovereigntyViolationError, embed, route, routeChat } from "../src/index.js";
 
 /**
  * Routing tests — real Postgres (RLS) + FAKE OpenAI-compatible server standing
@@ -16,7 +16,7 @@ interface RecordedRequest {
   path: string;
   authorization: string | undefined;
   model: string;
-  messages?: { role: string; content: string }[];
+  messages?: { role: string; content: unknown }[];
 }
 
 const recorded: RecordedRequest[] = [];
@@ -249,6 +249,120 @@ describe("route — sovereign LLM fallback wiring", () => {
       process.env.NODE_ENV = oldEnv;
       process.env.LITELLM_BASE_URL = oldUrl;
     }
+  });
+});
+
+describe("route — images (documents photographiés, ticket 2.16)", () => {
+  const JPEG_B64 = Buffer.from("fake-jpeg-bytes").toString("base64");
+
+  it("une image durcit la catégorie à confidentiel : jamais frontier, même opt-in + preferFrontier", async () => {
+    const r = await route(
+      {
+        text: "Extrais les champs de ce document",
+        tenantId: tenantOn, // frontier activé pour ce tenant !
+        requestId: "req-image-hardening",
+        images: [{ mimeType: "image/jpeg", base64: JPEG_B64 }],
+      },
+      { preferFrontier: true },
+    );
+    expect(r.category).toBe("confidentiel");
+    expect(r.group).toBe("sovereign-fast");
+    expect(recorded.every((req) => req.model !== "frontier")).toBe(true);
+  });
+
+  it("l'image part en content-parts OpenAI (data URI) vers le tier souverain", async () => {
+    await route({
+      text: "Extrais les champs de ce document",
+      tenantId: tenantOff,
+      requestId: "req-image-parts",
+      images: [{ mimeType: "image/jpeg", base64: JPEG_B64 }],
+    });
+    const call = recorded.find((req) => req.path === "/v1/chat/completions");
+    expect(call?.model).toBe("sovereign-fast");
+    const content = call?.messages?.[0]?.content as {
+      type: string;
+      text?: string;
+      image_url?: { url: string };
+    }[];
+    expect(Array.isArray(content)).toBe(true);
+    expect(content[0]).toMatchObject({ type: "text", text: "Extrais les champs de ce document" });
+    expect(content[1]).toMatchObject({
+      type: "image_url",
+      image_url: { url: `data:image/jpeg;base64,${JPEG_B64}` },
+    });
+  });
+
+  it("l'audit hashe texte ET image (jamais le contenu), l'empreinte diffère du texte seul", async () => {
+    const audits = await withTenant(tenantOff, (tx) =>
+      tx.classification.findMany({ where: { requestId: "req-image-parts" } }),
+    );
+    expect(audits).toHaveLength(1);
+    expect(audits[0]?.outcome).toBe("allowed");
+    const textOnlyHash = createHash("sha256")
+      .update("Extrais les champs de ce document", "utf8")
+      .digest("hex");
+    expect(audits[0]?.contentHash).not.toBe(textOnlyHash);
+    expect(JSON.stringify(audits[0])).not.toContain(JPEG_B64);
+  });
+
+  it("routeChat : une conversation multimodale est durcie à confidentiel (jamais frontier)", async () => {
+    // Symétrique du durcissement de route() : le type ChatMessage accepte des
+    // content-parts, donc routeChat doit appliquer LE MÊME invariant.
+    const { category, group } = await routeChat(
+      {
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Que contient ce document ?" },
+              { type: "image_url", image_url: { url: `data:image/jpeg;base64,${JPEG_B64}` } },
+            ],
+          },
+        ],
+        tenantId: tenantOn, // frontier activé pour ce tenant !
+        requestId: "req-chat-image",
+      },
+      { preferFrontier: true },
+    );
+    expect(category).toBe("confidentiel");
+    expect(group).toBe("sovereign-fast");
+    expect(recorded.every((req) => req.model !== "frontier")).toBe(true);
+
+    // Le hash d'audit couvre les parts (dont l'image) — pas « conversation vide ».
+    const audits = await withTenant(tenantOn, (tx) =>
+      tx.classification.findMany({ where: { requestId: "req-chat-image" } }),
+    );
+    expect(audits).toHaveLength(1);
+    const emptyHash = createHash("sha256").update("(conversation vide)", "utf8").digest("hex");
+    expect(audits[0]?.contentHash).not.toBe(emptyHash);
+  });
+
+  it("le plafond agrégé d'images est appliqué (rejet Zod, zéro réseau)", async () => {
+    const big = "a".repeat(8_000_000);
+    await expect(
+      route({
+        text: "doc",
+        tenantId: tenantOff,
+        requestId: "req-image-aggregate",
+        images: [
+          { mimeType: "image/jpeg", base64: big },
+          { mimeType: "image/jpeg", base64: big },
+        ],
+      }),
+    ).rejects.toThrow();
+    expect(recorded).toHaveLength(0);
+  });
+
+  it("type MIME hors liste (jamais de SVG/GIF) => rejet Zod, zéro appel réseau", async () => {
+    await expect(
+      route({
+        text: "doc",
+        tenantId: tenantOff,
+        requestId: "req-image-mime",
+        images: [{ mimeType: "image/gif" as never, base64: JPEG_B64 }],
+      }),
+    ).rejects.toThrow();
+    expect(recorded).toHaveLength(0);
   });
 });
 

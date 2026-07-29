@@ -10,7 +10,14 @@ import type { NextConfig } from "next";
  */
 const API_URL = process.env.API_URL ?? "http://localhost:8080";
 
-const BUSINESS_PREFIXES = ["me", "cockpit", "pending-actions", "employees", "connectors"];
+const BUSINESS_PREFIXES = [
+  "me",
+  "cockpit",
+  "pending-actions",
+  "employees",
+  "connectors",
+  "classeur",
+];
 
 const nextConfig: NextConfig = {
   // Slim container image for Scaleway Serverless Containers (ticket 0.4).
