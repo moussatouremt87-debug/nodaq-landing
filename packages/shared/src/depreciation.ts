@@ -62,6 +62,17 @@ export function buildDepreciationPlan(input: DepreciationInput): DepreciationPla
     : linearPlan(input.baseCents, start, input.durationMonths, disposal);
 }
 
+/**
+ * Hard bound on plan length: max legal-ish duration is 50 years (600 months)
+ * plus a partial first year — anything beyond means a degenerate input, and
+ * the remainder is dumped on the last line so the plan still sums to base.
+ * TERMINATION GUARD (audit 2.19): with a micro base and a long duration the
+ * rounded annuity is 0 and a naive loop never advances — the API event loop
+ * would freeze for ALL tenants. Every non-disposal iteration progresses by
+ * at least 1 cent.
+ */
+const MAX_PLAN_LINES = 60;
+
 function linearPlan(
   baseCents: number,
   start: Date,
@@ -83,6 +94,11 @@ function linearPlan(
       const upTo = (days360FromYearStart(disposal) + 1) / 360;
       const fromStart = year === start.getUTCFullYear() ? days360FromYearStart(start) / 360 : 0;
       dotation = Math.round(fullAnnuity * Math.max(0, upTo - fromStart));
+    } else if (dotation <= 0) {
+      dotation = 1; // progression plancher : jamais de boucle sans avancer
+    }
+    if (lines.length >= MAX_PLAN_LINES - 1 && !disposal) {
+      dotation = baseCents - cumulative; // borne dure : solde sur la dernière ligne
     }
     dotation = Math.min(dotation, baseCents - cumulative);
     cumulative += dotation;
@@ -109,7 +125,7 @@ function decliningPlan(
   let monthsThisYear = 12 - start.getUTCMonth();
   let remainingYears = durationYears;
   let frozenLinearAnnuity: number | null = null;
-  while (cumulative < baseCents && remainingYears > 1e-9) {
+  while (cumulative < baseCents && remainingYears > 1e-9 && lines.length < MAX_PLAN_LINES) {
     if (disposal && year > disposal.getUTCFullYear()) break;
     const bookValue = baseCents - cumulative;
     let dotation: number;
@@ -129,6 +145,11 @@ function decliningPlan(
     if (disposal && year === disposal.getUTCFullYear()) {
       const months = disposal.getUTCMonth() + 1 - (year === start.getUTCFullYear() ? start.getUTCMonth() : 0);
       dotation = Math.round((dotation * Math.max(0, months)) / monthsThisYear);
+    } else if (dotation <= 0) {
+      dotation = 1; // même garde de progression que le linéaire
+    }
+    if (remainingYears - monthsThisYear / 12 <= 1e-9) {
+      dotation = baseCents - cumulative; // dernier exercice du plan : solde exact
     }
     dotation = Math.min(dotation, baseCents - cumulative);
     cumulative += dotation;

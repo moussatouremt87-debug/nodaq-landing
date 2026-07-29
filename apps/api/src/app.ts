@@ -29,7 +29,6 @@ import {
   renewalWall,
   TenantId,
   Uuid,
-  wearRatioAtYearEnd,
 } from "@nodaq/shared";
 import type { RegistryAsset } from "@nodaq/shared";
 import { auth } from "./auth.js";
@@ -789,11 +788,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         // PROPOSITIONS en file de validation — jamais une insertion
         // silencieuse ; incohérences signalées dans le payload.
         let assetProposals = 0;
-        const proposals = deriveFixedAssets(parsed.entries).slice(0, 200);
-        if (proposals.length > 0) {
-          assetProposals = await withTenant(request.tenantId, async (tx) => {
-            let count = 0;
-            for (const proposal of proposals) {
+        const allProposals = deriveFixedAssets(parsed.entries);
+        const proposals = allProposals.slice(0, 200);
+        if (allProposals.length > 200) {
+          warnings.push("propositions d'immobilisations tronquées à 200");
+        }
+        try {
+          if (proposals.length > 0) {
+            assetProposals = await withTenant(request.tenantId, async (tx) => {
+              let count = 0;
+              for (const proposal of proposals) {
               const sourceRef = `fec:${proposal.accountNum}`;
               const existingAsset = await tx.fixedAsset.findFirst({
                 where: { source: "FEC", sourceRef },
@@ -832,10 +836,21 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
               count += 1;
             }
             return count;
-          });
-          if (assetProposals > 0) {
-            void notifyPendingAction(request.tenantId).catch(() => undefined);
+          }, { timeoutMs: 30_000 });
+            if (assetProposals > 0) {
+              void notifyPendingAction(request.tenantId).catch(() => undefined);
+            }
           }
+        } catch (error) {
+          // Même règle que l'import : une erreur Prisma peut citer ses
+          // arguments (libellés/montants dérivés du FEC) — nom SEULEMENT,
+          // et l'import lui-même reste acquis (les propositions attendront
+          // un prochain import après purge).
+          request.log.warn(
+            { err: error instanceof Error ? error.name : "Error" },
+            "fixed asset proposals failed",
+          );
+          warnings.push("propositions d'immobilisations indisponibles (réessayez après purge FEC)");
         }
         return reply.code(201).send({
           alreadyImported: false,
@@ -1021,12 +1036,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           // Immobilisations (2.19) : facture d'équipement au-dessus du seuil
           // -> SUGGESTION « immobiliser ? » en file de validation. JAMAIS
           // automatique : la frontière charge/immo est une décision de gestion.
+          // Seuil ET base amortissable en HT UNIQUEMENT (audit 2.19) : un
+          // TTC amorti gonflerait la base de la TVA — pas de repli TTC.
           const htCents =
             extraction && extraction.totalExclTax !== null
               ? Math.round(extraction.totalExclTax * 100)
-              : extraction && extraction.totalInclTax !== null
-                ? Math.round(extraction.totalInclTax * 100)
-                : null;
+              : null;
           if (
             extraction &&
             extraction.docType === "facture_fournisseur" &&
@@ -1057,7 +1072,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
                   },
                 },
               }),
-            ).catch(() => undefined);
+            ).catch((error: unknown) =>
+              request.log.warn(
+                { err: error instanceof Error ? error.name : "Error" },
+                "classeur asset suggestion failed",
+              ),
+            );
           }
           // Doorbell 2.17 : le document traité notifie SON auteur (compteur
           // seul — jamais le contenu), regroupé avec les autres actions.
@@ -2067,16 +2087,25 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   app.get("/immobilisations", { preHandler: ownerRoute }, async (request) => {
     const rows = await withTenant(request.tenantId, (tx) =>
-      tx.fixedAsset.findMany({ orderBy: [{ status: "asc" }, { inServiceDate: "asc" }] }),
+      tx.fixedAsset.findMany({
+        orderBy: [{ status: "asc" }, { inServiceDate: "asc" }],
+        take: 500,
+      }),
     );
     const now = new Date();
     const year = now.getUTCFullYear();
     const assets = rows.map((row) => {
       const model = registryAsset(row);
       const plan = buildDepreciationPlan(model);
-      const bookValue =
-        model.baseCents -
-        (plan.lines.filter((l) => l.year <= year).at(-1)?.cumulativeCents ?? 0);
+      // Reprise FEC 28x consommée (audit 2.19) : le cumul affiché est AU
+      // MOINS celui des livres — la VNC recalculée ne contredit jamais un
+      // amortissement déjà constaté par le comptable.
+      const recomputed = plan.lines.filter((l) => l.year <= year).at(-1)?.cumulativeCents ?? 0;
+      const cumulative = Math.min(
+        model.baseCents,
+        Math.max(recomputed, Number(row.priorDepreciationCents)),
+      );
+      const bookValue = model.baseCents - cumulative;
       return {
         id: row.id,
         label: row.label,
@@ -2089,7 +2118,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         status: row.status,
         renewalCostCents: row.renewalCostCents === null ? null : Number(row.renewalCostCents),
         bookValueCents: bookValue,
-        wearRatio: wearRatioAtYearEnd(model, year),
+        wearRatio: model.baseCents > 0 ? cumulative / model.baseCents : 0,
         planEndYear: plan.lines.at(-1)?.year ?? null,
       };
     });
@@ -2123,7 +2152,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       durationMonths: z.number().int().min(1).max(600),
       method: z.enum(["LINEAIRE", "DEGRESSIF"]).default("LINEAIRE"),
     })
-    .strict();
+    .strict()
+    // CGI 39 A : dégressif réservé aux catégories éligibles (config sourcée).
+    .refine(
+      (data) => data.method !== "DEGRESSIF" || ASSET_CATEGORIES[data.category].decliningAllowed,
+      { message: "dégressif non admis pour cette catégorie" },
+    );
 
   // Saisie MANUELLE : c'est déjà la décision humaine — création directe owner.
   app.post("/immobilisations", { preHandler: ownerRoute }, async (request, reply) => {
@@ -2154,7 +2188,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       disposedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
     })
     .strict()
-    .refine((b) => Object.keys(b).length > 0, { message: "empty patch" });
+    .refine((b) => Object.keys(b).length > 0, { message: "empty patch" })
+    // Une cession/sortie sans date fausserait le plan : date obligatoire.
+    .refine(
+      (b) => !(b.status === "CEDE" || b.status === "SORTI") || typeof b.disposedAt === "string",
+      { message: "disposedAt required when disposing" },
+    );
 
   app.patch("/immobilisations/:id", { preHandler: ownerRoute }, async (request, reply) => {
     const params = z.object({ id: Uuid }).safeParse(request.params);

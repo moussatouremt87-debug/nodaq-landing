@@ -106,3 +106,24 @@ describe("VNC et usure", () => {
     expect(wearRatioAtYearEnd(input, 2027)).toBeCloseTo(0.75, 2);
   });
 });
+
+describe("terminaison (audit 2.19)", () => {
+  it("micro-montant + durée longue : le plan TERMINE, borné, et somme exactement", () => {
+    const plan = buildDepreciationPlan({
+      baseCents: 20,
+      inServiceDate: "2024-01-01",
+      durationMonths: 600,
+      method: "LINEAIRE",
+    });
+    expect(plan.totalCents).toBe(20);
+    expect(plan.lines.length).toBeLessThanOrEqual(60);
+    const declining = buildDepreciationPlan({
+      baseCents: 7,
+      inServiceDate: "2024-01-01",
+      durationMonths: 180,
+      method: "DEGRESSIF",
+    });
+    expect(declining.totalCents).toBe(7);
+    expect(declining.lines.length).toBeLessThanOrEqual(60);
+  });
+});

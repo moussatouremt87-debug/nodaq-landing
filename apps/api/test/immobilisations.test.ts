@@ -3,6 +3,8 @@ import type { FastifyInstance } from "fastify";
 import type { PrismaClient } from "@prisma/client";
 import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { buildApp } from "../src/app.js";
 
 /*
@@ -130,17 +132,27 @@ describe("registre owner-only + saisie manuelle", () => {
     );
   });
 
-  it("GARDE dotation ≠ décaissement : la projection de trésorerie du cockpit est INCHANGÉE par le registre", async () => {
+  it("GARDE dotation ≠ décaissement : le forecast de trésorerie n'a AUCUNE dépendance au registre", async () => {
+    // Barrière anti-régression STRUCTURELLE : la projection de trésorerie
+    // (mcp-servers/actions) ne lit que la banque — si demain quelqu'un y
+    // branche fixed_assets ou le moteur d'amortissement, ce test rougit.
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    for (const file of [
+      "mcp-servers/actions/src/treasury.ts",
+      "mcp-servers/actions/src/server.ts",
+    ]) {
+      const source = readFileSync(`${root}${file}`, "utf8");
+      expect(source).not.toMatch(/fixedAsset|fixed_assets|buildDepreciationPlan|dotation/i);
+    }
+    // Et côté API : des immobilisations existent (test précédent), la
+    // trésorerie du cockpit reste ce qu'elle était sans registre (ici :
+    // null, aucun connecteur bancaire — aucun flux fabriqué).
     const kpis = await app.inject({
       method: "GET",
       url: "/cockpit/kpis",
       headers: { cookie: ownerCookie },
     });
-    const body = kpis.json() as { treasury: { points: unknown[] } | null };
-    // Pas de connecteur bancaire dans ce test : la trésorerie est null — et
-    // SURTOUT, la présence d'immobilisations n'a pas fabriqué de projection
-    // ni injecté de flux : les dotations ne sont pas des décaissements.
-    expect(body.treasury).toBeNull();
+    expect((kpis.json() as { treasury: unknown }).treasury).toBeNull();
   });
 });
 

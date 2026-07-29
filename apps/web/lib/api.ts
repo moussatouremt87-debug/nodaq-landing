@@ -619,7 +619,9 @@ export const FixedAssetRegistry = z.object({
     estimatedTaxSavingCents: z.number(),
     marginalRate: z.number(),
     upcomingInstallments: z.array(z.string()),
-    label: z.string(),
+    // Verrou : la promesse « toujours labellisé estimation » est un contrat.
+    label: z.string().min(1),
+    rulesVersion: z.string().optional(),
   }),
 });
 export type FixedAssetRegistry = z.infer<typeof FixedAssetRegistry>;

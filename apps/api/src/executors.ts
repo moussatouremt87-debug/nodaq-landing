@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { withTenant } from "@nodaq/db";
+import { ASSET_CATEGORIES } from "@nodaq/shared";
 
 /*
  * Executors of validated pending actions (ticket 1.6). Runs ONLY after a human
@@ -45,7 +46,13 @@ const CreateFixedAssetPayload = z
     source: z.enum(["FEC", "DOCUMENT", "MANUEL"]).default("MANUEL"),
     sourceRef: z.string().max(200).nullish(),
     priorDepreciationCents: z.number().int().min(0).default(0),
-  });
+  })
+  // CGI 39 A : le dégressif n'est pas ouvert à toutes les catégories
+  // (véhicules de tourisme exclus…) — la config sourcée fait foi.
+  .refine(
+    (data) => data.method !== "DEGRESSIF" || ASSET_CATEGORIES[data.category].decliningAllowed,
+    { message: "declining balance not allowed for this category" },
+  );
 // (strip, pas strict : le payload transporte aussi des champs d'AFFICHAGE
 // pour la file — warnings de dérivation — que l'exécuteur ignore.)
 

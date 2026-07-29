@@ -57,6 +57,17 @@ L'exécuteur `create_fixed_asset` (réel) ne tourne qu'après approbation.
 - **Alerte fin de vie** : ≥ 80 % amorti → alerte owner via le check horaire
   push (2.17), payload minimal — jamais le nom de l'asset.
 
+## Limites V1 assumées (audit 2.19)
+
+- Idempotence FEC par **compte** (`fec:<compteNum>`) : un compte déjà repris
+  ne re-propose pas ses achats ultérieurs (re-saisie manuelle) ; un rejet
+  n'est pas mémorisé (la proposition revient à l'import suivant).
+- VNC affichée = recalcul du plan **plafonné par la reprise 28x** (jamais
+  moins amorti que les livres) — peut différer du bilan pour les cas
+  atypiques : l'expert-comptable reste la référence.
+- Suggestion classeur : uniquement quand le HT est lisible (jamais de TTC
+  amorti) ; ajustement catégorie/durée = rejeter puis saisie manuelle.
+
 ## Accès
 
 Tout `/immobilisations` est **OWNER-ONLY** (patrimoine + valeurs

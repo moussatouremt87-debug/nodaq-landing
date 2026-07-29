@@ -1,6 +1,6 @@
 import { buildDepreciationPlan, planEndYear, wearRatioAtYearEnd } from "./depreciation.js";
 import type { DepreciationInput } from "./depreciation.js";
-import { IS_RATES } from "./frenchTax.js";
+import { FRENCH_TAX_RULES_VERSION, IS_RATES } from "./frenchTax.js";
 
 /*
  * Treasury impact of the asset registry (ticket 2.19). THE design rule:
@@ -30,6 +30,8 @@ export interface IsImpactEstimate {
   upcomingInstallments: string[];
   /** ALWAYS displayed: this is an estimate, the accountant validates. */
   label: "estimation — à valider avec votre expert-comptable";
+  /** Version datée du jeu de règles fiscales qui a produit le chiffre. */
+  rulesVersion: string;
 }
 
 /**
@@ -68,6 +70,7 @@ export function estimateIsImpact(
     marginalRate,
     upcomingInstallments: upcoming,
     label: "estimation — à valider avec votre expert-comptable",
+    rulesVersion: FRENCH_TAX_RULES_VERSION,
   };
 }
 

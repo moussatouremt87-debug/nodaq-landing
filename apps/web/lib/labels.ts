@@ -11,6 +11,7 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   create_quote: "Devis client",
   submit_reconciliation: "Rapprochement bancaire",
   book_invoice: "Écriture comptable",
+  create_fixed_asset: "Immobilisation proposée",
 };
 
 const ACTION_STATUS_LABELS: Record<string, string> = {
@@ -28,6 +29,7 @@ const ACTION_CHIP_LABELS: Record<string, string> = {
   create_quote: "Devis",
   submit_reconciliation: "Rappro",
   book_invoice: "Écriture",
+  create_fixed_asset: "Immo",
 };
 
 export const actionTypeLabel = (type: string): string => ACTION_TYPE_LABELS[type] ?? type;
