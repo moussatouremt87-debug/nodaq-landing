@@ -39,6 +39,8 @@ export const OWNER_ONLY_TOOLS = new Set([
   "forecast_sales",
   // CA par client + noms clients (PII) : même statut que les factures (3.4).
   "analyze_customer_signals",
+  // Noms des salariés (PII RH) + charge dérivée du CA : owner-only (3.5).
+  "plan_staffing",
   "pennylane_get_invoices",
   "qonto_get_organization",
   "qonto_get_bank_transactions",

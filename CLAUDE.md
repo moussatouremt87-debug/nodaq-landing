@@ -64,6 +64,12 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > silencieuse) ; AMORTISSEMENT ≠ DÉCAISSEMENT (garde testée) : seuls l'économie d'IS
 > ESTIMÉE (labellisée expert-comptable) et le CAPEX de renouvellement (scénario)
 > touchent la trésorerie ; owner-only (`docs/immobilisations.md`).
+> **Plannings RH (3.5)** : modèle pur `staffingPlan.ts` (capacité = heures hebdo
+> × 4,348 − absences 5/7 ; charge estimée = prévision de ventes ÷ taux horaire
+> CONFIGURABLE, verdicts ±10 % chiffrés, `inconnu` sans prévision — jamais de
+> charge fabriquée, label estimation permanent) ; tables `staff_members` (nom =
+> PII)/`staff_absences` RLS ; OWNER-ONLY de bout en bout (routes `/rh/*`, outil
+> `plan_staffing`, page) ; solveur + connecteurs RH = V2 (`docs/plannings-rh.md`).
 > **Support (2.18)** : schéma Postgres `ops` (tables `support_tickets`/`support_issues`)
 > hors RLS métier MAIS sous RLS gated `app.ops_operator` — accès UNIQUEMENT via
 > `withOps()` + routes OPERATOR (allowlist `OPS_OPERATOR_USER_IDS`, 404 sinon) ;
