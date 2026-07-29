@@ -219,7 +219,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.get("/pending-actions", { preHandler: businessRoute }, async (request) => {
     // Opening the validation queue = the "actions" push events are SEEN:
     // counter resets, re-notification unlocked (anti-spam rule of 2.17).
-    void markPushSeen(request.tenantId, request.authSession.user.id, "actions").catch(
+    // AWAITED : en fire-and-forget, le marquage pouvait s'exécuter APRÈS un
+    // événement arrivé juste ensuite et l'effacer (course constatée en CI).
+    await markPushSeen(request.tenantId, request.authSession.user.id, "actions").catch(
       () => undefined,
     );
     return withTenant(request.tenantId, (tx) =>
@@ -1533,8 +1535,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
    * delegated-third-party reasoning as the pending-action detail, audit 1.5).
    */
   app.get("/cockpit/kpis", { preHandler: businessRoute }, async (request) => {
-    // Opening the cockpit = the "alerts" push events are seen (2.17).
-    void markPushSeen(request.tenantId, request.authSession.user.id, "alerts").catch(
+    // Opening the cockpit = the "alerts" push events are seen (2.17) —
+    // awaited (même course que la file de validation).
+    await markPushSeen(request.tenantId, request.authSession.user.id, "alerts").catch(
       () => undefined,
     );
     const byStatus = await withTenant(request.tenantId, (tx) =>
