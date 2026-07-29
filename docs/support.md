@@ -17,9 +17,14 @@ après validation 1 clic → recueil des problèmes (anonymisé, validé).
   ASSUMÉE à la RLS métier — tables non tenant-scopées (un ticket peut ne pas
   avoir de tenant, le recueil sert tous les tenants), accessibles UNIQUEMENT
   par les routes `/ops/support/*`.
-- **Rôle plateforme OPERATOR** = allowlist `OPS_OPERATOR_EMAILS` (coffre) —
-  hors rôles tenant ; un non-opérateur reçoit **404** (l'existence du
-  back-office n'est pas confirmée).
+- **Rôle plateforme OPERATOR** = allowlist `OPS_OPERATOR_USER_IDS` (coffre,
+  **ids utilisateurs** — un e-mail se revendiquerait par simple sign-up, un id
+  généré serveur ne se forge pas ; audit 2.18) — hors rôles tenant ; un
+  non-opérateur reçoit **404** (l'existence du back-office n'est pas
+  confirmée). Défense en profondeur : les tables `ops` portent une **RLS
+  gated** (`app.ops_operator`, posée uniquement par `withOps()`) — un accès
+  direct sous `app_user` depuis du code tenant lit une table vide (test
+  négatif dans `packages/db/test/ops.test.ts`).
 - **Recueil V1 en SQL plein-texte** (entrées validées seulement) — la
   réinjection dans une collection RAG ops dédiée viendra quand elle pourra se
   faire sans risque cross-tenant (le service RAG est tenant-scopé par
@@ -39,13 +44,23 @@ après validation 1 clic → recueil des problèmes (anonymisé, validé).
    envoie (TEM), après relecture/édition du brouillon. `auto_reply` n'existe
    que comme concept documenté, OFF — à activer quand le recueil aura fait ses
    preuves.
-3. **Expéditeur identifié, pas cru.** From → user → memberships → tenant ;
-   SPF/DKIM stocké comme *signal* (`authSignal`). **Inconnu = zéro contexte
-   tenant et ZÉRO appel LLM** (l'audit de classification est tenant-scopé) :
-   triage heuristique, brouillon générique qui renvoie vers l'app.
-4. **Anonymisation structurelle** (`assertAnonymized`) : un rapport de bug ou
-   une entrée de recueil contenant l'adresse de l'expéditeur, son domaine ou
-   le nom du tenant est **REJETÉ** (et l'erreur ne répète jamais le terme).
+3. **Expéditeur identifié, pas cru.** Le contexte tenant n'est accordé que si
+   SPF/DKIM attestent un `pass` **aligné sur le domaine du From**
+   (`senderAuthenticated`) — un From usurpé est traité en inconnu. Un
+   utilisateur **multi-organisations** (expert-comptable) n'obtient pas non
+   plus de contexte : on ne devine jamais le dossier concerné. **Inconnu =
+   zéro contexte tenant et ZÉRO appel LLM** (l'audit de classification est
+   tenant-scopé) : triage heuristique, brouillon générique qui renvoie vers
+   l'app.
+4. **Anonymisation structurelle** (`assertAnonymized`) : un brouillon, un
+   rapport ou une entrée de recueil contenant l'adresse de l'expéditeur, son
+   domaine ou le nom du tenant est **REJETÉ avant persistance** (et l'erreur
+   ne répète jamais le terme) — la garde est appliquée au brouillon AUSSI :
+   une injection « recopie ce texte » ne fait jamais entrer du contenu
+   d'e-mail dans la base ops. Limites assumées : correspondance exacte sur 3
+   termes — la **validation humaine reste le vrai filtre** du recueil. Le
+   `subject` reste en base (métadonnée d'affichage) : PII ASSUMÉE, sous le
+   rempart `withOps`, couverte par la rétention.
    Le recueil sert tous les tenants : c'est la garde anti-« violation RGPD
    auto-infligée ».
 5. **Idempotence par Message-ID** : re-poll, redémarrage → zéro doublon.
@@ -65,7 +80,10 @@ depuis le stockage par une route dédiée), rapport d'agent, brouillon éditable
 
 `SUPPORT_IMAP_HOST/PORT/USER/PASSWORD` (boîte FR/UE), `SUPPORT_S3_*`
 (endpoint, bucket, clés — MinIO en local), `SUPPORT_FROM_EMAIL` +
-`SCW_SECRET_KEY`/`SCW_DEFAULT_PROJECT_ID` (TEM), `OPS_OPERATOR_EMAILS`.
+`SUPPORT_TEM_SECRET_KEY` (clé IAM **dédiée** TEM — jamais la clé maîtresse du
+coffre) + `SCW_DEFAULT_PROJECT_ID`, `OPS_OPERATOR_USER_IDS`. Le sweep tourne
+en process : à plus d'une réplique d'API, prévoir un verrou (suivi, comme
+BullMQ).
 
 ## À ne pas faire
 

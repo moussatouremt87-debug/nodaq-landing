@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { prisma } from "@nodaq/db";
+import { prisma, withOps } from "@nodaq/db";
 import type { Prisma } from "@nodaq/db";
 import { recordPushEvent } from "../push.js";
 import { findKnownResolution, runPipeline } from "./pipelines.js";
 import type { SupportStorage } from "./storage.js";
-import { triageHeuristic, triageWithModel } from "./triage.js";
+import { assertAnonymized, triageHeuristic, triageWithModel } from "./triage.js";
 import type { TriageVerdict } from "./triage.js";
 
 /*
@@ -43,8 +43,8 @@ export interface SupportMailSource {
 export interface SupportIngestDeps {
   storage: SupportStorage;
   source: SupportMailSource;
-  /** E-mails opérateurs (allowlist plateforme) — destinataires du push P1. */
-  operatorEmails: string[];
+  /** UserIds opérateurs (allowlist plateforme) — destinataires du push P1. */
+  operatorUserIds: string[];
   /** Injectables en test. */
   triage?: typeof triageWithModel;
   pipeline?: typeof runPipeline;
@@ -54,33 +54,53 @@ export interface SupportIngestDeps {
 const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 const ATTACHMENT_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
 
-/** From -> user connu -> memberships ; un From se falsifie : signal, pas preuve. */
+const NO_SENDER = { tenantId: null, userId: null, tenantName: null };
+
+/**
+ * Un From se FALSIFIE (audit 2.18) : le contexte tenant n'est accordé que si
+ * SPF/DKIM attestent un `pass` ALIGNÉ sur le domaine de l'expéditeur — sinon
+ * l'e-mail est traité en inconnu (zéro contexte, zéro LLM), même si
+ * l'adresse correspond à un utilisateur connu.
+ */
+export function senderAuthenticated(mail: Pick<IncomingMail, "from" | "authSignal">): boolean {
+  const signal = mail.authSignal?.toLowerCase() ?? "";
+  const domain = mail.from.split("@")[1]?.toLowerCase() ?? "";
+  if (!domain || !signal) return false;
+  const pass = signal.includes("dkim=pass") || signal.includes("spf=pass");
+  return pass && signal.includes(domain);
+}
+
+/** From (authentifié) -> user connu -> memberships. */
 async function identifySender(
   from: string,
 ): Promise<{ tenantId: string | null; userId: string | null; tenantName: string | null }> {
   const email = from.trim().toLowerCase();
   const user = await prisma.user.findUnique({ where: { email }, select: { id: true } });
-  if (!user) return { tenantId: null, userId: null, tenantName: null };
-  const membership = await prisma.membership.findFirst({
+  if (!user) return NO_SENDER;
+  const memberships = await prisma.membership.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: "asc" },
     select: { tenantId: true, tenant: { select: { name: true } } },
+    take: 2,
   });
-  if (!membership) return { tenantId: null, userId: user.id, tenantName: null };
+  // Multi-organisations (expert-comptable) : PAS de contexte tenant — on ne
+  // devine jamais quel dossier client est concerné, l'opérateur tranche.
+  if (memberships.length !== 1) return { ...NO_SENDER, userId: user.id };
+  const membership = memberships[0]!;
   return { tenantId: membership.tenantId, userId: user.id, tenantName: membership.tenant.name };
 }
 
-/** Push P1 -> opérateurs : payload minimal via la brique 2.17 (catégorie support). */
-async function notifyOperatorsP1(operatorEmails: string[]): Promise<void> {
-  for (const email of operatorEmails) {
-    const user = await prisma.user.findUnique({
-      where: { email: email.trim().toLowerCase() },
-      select: { id: true, memberships: { select: { tenantId: true } } },
+/** Push P1 -> opérateurs : payload minimal via la brique 2.17 (catégorie
+ * support). UNE notification par opérateur (sa plus ancienne organisation =
+ * la sienne), jamais un fan-out sur toutes ses memberships. */
+async function notifyOperatorsP1(operatorUserIds: string[]): Promise<void> {
+  for (const userId of operatorUserIds) {
+    const membership = await prisma.membership.findFirst({
+      where: { userId },
+      orderBy: { createdAt: "asc" },
+      select: { tenantId: true },
     });
-    if (!user) continue;
-    for (const membership of user.memberships) {
-      await recordPushEvent(membership.tenantId, [user.id], "support");
-    }
+    if (membership) await recordPushEvent(membership.tenantId, [userId], "support");
   }
 }
 
@@ -99,10 +119,9 @@ export async function ingestSupportMailbox(deps: SupportIngestDeps): Promise<num
     try {
       if (!mail.messageId) continue;
       // Idempotence : déjà ingéré (re-poll, redémarrage) -> marquer et passer.
-      const existing = await prisma.supportTicket.findUnique({
-        where: { messageId: mail.messageId },
-        select: { id: true },
-      });
+      const existing = await withOps((tx) =>
+        tx.supportTicket.findUnique({ where: { messageId: mail.messageId }, select: { id: true } }),
+      );
       if (existing) {
         await deps.source.markProcessed(mail.messageId);
         continue;
@@ -124,7 +143,7 @@ export async function ingestSupportMailbox(deps: SupportIngestDeps): Promise<num
         objectKeys.push(key);
       }
 
-      const sender = await identifySender(mail.from);
+      const sender = senderAuthenticated(mail) ? await identifySender(mail.from) : NO_SENDER;
 
       // Triage : LLM souverain (tenant identifié) ou heuristique (inconnu).
       let verdict: TriageVerdict;
@@ -136,21 +155,23 @@ export async function ingestSupportMailbox(deps: SupportIngestDeps): Promise<num
         verdict = { ...triageHeuristic(), summary: "triage indisponible — à trier" };
       }
 
-      const ticket = await prisma.supportTicket.create({
-        data: {
-          messageId: mail.messageId,
-          fromEmail: mail.from.trim().toLowerCase(),
-          subject: mail.subject.slice(0, 500),
-          tenantId: sender.tenantId,
-          userId: sender.userId,
-          origin: verdict.origin,
-          level: verdict.level,
-          status: verdict.spam ? "SPAM" : "TRIE",
-          objectKeys,
-          authSignal: mail.authSignal ?? null,
-          inReplyTo: mail.messageId,
-        },
-      });
+      const ticket = await withOps((tx) =>
+        tx.supportTicket.create({
+          data: {
+            messageId: mail.messageId,
+            fromEmail: mail.from.trim().toLowerCase(),
+            subject: mail.subject.slice(0, 500),
+            tenantId: sender.tenantId,
+            userId: sender.userId,
+            origin: verdict.origin,
+            level: verdict.level,
+            status: verdict.spam ? "SPAM" : "TRIE",
+            objectKeys,
+            authSignal: mail.authSignal ?? null,
+            inReplyTo: mail.messageId,
+          },
+        }),
+      );
       created += 1;
 
       if (!verdict.spam) {
@@ -169,14 +190,24 @@ export async function ingestSupportMailbox(deps: SupportIngestDeps): Promise<num
             // Garde d'anonymisation : l'adresse, son domaine, le nom du tenant.
             [mail.from, mail.from.split("@")[1] ?? "", sender.tenantName ?? ""],
           );
-          await prisma.supportTicket.update({
-            where: { id: ticket.id },
-            data: {
-              status: "BROUILLON_PRET",
-              draftReply: draft.draftReply,
-              ...(draft.report ? { agentReport: draft.report as Prisma.InputJsonValue } : {}),
-            },
-          });
+          // Garde d'anonymisation AVANT persistance (audit 2.18) : un
+          // brouillon ou rapport qui cite l'adresse, son domaine ou le tenant
+          // (injection « recopie ce texte ») ne rentre JAMAIS en base ops —
+          // le ticket reste TRIE, l'opérateur traite depuis le corps stocké.
+          assertAnonymized(
+            `${draft.draftReply} ${JSON.stringify(draft.report ?? {})}`,
+            [mail.from, mail.from.split("@")[1] ?? "", sender.tenantName ?? ""],
+          );
+          await withOps((tx) =>
+            tx.supportTicket.update({
+              where: { id: ticket.id },
+              data: {
+                status: "BROUILLON_PRET",
+                draftReply: draft.draftReply,
+                ...(draft.report ? { agentReport: draft.report as Prisma.InputJsonValue } : {}),
+              },
+            }),
+          );
         } catch (error) {
           // Brouillon indisponible (LLM down, garde d'anonymisation) : le
           // ticket reste TRIE — l'opérateur traite à la main. Nom d'erreur
@@ -185,7 +216,7 @@ export async function ingestSupportMailbox(deps: SupportIngestDeps): Promise<num
         }
 
         if (verdict.level === "P1") {
-          await notifyOperatorsP1(deps.operatorEmails).catch((error: unknown) =>
+          await notifyOperatorsP1(deps.operatorUserIds).catch((error: unknown) =>
             onError(error instanceof Error ? error.name : "Error"),
           );
         }

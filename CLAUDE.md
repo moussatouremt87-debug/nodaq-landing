@@ -56,9 +56,10 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > re-notif avant ouverture de la file ; opt-in par appareil/type, `push_subscriptions`
 > RLS ; dispatch = sweep Postgres en process (BullMQ quand Redis existera)
 > (`docs/notifications-push.md`).
-> **Support (2.18)** : schéma Postgres `ops` = exception RLS ASSUMÉE (tables
-> `support_tickets`/`support_issues`, accès UNIQUEMENT routes OPERATOR — allowlist
-> `OPS_OPERATOR_EMAILS`, 404 sinon) ; e-mail entrant = donnée NON FIABLE (délimiteurs,
+> **Support (2.18)** : schéma Postgres `ops` (tables `support_tickets`/`support_issues`)
+> hors RLS métier MAIS sous RLS gated `app.ops_operator` — accès UNIQUEMENT via
+> `withOps()` + routes OPERATOR (allowlist `OPS_OPERATOR_USER_IDS`, 404 sinon) ;
+> contexte tenant accordé SEULEMENT si SPF/DKIM alignés (From usurpable) ; e-mail entrant = donnée NON FIABLE (délimiteurs,
 > pipelines SANS outils, `confidentiel`, inconnu = zéro LLM/contexte) ; corps
 > UNIQUEMENT en Object Storage (jamais base/logs) ; RIEN ne part sans validation
 > opérateur (TEM) ; recueil anonymisé par garde structurelle (`docs/support.md`).

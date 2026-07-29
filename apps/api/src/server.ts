@@ -31,7 +31,8 @@ await injectSecrets([
   { name: "SUPPORT_S3_ACCESS_KEY", required: false },
   { name: "SUPPORT_S3_SECRET_KEY", required: false },
   { name: "SUPPORT_FROM_EMAIL", required: false },
-  { name: "OPS_OPERATOR_EMAILS", required: false },
+  { name: "OPS_OPERATOR_USER_IDS", required: false },
+  { name: "SUPPORT_TEM_SECRET_KEY", required: false },
 ]);
 
 const { buildApp } = await import("./app.js");
@@ -73,9 +74,9 @@ if (supportSource && supportStorage) {
     void ingestSupportMailbox({
       storage: supportStorage,
       source: supportSource,
-      operatorEmails: (process.env.OPS_OPERATOR_EMAILS ?? "")
+      operatorUserIds: (process.env.OPS_OPERATOR_USER_IDS ?? "")
         .split(",")
-        .map((email) => email.trim().toLowerCase())
+        .map((id) => id.trim())
         .filter(Boolean),
       // Nom d'erreur SEULEMENT — jamais un contenu d'e-mail dans les logs.
       onError: (name) => app.log.warn({ err: name }, "support ingest error"),

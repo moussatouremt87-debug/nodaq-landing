@@ -49,7 +49,12 @@ export function createImapMailSource(
           const parsed = await simpleParser(message.source);
           const from = parsed.from?.value[0]?.address ?? "";
           if (!from) continue;
-          const authHeader = parsed.headers.get("authentication-results");
+          const rawAuth = parsed.headers.get("authentication-results");
+          // Peut être multiple (un par relais) : on concatène, borné — c'est
+          // un SIGNAL d'alignement SPF/DKIM, pas une donnée à conserver longue.
+          const authHeader = Array.isArray(rawAuth)
+            ? rawAuth.map(String).join(" ; ")
+            : rawAuth;
           mails.push({
             messageId: parsed.messageId ?? `imap-uid-${message.uid}`,
             from,

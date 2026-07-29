@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
-import { prisma, Prisma, withTenant } from "@nodaq/db";
+import { prisma, Prisma, withOps, withTenant } from "@nodaq/db";
 import { deriveReceivables, parseFec } from "@nodaq/fec";
 import {
   BridgeClient,
@@ -1677,15 +1677,17 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const supportMailer =
     options.supportMailer !== undefined ? options.supportMailer : createTemMailer();
 
-  const operatorEmails = (): string[] =>
-    (process.env.OPS_OPERATOR_EMAILS ?? "")
+  // Allowlist par USER ID (audit 2.18, bloquant) : une allowlist d'e-mails
+  // serait revendicable par un simple sign-up sur une adresse non encore
+  // enregistrée — les ids sont générés serveur, non forgeables.
+  const operatorUserIds = (): string[] =>
+    (process.env.OPS_OPERATOR_USER_IDS ?? "")
       .split(",")
-      .map((email) => email.trim().toLowerCase())
+      .map((id) => id.trim())
       .filter(Boolean);
 
   async function requireOperator(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const email = request.authSession.user.email?.toLowerCase();
-    if (!email || !operatorEmails().includes(email)) {
+    if (!operatorUserIds().includes(request.authSession.user.id)) {
       await reply.code(404).send({ error: "not found" });
     }
   }
@@ -1715,25 +1717,29 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       })
       .safeParse(request.query ?? {});
     if (!query.success) return reply.code(400).send({ error: "invalid query" });
-    return prisma.supportTicket.findMany({
-      where: {
-        ...(query.data.status ? { status: query.data.status } : {}),
-        ...(query.data.level ? { level: query.data.level } : {}),
-        ...(query.data.origin ? { origin: query.data.origin } : {}),
-      },
-      orderBy: { createdAt: "desc" },
-      take: 100,
-      select: TICKET_SELECT,
-    });
+    return withOps((tx) =>
+      tx.supportTicket.findMany({
+        where: {
+          ...(query.data.status ? { status: query.data.status } : {}),
+          ...(query.data.level ? { level: query.data.level } : {}),
+          ...(query.data.origin ? { origin: query.data.origin } : {}),
+        },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+        select: TICKET_SELECT,
+      }),
+    );
   });
 
   app.get("/ops/support/tickets/:id", { preHandler: operatorRoute }, async (request, reply) => {
     const params = z.object({ id: Uuid }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id" });
-    const ticket = await prisma.supportTicket.findUnique({
-      where: { id: params.data.id },
-      select: { ...TICKET_SELECT, draftReply: true, agentReport: true, objectKeys: true },
-    });
+    const ticket = await withOps((tx) =>
+      tx.supportTicket.findUnique({
+        where: { id: params.data.id },
+        select: { ...TICKET_SELECT, draftReply: true, agentReport: true, objectKeys: true },
+      }),
+    );
     if (!ticket) return reply.code(404).send({ error: "unknown ticket" });
     return ticket;
   });
@@ -1746,10 +1752,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       const params = z.object({ id: Uuid }).safeParse(request.params);
       if (!params.success) return reply.code(400).send({ error: "invalid id" });
       if (!supportStorage) return reply.code(503).send({ error: "stockage non configuré" });
-      const ticket = await prisma.supportTicket.findUnique({
-        where: { id: params.data.id },
-        select: { objectKeys: true },
-      });
+      const ticket = await withOps((tx) =>
+        tx.supportTicket.findUnique({ where: { id: params.data.id }, select: { objectKeys: true } }),
+      );
       const keys = z.array(z.string()).catch([]).parse(ticket?.objectKeys ?? []);
       const bodyKey = keys.find((key) => key.endsWith("/body.txt"));
       if (!bodyKey) return reply.code(404).send({ error: "no body" });
@@ -1768,12 +1773,24 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       .strict()
       .safeParse(request.body);
     if (!params.success || !body.success) return reply.code(400).send({ error: "invalid payload" });
-    const updated = await prisma.supportTicket.updateMany({
-      where: { id: params.data.id, status: { in: ["TRIE", "BROUILLON_PRET"] } },
-      data: { draftReply: body.data.draftReply, status: "BROUILLON_PRET" },
-    });
-    if (updated.count === 0) return reply.code(404).send({ error: "unknown ticket" });
-    return { updated: true };
+    try {
+      const updated = await withOps((tx) =>
+        tx.supportTicket.updateMany({
+          where: { id: params.data.id, status: { in: ["TRIE", "BROUILLON_PRET"] } },
+          data: { draftReply: body.data.draftReply, status: "BROUILLON_PRET" },
+        }),
+      );
+      if (updated.count === 0) return reply.code(404).send({ error: "unknown ticket" });
+      return { updated: true };
+    } catch (error) {
+      // Jamais l'erreur brute : une PrismaValidationError sérialiserait le
+      // brouillon (contenu) dans les logs du handler global.
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "support draft update failed",
+      );
+      return reply.code(500).send({ error: "update failed" });
+    }
   });
 
   // LA validation 1 clic : seul chemin d'envoi vers un client (jamais d'envoi
@@ -1785,7 +1802,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       const params = z.object({ id: Uuid }).safeParse(request.params);
       if (!params.success) return reply.code(400).send({ error: "invalid id" });
       if (!supportMailer) return reply.code(503).send({ error: "envoi non configuré (TEM)" });
-      const ticket = await prisma.supportTicket.findUnique({ where: { id: params.data.id } });
+      const ticket = await withOps((tx) =>
+        tx.supportTicket.findUnique({ where: { id: params.data.id } }),
+      );
       if (!ticket || !ticket.draftReply) return reply.code(404).send({ error: "no draft" });
       if (ticket.status !== "BROUILLON_PRET") {
         return reply.code(409).send({ error: "ticket not ready" });
@@ -1796,10 +1815,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         text: ticket.draftReply,
         ...(ticket.inReplyTo ? { inReplyTo: ticket.inReplyTo } : {}),
       });
-      await prisma.supportTicket.update({
-        where: { id: ticket.id },
-        data: { status: "REPONDU", repliedAt: new Date() },
-      });
+      await withOps((tx) =>
+        tx.supportTicket.update({
+          where: { id: ticket.id },
+          data: { status: "REPONDU", repliedAt: new Date() },
+        }),
+      );
       return { sent: true };
     },
   );
@@ -1831,15 +1852,20 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       if (!params.success || !body.success) {
         return reply.code(400).send({ error: "invalid payload" });
       }
-      const ticket = await prisma.supportTicket.findUnique({ where: { id: params.data.id } });
+      const ticket = await withOps((tx) =>
+        tx.supportTicket.findUnique({ where: { id: params.data.id } }),
+      );
       if (!ticket) return reply.code(404).send({ error: "unknown ticket" });
 
       let issueId: string | null = null;
       if (body.data.issueId) {
-        const updated = await prisma.supportIssue.updateMany({
-          where: { id: body.data.issueId },
-          data: { occurrences: { increment: 1 } },
-        });
+        const knownIssueId = body.data.issueId;
+        const updated = await withOps((tx) =>
+          tx.supportIssue.updateMany({
+            where: { id: knownIssueId },
+            data: { occurrences: { increment: 1 } },
+          }),
+        );
         if (updated.count === 0) return reply.code(404).send({ error: "unknown issue" });
         issueId = body.data.issueId;
       } else if (body.data.issue) {
@@ -1863,20 +1889,19 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             .code(400)
             .send({ error: "entrée non anonymisée (adresse, domaine ou tenant présent)" });
         }
-        const issue = await prisma.supportIssue.create({ data: body.data.issue });
+        const issue = await withOps((tx) => tx.supportIssue.create({ data: body.data.issue! }));
         issueId = issue.id;
       }
 
-      await prisma.supportTicket.update({
-        where: { id: ticket.id },
-        data: { status: "RESOLU" },
-      });
+      await withOps((tx) =>
+        tx.supportTicket.update({ where: { id: ticket.id }, data: { status: "RESOLU" } }),
+      );
       return { resolved: true, issueId };
     },
   );
 
   app.get("/ops/support/issues", { preHandler: operatorRoute }, async () => {
-    return prisma.supportIssue.findMany({ orderBy: { updatedAt: "desc" }, take: 200 });
+    return withOps((tx) => tx.supportIssue.findMany({ orderBy: { updatedAt: "desc" }, take: 200 }));
   });
 
   app.post(
@@ -1885,22 +1910,20 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     async (request, reply) => {
       const params = z.object({ id: Uuid }).safeParse(request.params);
       if (!params.success) return reply.code(400).send({ error: "invalid id" });
-      const updated = await prisma.supportIssue.updateMany({
-        where: { id: params.data.id },
-        data: { validated: true },
-      });
+      const updated = await withOps((tx) =>
+        tx.supportIssue.updateMany({ where: { id: params.data.id }, data: { validated: true } }),
+      );
       if (updated.count === 0) return reply.code(404).send({ error: "unknown issue" });
       return { validated: true };
     },
   );
 
   app.get("/ops/support/stats", { preHandler: operatorRoute }, async () => {
-    const byStatus = await prisma.supportTicket.groupBy({
-      by: ["status"],
-      _count: { _all: true },
-    });
-    const byLevel = await prisma.supportTicket.groupBy({ by: ["level"], _count: { _all: true } });
-    const issues = await prisma.supportIssue.count({ where: { validated: true } });
+    const [byStatus, byLevel, issues] = await withOps(async (tx) => [
+      await tx.supportTicket.groupBy({ by: ["status"], _count: { _all: true } }),
+      await tx.supportTicket.groupBy({ by: ["level"], _count: { _all: true } }),
+      await tx.supportIssue.count({ where: { validated: true } }),
+    ] as const);
     return {
       byStatus: Object.fromEntries(byStatus.map((row) => [row.status, row._count._all])),
       byLevel: Object.fromEntries(byLevel.map((row) => [row.level ?? "?", row._count._all])),

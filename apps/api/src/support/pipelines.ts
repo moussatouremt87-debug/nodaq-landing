@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { prisma, withTenant } from "@nodaq/db";
+import { withOps, withTenant } from "@nodaq/db";
 import { route } from "@nodaq/llm";
 import { assertAnonymized } from "./triage.js";
 import type { SupportOrigin } from "./triage.js";
@@ -163,11 +163,13 @@ export async function findKnownResolution(summary: string): Promise<string | und
     .filter((word) => word.length >= 4)
     .slice(0, 8);
   if (words.length === 0) return undefined;
-  const issues = await prisma.supportIssue.findMany({
-    where: { validated: true },
-    select: { title: true, symptoms: true, resolution: true },
-    take: 200,
-  });
+  const issues = await withOps((tx) =>
+    tx.supportIssue.findMany({
+      where: { validated: true },
+      select: { title: true, symptoms: true, resolution: true },
+      take: 200,
+    }),
+  );
   let best: { score: number; resolution: string } | null = null;
   for (const issue of issues) {
     const haystack = `${issue.title} ${issue.symptoms}`.toLowerCase();

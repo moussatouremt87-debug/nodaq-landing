@@ -78,6 +78,8 @@ function mail(overrides: Partial<IncomingMail>): IncomingMail {
     from: clientEmail,
     subject: "Problème de synchronisation",
     body: "Bonjour, ma synchronisation bancaire ne fonctionne plus depuis hier.",
+    // Alignement SPF/DKIM : sans lui, l'expéditeur est traité en inconnu.
+    authSignal: "mx.example.com; dkim=pass header.d=example.com; spf=pass",
     attachments: [],
     ...overrides,
   };
@@ -102,7 +104,6 @@ async function signup(email: string, name: string): Promise<string> {
 beforeAll(async () => {
   operatorEmail = `ops-${RUN}@example.com`;
   clientEmail = `client-${RUN}@example.com`;
-  process.env.OPS_OPERATOR_EMAILS = `${operatorEmail}, autre-op@example.com`;
 
   admin = createAdminClient();
   app = buildApp({ supportMailer: fakeMailer, supportStorage: fakeStorage() });
@@ -119,6 +120,9 @@ beforeAll(async () => {
   operatorId = (
     await app.inject({ method: "GET", url: "/me", headers: { cookie: operatorCookie } })
   ).json().userId as string;
+  // Allowlist par USER ID (bloquant d'audit : un e-mail se revendique par
+  // sign-up, un id généré serveur ne se forge pas).
+  process.env.OPS_OPERATOR_USER_IDS = `${operatorId}, 00000000-0000-4000-8000-000000000000`;
 
   memberCookie = await signup(clientEmail, "Client Support");
   const orgCl = await app.inject({
@@ -131,7 +135,7 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  delete process.env.OPS_OPERATOR_EMAILS;
+  delete process.env.OPS_OPERATOR_USER_IDS;
   await admin.supportTicket.deleteMany({ where: { fromEmail: { contains: RUN } } });
   await admin.supportIssue.deleteMany({ where: { title: { contains: RUN } } });
   await app.close();
@@ -173,7 +177,7 @@ describe("ingestion", () => {
     const created = await ingestSupportMailbox({
       storage,
       source,
-      operatorEmails: [operatorEmail],
+      operatorUserIds: [operatorId],
       triage: () => triage(),
       pipeline,
     });
@@ -182,13 +186,13 @@ describe("ingestion", () => {
     const again = await ingestSupportMailbox({
       storage,
       source: fakeSource([incoming]),
-      operatorEmails: [operatorEmail],
+      operatorUserIds: [operatorId],
       triage: () => triage(),
       pipeline,
     });
     expect(again).toBe(0);
 
-    const ticket = await prisma.supportTicket.findUnique({
+    const ticket = await admin.supportTicket.findUnique({
       where: { messageId: incoming.messageId },
     });
     expect(ticket).toMatchObject({
@@ -212,7 +216,7 @@ describe("ingestion", () => {
     const created = await ingestSupportMailbox({
       storage: fakeStorage(),
       source: fakeSource([incoming]),
-      operatorEmails: [operatorEmail],
+      operatorUserIds: [operatorId],
       triage: () => {
         llmCalled = true;
         return Promise.resolve(triageHeuristic());
@@ -222,11 +226,33 @@ describe("ingestion", () => {
     });
     expect(created).toBe(1);
     expect(llmCalled).toBe(false);
-    const ticket = await prisma.supportTicket.findUnique({
+    const ticket = await admin.supportTicket.findUnique({
       where: { messageId: incoming.messageId },
     });
     expect(ticket?.tenantId).toBeNull();
     expect(ticket?.draftReply).toContain("pas trouvé de compte");
+  });
+
+  it("USURPATION : un From connu sans SPF/DKIM alignés = zéro contexte tenant", async () => {
+    // L'adresse existe (clientEmail) mais rien n'atteste l'expéditeur : le
+    // ticket est traité en inconnu — pas de withTenant, pas de LLM.
+    const incoming = mail({ authSignal: undefined });
+    let llmCalled = false;
+    await ingestSupportMailbox({
+      storage: fakeStorage(),
+      source: fakeSource([incoming]),
+      operatorUserIds: [operatorId],
+      triage: () => {
+        llmCalled = true;
+        return Promise.resolve(triageHeuristic());
+      },
+      pipeline: runPipeline,
+    });
+    expect(llmCalled).toBe(false);
+    const ticket = await admin.supportTicket.findUnique({
+      where: { messageId: incoming.messageId },
+    });
+    expect(ticket?.tenantId).toBeNull();
   });
 
   it("INJECTION : un e-mail malveillant ne déclenche ni envoi, ni action, ni fuite", async () => {
@@ -240,7 +266,7 @@ describe("ingestion", () => {
     await ingestSupportMailbox({
       storage: fakeStorage(),
       source: fakeSource([incoming]),
-      operatorEmails: [operatorEmail],
+      operatorUserIds: [operatorId],
       triage: () =>
         Promise.resolve({
           origin: "USAGE",
@@ -258,7 +284,7 @@ describe("ingestion", () => {
     // Aucune pending_action, aucun envoi : le triage/brouillon a eu lieu, point.
     expect(await withTenant(orgClient, (tx) => tx.pendingAction.count())).toBe(before);
     expect(mailerCalls.length).toBe(mailerBefore);
-    const ticket = await prisma.supportTicket.findUnique({
+    const ticket = await admin.supportTicket.findUnique({
       where: { messageId: incoming.messageId },
     });
     expect(ticket?.status).toBe("BROUILLON_PRET");
@@ -269,7 +295,7 @@ describe("ingestion", () => {
     await ingestSupportMailbox({
       storage: fakeStorage(),
       source: fakeSource([incoming]),
-      operatorEmails: [operatorEmail],
+      operatorUserIds: [operatorId],
       triage: () =>
         Promise.resolve({
           origin: "BUG_PRODUIT",
@@ -299,7 +325,7 @@ describe("ingestion", () => {
     await ingestSupportMailbox({
       storage: fakeStorage(),
       source: fakeSource([incoming]),
-      operatorEmails: [operatorEmail],
+      operatorUserIds: [operatorId],
       triage: () =>
         Promise.resolve({
           origin: "USAGE",
@@ -313,7 +339,7 @@ describe("ingestion", () => {
       },
     });
     expect(pipelineCalled).toBe(false);
-    const ticket = await prisma.supportTicket.findUnique({
+    const ticket = await admin.supportTicket.findUnique({
       where: { messageId: incoming.messageId },
     });
     expect(ticket?.status).toBe("SPAM");

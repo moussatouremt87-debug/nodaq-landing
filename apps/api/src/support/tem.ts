@@ -9,8 +9,14 @@ export interface SupportMailer {
   send(args: { to: string; subject: string; text: string; inReplyTo?: string }): Promise<void>;
 }
 
+/** En-tête/sujet : jamais de CR/LF (injection d'en-têtes), longueur bornée. */
+function headerSafe(value: string, max: number): string {
+  return value.replace(/[\r\n]+/g, " ").slice(0, max);
+}
+
 export function createTemMailer(env: NodeJS.ProcessEnv = process.env): SupportMailer | null {
-  const secretKey = env.SCW_SECRET_KEY;
+  // Clé IAM DÉDIÉE à TEM (audit 2.18) : jamais la clé maîtresse du coffre.
+  const secretKey = env.SUPPORT_TEM_SECRET_KEY;
   const projectId = env.SCW_DEFAULT_PROJECT_ID;
   const fromEmail = env.SUPPORT_FROM_EMAIL;
   if (!secretKey || !projectId || !fromEmail) return null;
@@ -25,10 +31,11 @@ export function createTemMailer(env: NodeJS.ProcessEnv = process.env): SupportMa
           project_id: projectId,
           from: { email: fromEmail, name: "Support NODAQ" },
           to: [{ email: to }],
-          subject,
+          subject: headerSafe(subject, 300),
           text,
-          // Fil de conversation conservé côté client mail.
-          ...(inReplyTo
+          // Fil conservé — l'In-Reply-To vient de l'expéditeur : format strict
+          // ou rien (jamais un en-tête libre vers le fournisseur).
+          ...(inReplyTo && /^<[\x21-\x7e]{1,200}>$/.test(inReplyTo)
             ? { additional_headers: [{ key: "In-Reply-To", value: inReplyTo }] }
             : {}),
         }),

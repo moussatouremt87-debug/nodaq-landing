@@ -59,3 +59,18 @@ export async function withTenant<T>(
     options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : undefined,
   );
 }
+
+/**
+ * Seule porte d'accès aux tables du schéma `ops` (support back-office, 2.18).
+ * Défense en profondeur (audit 2.18) : les tables ops portent une RLS gated
+ * sur `app.ops_operator` — posée ICI, dans la transaction, comme withTenant.
+ * Un `prisma.supportTicket.*` lancé depuis du code tenant (ou une injection
+ * SQL sous app_user) lit une table VIDE : l'exception « pas de RLS métier »
+ * ne signifie pas « pas de rempart du tout ».
+ */
+export async function withOps<T>(fn: (tx: TenantClient) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT set_config('app.ops_operator', 'on', true)`;
+    return fn(tx);
+  });
+}
