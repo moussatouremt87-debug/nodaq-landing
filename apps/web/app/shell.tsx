@@ -29,6 +29,12 @@ const ICONS: Record<string, ReactNode> = {
       <path d="M1.5 13.5c0-2.8 2.7-4.5 6-4.5s6 1.7 6 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
     </svg>
   ),
+  stocks: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M2 5.5 7.5 2.5 13 5.5v6L7.5 14 2 11.5v-6Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M2 5.5 7.5 8.5 13 5.5M7.5 8.5V14" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+    </svg>
+  ),
   connecteurs: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M4.5 1.5v4M10.5 1.5v4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -59,6 +65,7 @@ const LINKS = [
   { href: "/", label: "Cockpit", icon: "cockpit" },
   { href: "/chat", label: "Employé Compta", icon: "employes" },
   { href: "/classeur", label: "Classeur", icon: "classeur" },
+  { href: "/stocks", label: "Stocks", icon: "stocks" },
   { href: "/connecteurs", label: "Connecteurs", icon: "connecteurs" },
   { href: "/validation", label: "File de validation", icon: "validation" },
 ];
@@ -67,6 +74,7 @@ const TITLES: Record<string, string> = {
   "/": "Cockpit",
   "/chat": "Employé Compta",
   "/classeur": "Classeur",
+  "/stocks": "Stocks",
   "/connecteurs": "Connecteurs",
   "/validation": "File de validation",
 };
