@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
-import { createActionsMcpServer } from "../src/server.js";
+import { createActionsMcpServer, TOOL_POLICIES } from "../src/server.js";
 
 /**
  * End-to-end: MCP client -> actions server -> fake OCR service -> route()
@@ -306,5 +306,63 @@ describe("ocr_and_book_invoice — human-in-the-loop", () => {
     expect(JSON.stringify(result.content)).not.toContain("FR7612345");
     const after = await withTenant(tenantId, (tx) => tx.pendingAction.count());
     expect(after).toBe(before);
+  });
+});
+
+describe("stocks (ticket 3.2) — lecture libre, ajustement HITL", () => {
+  it("check_stock_alerts liste les articles sous seuil ; adjust_stock PRÉPARE sans jamais exécuter", async () => {
+    await withTenant(tenantId, async (tx) => {
+      await tx.stockMovement.deleteMany({});
+      await tx.stockItem.deleteMany({});
+      await tx.stockItem.createMany({
+        data: [
+          { tenantId, name: "Disjoncteur 20A", unit: "unité", quantity: 3, alertThreshold: 10 },
+          { tenantId, name: "Gaine ICTA", unit: "mètre", quantity: 500, alertThreshold: 100 },
+        ],
+      });
+    });
+
+    const client = await connectedClient();
+    const alerts = JSON.parse(
+      (
+        (await client.callTool({ name: "check_stock_alerts", arguments: {} })).content as {
+          text: string;
+        }[]
+      )[0]!.text,
+    ) as { alerts: { name: string }[]; alertCount: number; totalItems: number };
+    expect(alerts.alertCount).toBe(1);
+    expect(alerts.totalItems).toBe(2);
+    expect(alerts.alerts[0]?.name).toBe("Disjoncteur 20A");
+
+    expect(TOOL_POLICIES.adjust_stock.requiresValidation).toBe(true);
+    const result = await client.callTool({
+      name: "adjust_stock",
+      arguments: { itemName: "Disjoncteur 20A", delta: 20, reason: "réassort" },
+    });
+    const parsed = JSON.parse((result.content as { text: string }[])[0]!.text) as {
+      pendingActionId: string;
+      status: string;
+    };
+    expect(parsed.status).toBe("pending_validation");
+
+    // RIEN n'a bougé : la quantité ne change qu'à l'approbation humaine.
+    const item = await withTenant(tenantId, (tx) =>
+      tx.stockItem.findUnique({ where: { tenantId_name: { tenantId, name: "Disjoncteur 20A" } } }),
+    );
+    expect(item?.quantity).toBe(3);
+    const action = await withTenant(tenantId, (tx) =>
+      tx.pendingAction.findUnique({ where: { id: parsed.pendingActionId } }),
+    );
+    expect(action).toMatchObject({ type: "adjust_stock", status: "pending" });
+    expect(action?.payload).toMatchObject({ delta: 20, quantityBefore: 3 });
+
+    // Article inconnu : erreur outil, aucune pending_action créée.
+    const before = await withTenant(tenantId, (tx) => tx.pendingAction.count());
+    const unknown = await client.callTool({
+      name: "adjust_stock",
+      arguments: { itemName: "N'existe pas", delta: 1 },
+    });
+    expect(unknown.isError).toBe(true);
+    expect(await withTenant(tenantId, (tx) => tx.pendingAction.count())).toBe(before);
   });
 });

@@ -34,6 +34,8 @@ model Tenant {
   fecImports      FecImport[]
   fecInvoices     FecInvoice[]
   classeurDocuments ClasseurDocument[]
+  stockItems      StockItem[]
+  stockMovements  StockMovement[]
 
   @@map("tenants")
 }
@@ -428,4 +430,48 @@ model ClasseurDocument {
   @@unique([tenantId, sha256])
   @@index([tenantId, status])
   @@map("classeur_documents")
+}
+
+/// Ticket 3.2 — suivi des stocks + alertes. Un article de stock par tenant
+/// (nom unique par tenant). `alertThreshold` pilote l'alerte de rupture côté
+/// app (pas de logique métier en DB). Sealed by RLS (see the migration
+/// `rls_stock_items_movements`).
+model StockItem {
+  id             String          @id @default(uuid()) @db.Uuid
+  tenantId       String          @map("tenant_id") @db.Uuid
+  name           String
+  sku            String?
+  unit           String          @default("unité")
+  quantity       Int             @default(0)
+  alertThreshold Int             @default(0) @map("alert_threshold")
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  movements      StockMovement[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("stock_items")
+}
+
+/// Ticket 3.2 — journal APPEND-ONLY des mouvements de stock (entrées/sorties).
+/// `delta` est négatif pour une sortie, positif pour une entrée — jamais 0
+/// (validé côté app). `createdBy` est l'utilisateur de la session, jamais un
+/// input client non recontrôlé. Sealed by RLS (see the migration
+/// `rls_stock_items_movements`).
+model StockMovement {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @map("tenant_id") @db.Uuid
+  itemId    String    @map("item_id") @db.Uuid
+  /// Négatif = sortie, positif = entrée — jamais 0 (validé côté app).
+  delta     Int
+  reason    String?
+  /// User de session — jamais un input client non recontrôlé.
+  createdBy String?   @map("created_by") @db.Uuid
+  createdAt DateTime  @default(now()) @map("created_at")
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  item      StockItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, itemId])
+  @@map("stock_movements")
 }

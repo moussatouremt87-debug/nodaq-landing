@@ -7,6 +7,7 @@
 
 const ACTION_TYPE_LABELS: Record<string, string> = {
   send_dunning: "Relance client",
+  adjust_stock: "Ajustement de stock",
   create_quote: "Devis client",
   submit_reconciliation: "Rapprochement bancaire",
   book_invoice: "Écriture comptable",
@@ -23,6 +24,7 @@ const ACTION_STATUS_LABELS: Record<string, string> = {
 /** Short chip form (uppercased by CSS), as in the Figma mock. */
 const ACTION_CHIP_LABELS: Record<string, string> = {
   send_dunning: "Relance",
+  adjust_stock: "Stock",
   create_quote: "Devis",
   submit_reconciliation: "Rappro",
   book_invoice: "Écriture",

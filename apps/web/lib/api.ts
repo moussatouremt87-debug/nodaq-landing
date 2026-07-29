@@ -65,6 +65,8 @@ export type PendingActionSummary = z.infer<typeof PendingActionSummary>;
 export const CockpitKpis = z.object({
   pendingActions: z.record(z.number()),
   conversations: z.number(),
+  /** Articles sous leur seuil d'alerte (3.2) — visible de tout membre. */
+  stockAlerts: z.number(),
   treasury: z
     .object({
       account: z.string(),
@@ -361,6 +363,71 @@ export const deleteClasseurDocument = async (id: string): Promise<void> => {
 
 export const classeurPhotoUrl = (id: string): string =>
   `/backend/classeur/documents/${encodeURIComponent(id)}/photo`;
+
+// ── Suivi des stocks (ticket 3.2) ────────────────────────────────────────────
+
+export const StockItem = z.object({
+  id: z.string(),
+  name: z.string(),
+  sku: z.string().nullable(),
+  unit: z.string(),
+  quantity: z.number(),
+  alertThreshold: z.number(),
+  belowThreshold: z.boolean(),
+  updatedAt: z.string(),
+});
+export type StockItem = z.infer<typeof StockItem>;
+
+const StockItemEnvelope = z.object({ item: StockItem });
+
+export const listStockItems = (): Promise<StockItem[]> =>
+  call(z.object({ items: z.array(StockItem), hasMore: z.boolean() }), "/stocks").then(
+    (r) => r.items,
+  );
+
+export const createStockItem = (input: {
+  name: string;
+  sku?: string;
+  unit?: string;
+  alertThreshold?: number;
+}): Promise<StockItem> =>
+  call(StockItemEnvelope, "/stocks", { method: "POST", body: JSON.stringify(input) }).then(
+    (r) => r.item,
+  );
+
+export const updateStockItem = (
+  id: string,
+  input: { name?: string; sku?: string | null; unit?: string; alertThreshold?: number },
+): Promise<StockItem> =>
+  call(StockItemEnvelope, `/stocks/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  }).then((r) => r.item);
+
+export const deleteStockItem = async (id: string): Promise<void> => {
+  const response = await fetch(`/backend/stocks/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!response.ok) throw new ApiError(response.status, `HTTP ${response.status}`);
+};
+
+export const moveStock = (id: string, delta: number, reason?: string): Promise<StockItem> =>
+  call(StockItemEnvelope, `/stocks/${encodeURIComponent(id)}/movements`, {
+    method: "POST",
+    body: JSON.stringify({ delta, ...(reason ? { reason } : {}) }),
+  }).then((r) => r.item);
+
+export const StockMovement = z.object({
+  id: z.string(),
+  delta: z.number(),
+  reason: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type StockMovement = z.infer<typeof StockMovement>;
+
+export const listStockMovements = (id: string): Promise<StockMovement[]> =>
+  call(
+    z.object({ movements: z.array(StockMovement) }),
+    `/stocks/${encodeURIComponent(id)}/movements`,
+  ).then((r) => r.movements);
 
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {

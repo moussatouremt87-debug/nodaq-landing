@@ -4,8 +4,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
-import { prisma, withTenant } from "@nodaq/db";
-import type { Prisma } from "@nodaq/db";
+import { prisma, Prisma, withTenant } from "@nodaq/db";
 import { deriveReceivables, parseFec } from "@nodaq/fec";
 import {
   BridgeClient,
@@ -355,7 +354,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         outcome = { status: "failed", result: { error: "no-executor" } };
       } else {
         try {
-          const result = await executor(action.payload, { tenantId: request.tenantId });
+          const result = await executor(action.payload, {
+            tenantId: request.tenantId,
+            userId: request.authSession.user.id,
+          });
           outcome = { status: "executed", result: (result ?? {}) as object };
         } catch (error) {
           // Error NAME only — an executor error must never echo payload content.
@@ -1124,6 +1126,201 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     },
   );
 
+  /*
+   * Suivi des stocks (ticket 3.2). Le stock n'est pas une donnée financière :
+   * tout membre le consulte et l'ajuste (l'employé de terrain sort du matériel
+   * du dépôt) ; le RÉFÉRENTIEL (création, seuils, suppression) est owner.
+   * Chaque ajustement passe par un mouvement append-only — la quantité ne se
+   * modifie jamais directement.
+   */
+
+  const STOCK_SELECT = {
+    id: true,
+    name: true,
+    sku: true,
+    unit: true,
+    quantity: true,
+    alertThreshold: true,
+    updatedAt: true,
+  } as const;
+
+  type StockRow = { quantity: number; alertThreshold: number };
+  const stockView = <T extends StockRow>(item: T) => ({
+    ...item,
+    belowThreshold: item.alertThreshold > 0 && item.quantity <= item.alertThreshold,
+  });
+
+  app.get("/stocks", { preHandler: businessRoute }, async (request) => {
+    const rows = await withTenant(request.tenantId, (tx) =>
+      tx.stockItem.findMany({ orderBy: { name: "asc" }, take: 501, select: STOCK_SELECT }),
+    );
+    // Troncature SIGNALÉE, jamais silencieuse (une alerte au-delà de la page
+    // ne doit pas disparaître sans trace).
+    const hasMore = rows.length > 500;
+    return { items: rows.slice(0, 500).map(stockView), hasMore };
+  });
+
+  const StockItemBody = z
+    .object({
+      name: z.string().min(1).max(200),
+      sku: z.string().max(100).nullable().optional(),
+      unit: z.string().min(1).max(50).optional(),
+      alertThreshold: z.number().int().min(0).max(1_000_000).optional(),
+    })
+    .strict();
+
+  app.post(
+    "/stocks",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const parsed = StockItemBody.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: "invalid stock item" });
+      const { name, sku, unit, alertThreshold } = parsed.data;
+      try {
+        const item = await withTenant(request.tenantId, (tx) =>
+          tx.stockItem.create({
+            data: {
+              tenantId: request.tenantId,
+              name,
+              ...(sku !== undefined ? { sku } : {}),
+              ...(unit !== undefined ? { unit } : {}),
+              ...(alertThreshold !== undefined ? { alertThreshold } : {}),
+            },
+            select: STOCK_SELECT,
+          }),
+        );
+        return reply.code(201).send({ item: stockView(item) });
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+          return reply.code(409).send({ error: "an item with this name already exists" });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.patch(
+    "/stocks/:id",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const { id } = z.object({ id: Uuid }).parse(request.params);
+      const parsed = StockItemBody.partial().safeParse(request.body);
+      if (!parsed.success || Object.keys(parsed.data).length === 0) {
+        return reply.code(400).send({ error: "invalid stock item" });
+      }
+      const fields = parsed.data;
+      const data: Prisma.StockItemUpdateInput = {};
+      if (fields.name !== undefined) data.name = fields.name;
+      if (fields.sku !== undefined) data.sku = fields.sku;
+      if (fields.unit !== undefined) data.unit = fields.unit;
+      if (fields.alertThreshold !== undefined) data.alertThreshold = fields.alertThreshold;
+      try {
+        const item = await withTenant(request.tenantId, async (tx) => {
+          const exists = await tx.stockItem.findUnique({ where: { id }, select: { id: true } });
+          if (!exists) return null;
+          return tx.stockItem.update({ where: { id }, data, select: STOCK_SELECT });
+        });
+        if (!item) return reply.code(404).send({ error: "not found" });
+        return { item: stockView(item) };
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+          return reply.code(409).send({ error: "an item with this name already exists" });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.delete(
+    "/stocks/:id",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const { id } = z.object({ id: Uuid }).parse(request.params);
+      const { count } = await withTenant(request.tenantId, (tx) =>
+        tx.stockItem.deleteMany({ where: { id, tenantId: request.tenantId } }),
+      );
+      if (count === 0) return reply.code(404).send({ error: "not found" });
+      return reply.code(204).send();
+    },
+  );
+
+  const MovementBody = z
+    .object({
+      delta: z
+        .number()
+        .int()
+        .min(-1_000_000)
+        .max(1_000_000)
+        .refine((value) => value !== 0, { message: "delta must not be zero" }),
+      reason: z.string().max(200).optional(),
+    })
+    .strict();
+
+  // Plafond de quantité : évite le débordement INTEGER par entrées répétées.
+  const MAX_STOCK_QUANTITY = 1_000_000_000;
+
+  app.post(
+    "/stocks/:id/movements",
+    // L'expert-comptable (tiers délégué) consulte mais ne sort pas de matériel.
+    { preHandler: [...businessRoute, requireRole(["owner", "member"])] },
+    async (request, reply) => {
+      const { id } = z.object({ id: Uuid }).parse(request.params);
+      const parsed = MovementBody.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: "invalid movement" });
+      const { delta, reason } = parsed.data;
+
+      const outcome = await withTenant(request.tenantId, async (tx) => {
+        const exists = await tx.stockItem.findUnique({ where: { id }, select: { id: true } });
+        if (!exists) return null;
+        // ATOMIQUE : plancher (0) et plafond appliqués DANS le même update
+        // conditionnel — deux sorties concurrentes ne franchissent jamais le
+        // zéro (audit RGPD 3.2), aucun read-modify-write en mémoire.
+        const { count } = await tx.stockItem.updateMany({
+          where: {
+            id,
+            quantity: {
+              gte: delta < 0 ? -delta : 0,
+              lte: MAX_STOCK_QUANTITY - Math.max(0, delta),
+            },
+          },
+          data: { quantity: { increment: delta } },
+        });
+        if (count === 0) return "conflict" as const;
+        await tx.stockMovement.create({
+          data: {
+            tenantId: request.tenantId,
+            itemId: id,
+            delta,
+            reason: reason ?? null,
+            createdBy: request.authSession.user.id,
+          },
+        });
+        return tx.stockItem.findUnique({ where: { id }, select: STOCK_SELECT });
+      });
+      if (outcome === null) return reply.code(404).send({ error: "not found" });
+      if (outcome === "conflict") {
+        return reply.code(409).send({ error: "insufficient stock" });
+      }
+      return { item: stockView(outcome!) };
+    },
+  );
+
+  app.get("/stocks/:id/movements", { preHandler: businessRoute }, async (request, reply) => {
+    const { id } = z.object({ id: Uuid }).parse(request.params);
+    const movements = await withTenant(request.tenantId, async (tx) => {
+      const exists = await tx.stockItem.findUnique({ where: { id }, select: { id: true } });
+      if (!exists) return null;
+      return tx.stockMovement.findMany({
+        where: { itemId: id },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+        select: { id: true, delta: true, reason: true, createdAt: true },
+      });
+    });
+    if (movements === null) return reply.code(404).send({ error: "not found" });
+    return { movements };
+  });
+
   /**
    * Cockpit v0 (ticket 1.7) — KPIs of the virtual employees' work. Counts are
    * metadata-only (visible to every member); the treasury forecast is the
@@ -1137,6 +1334,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const pendingActions: Record<string, number> = {};
     for (const row of byStatus) pendingActions[row.status] = row._count._all;
     const conversations = await withTenant(request.tenantId, (tx) => tx.agentConversation.count());
+
+    // Alertes stock (3.2) — métadonnée non financière, visible de tout membre.
+    // Compté côté SQL (comparaison colonne à colonne, RLS scelle au tenant) :
+    // jamais une troncature silencieuse du compteur.
+    const stockAlertRows = await withTenant(request.tenantId, (tx) =>
+      tx.$queryRaw<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM stock_items
+        WHERE alert_threshold > 0 AND quantity <= alert_threshold`,
+    );
+    const stockAlerts = stockAlertRows[0]?.count ?? 0;
 
     // Treasury via the SAME tenant-bound toolset as the agent (read-only,
     // OWNER-only — enforced by the toolset's role gate AND skipped here).
@@ -1179,7 +1386,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         await toolset?.close().catch(() => undefined);
       }
     }
-    return { pendingActions, conversations, treasury, sales };
+    return { pendingActions, conversations, stockAlerts, treasury, sales };
   });
 
   app.get("/notes", { preHandler: businessRoute }, async (request) => {

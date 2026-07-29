@@ -238,6 +238,13 @@ export default function CockpitPage() {
           <div className="big">{executed}</div>
           <span className="delta up">Après votre validation, jamais avant</span>
         </div>
+        {(kpis?.stockAlerts ?? 0) > 0 && (
+          <div className="card accent">
+            <span className="overline">Stocks sous seuil</span>
+            <div className="big">{kpis?.stockAlerts}</div>
+            <span className="delta down">À réapprovisionner — voir la page Stocks</span>
+          </div>
+        )}
       </div>
 
       <div className="cockpit-cols">

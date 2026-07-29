@@ -33,6 +33,10 @@ let fecInvoiceAId: string;
 let fecInvoiceBId: string;
 let classeurDocumentAId: string;
 let classeurDocumentBId: string;
+let stockItemAId: string;
+let stockItemBId: string;
+let stockMovementAId: string;
+let stockMovementBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -46,6 +50,9 @@ beforeAll(async () => {
   await admin.fecInvoice.deleteMany();
   await admin.fecImport.deleteMany();
   await admin.classeurDocument.deleteMany();
+  // FK order: movements before items.
+  await admin.stockMovement.deleteMany();
+  await admin.stockItem.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -307,6 +314,35 @@ beforeAll(async () => {
   );
   classeurDocumentAId = classeurDocumentA.id;
   classeurDocumentBId = classeurDocumentB.id;
+
+  // name/sku sont des placeholders de test, jamais un vrai article de stock client.
+  const stockItemA = await withTenant(tenantA, (tx) =>
+    tx.stockItem.create({
+      data: { tenantId: tenantA, name: "article A", sku: "SKU-A-1", quantity: 10, alertThreshold: 2 },
+    }),
+  );
+  const stockItemB = await withTenant(tenantB, (tx) =>
+    tx.stockItem.create({
+      data: { tenantId: tenantB, name: "article B", sku: "SKU-B-1", quantity: 5, alertThreshold: 1 },
+    }),
+  );
+  stockItemAId = stockItemA.id;
+  stockItemBId = stockItemB.id;
+
+  // reason est un placeholder de test ; createdBy simule un user de session, jamais
+  // un input client non recontrôlé.
+  const stockMovementA = await withTenant(tenantA, (tx) =>
+    tx.stockMovement.create({
+      data: { tenantId: tenantA, itemId: stockItemAId, delta: -3, reason: "vente A" },
+    }),
+  );
+  const stockMovementB = await withTenant(tenantB, (tx) =>
+    tx.stockMovement.create({
+      data: { tenantId: tenantB, itemId: stockItemBId, delta: 4, reason: "réappro B" },
+    }),
+  );
+  stockMovementAId = stockMovementA.id;
+  stockMovementBId = stockMovementB.id;
 });
 
 afterAll(async () => {
@@ -406,6 +442,22 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur classeur_documents", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'classeur_documents'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur stock_items", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'stock_items'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur stock_movements", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'stock_movements'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -773,6 +825,64 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (stock_items) — withTenant(A) ne voit QUE les articles de A", async () => {
+    const items = await withTenant(tenantA, (tx) => tx.stockItem.findMany());
+    expect(items).toHaveLength(1);
+    expect(items[0]?.id).toBe(stockItemAId);
+    expect(items.some((i) => i.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (stock_items) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const items = await prisma.stockItem.findMany();
+    expect(items).toHaveLength(0);
+  });
+
+  it("test 3 (stock_items) — lire l'article de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.stockItem.findUnique({ where: { id: stockItemBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (stock_items) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.stockItem.create({
+          data: { tenantId: tenantB, name: "intrusion", quantity: 0, alertThreshold: 0 },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 1 (stock_movements) — withTenant(A) ne voit QUE les mouvements de A", async () => {
+    const movements = await withTenant(tenantA, (tx) => tx.stockMovement.findMany());
+    expect(movements).toHaveLength(1);
+    expect(movements[0]?.id).toBe(stockMovementAId);
+    expect(movements.some((m) => m.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (stock_movements) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const movements = await prisma.stockMovement.findMany();
+    expect(movements).toHaveLength(0);
+  });
+
+  it("test 3 (stock_movements) — lire le mouvement de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.stockMovement.findUnique({ where: { id: stockMovementBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (stock_movements) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.stockMovement.create({
+          data: { tenantId: tenantB, itemId: stockItemBId, delta: -1, reason: "intrusion" },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -992,5 +1102,45 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const documents = await withTenant(tenantA, (tx) => tx.classeurDocument.findMany());
     expect(documents).toHaveLength(1);
+  });
+
+  it("policy désactivée sur stock_items => la fuite se produit aussi (les niveaux de stock des deux tenants deviennent visibles)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "stock_items" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.stockItem.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((i) => i.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.stockItem.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "stock_items" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "stock_items" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const items = await withTenant(tenantA, (tx) => tx.stockItem.findMany());
+    expect(items).toHaveLength(1);
+  });
+
+  it("policy désactivée sur stock_movements => la fuite se produit aussi (le journal APPEND-ONLY des mouvements des deux tenants devient visible)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "stock_movements" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.stockMovement.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((m) => m.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.stockMovement.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "stock_movements" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "stock_movements" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const movements = await withTenant(tenantA, (tx) => tx.stockMovement.findMany());
+    expect(movements).toHaveLength(1);
   });
 });
