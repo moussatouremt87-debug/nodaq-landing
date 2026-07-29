@@ -5,7 +5,7 @@ import { z } from "zod";
 import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
 import { prisma, Prisma, withOps, withTenant } from "@nodaq/db";
-import { deriveReceivables, parseFec } from "@nodaq/fec";
+import { deriveFixedAssets, deriveReceivables, parseFec } from "@nodaq/fec";
 import {
   BridgeClient,
   connectorSecretName,
@@ -20,7 +20,17 @@ import {
 import type { BankClient } from "@nodaq/mcp-connectors";
 import { defaultWritableProvider } from "@nodaq/secrets";
 import type { WritableSecretProvider } from "@nodaq/secrets";
-import { CreateNoteInput, TenantId, Uuid } from "@nodaq/shared";
+import {
+  ASSET_CATEGORIES,
+  CAPITALIZATION_THRESHOLD_CENTS,
+  CreateNoteInput,
+  estimateIsImpact,
+  buildDepreciationPlan,
+  renewalWall,
+  TenantId,
+  Uuid,
+} from "@nodaq/shared";
+import type { RegistryAsset } from "@nodaq/shared";
 import { auth } from "./auth.js";
 import { DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.js";
 import type { DocExtraction } from "./classeur.js";
@@ -774,6 +784,74 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             warnings: z.array(z.string()).catch([]).parse(outcome.existing.warnings),
           });
         }
+        // Immobilisations (2.19) : les comptes 2x/28x deviennent des
+        // PROPOSITIONS en file de validation — jamais une insertion
+        // silencieuse ; incohérences signalées dans le payload.
+        let assetProposals = 0;
+        const allProposals = deriveFixedAssets(parsed.entries);
+        const proposals = allProposals.slice(0, 200);
+        if (allProposals.length > 200) {
+          warnings.push("propositions d'immobilisations tronquées à 200");
+        }
+        try {
+          if (proposals.length > 0) {
+            assetProposals = await withTenant(request.tenantId, async (tx) => {
+              let count = 0;
+              for (const proposal of proposals) {
+              const sourceRef = `fec:${proposal.accountNum}`;
+              const existingAsset = await tx.fixedAsset.findFirst({
+                where: { source: "FEC", sourceRef },
+                select: { id: true },
+              });
+              if (existingAsset) continue;
+              const pendingProposal = await tx.pendingAction.findFirst({
+                where: {
+                  type: "create_fixed_asset",
+                  status: "pending",
+                  payload: { path: ["sourceRef"], equals: sourceRef },
+                },
+                select: { id: true },
+              });
+              if (pendingProposal) continue;
+              await tx.pendingAction.create({
+                data: {
+                  tenantId: request.tenantId,
+                  type: "create_fixed_asset",
+                  requestedBy: request.authSession.user.id,
+                  employee: "compta",
+                  payload: {
+                    label: proposal.label,
+                    category: proposal.category,
+                    inServiceDate: proposal.inServiceDate,
+                    baseCents: proposal.baseCents,
+                    durationMonths: ASSET_CATEGORIES[proposal.category].defaultMonths,
+                    method: "LINEAIRE",
+                    source: "FEC",
+                    sourceRef,
+                    priorDepreciationCents: proposal.priorDepreciationCents,
+                    warnings: proposal.warnings,
+                  },
+                },
+              });
+              count += 1;
+            }
+            return count;
+          }, { timeoutMs: 30_000 });
+            if (assetProposals > 0) {
+              void notifyPendingAction(request.tenantId).catch(() => undefined);
+            }
+          }
+        } catch (error) {
+          // Même règle que l'import : une erreur Prisma peut citer ses
+          // arguments (libellés/montants dérivés du FEC) — nom SEULEMENT,
+          // et l'import lui-même reste acquis (les propositions attendront
+          // un prochain import après purge).
+          request.log.warn(
+            { err: error instanceof Error ? error.name : "Error" },
+            "fixed asset proposals failed",
+          );
+          warnings.push("propositions d'immobilisations indisponibles (réessayez après purge FEC)");
+        }
         return reply.code(201).send({
           alreadyImported: false,
           entryCount: parsed.entries.length,
@@ -781,6 +859,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           invoiceCount: derivation.invoices.length,
           overdueCount: derivation.overdueCount,
           overdueCents: derivation.overdueCents,
+          fixedAssetProposals: assetProposals,
           warnings,
         });
       },
@@ -954,6 +1033,52 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
               select: DOC_SELECT,
             }),
           );
+          // Immobilisations (2.19) : facture d'équipement au-dessus du seuil
+          // -> SUGGESTION « immobiliser ? » en file de validation. JAMAIS
+          // automatique : la frontière charge/immo est une décision de gestion.
+          // Seuil ET base amortissable en HT UNIQUEMENT (audit 2.19) : un
+          // TTC amorti gonflerait la base de la TVA — pas de repli TTC.
+          const htCents =
+            extraction && extraction.totalExclTax !== null
+              ? Math.round(extraction.totalExclTax * 100)
+              : null;
+          if (
+            extraction &&
+            extraction.docType === "facture_fournisseur" &&
+            htCents !== null &&
+            htCents >= CAPITALIZATION_THRESHOLD_CENTS
+          ) {
+            await withTenant(request.tenantId, (tx) =>
+              tx.pendingAction.create({
+                data: {
+                  tenantId: request.tenantId,
+                  type: "create_fixed_asset",
+                  requestedBy: request.authSession.user.id,
+                  employee: "compta",
+                  payload: {
+                    label: extraction.supplierName
+                      ? `Équipement ${extraction.supplierName}`
+                      : "Équipement (facture photographiée)",
+                    category: "materiel",
+                    inServiceDate:
+                      extraction.docDate ?? new Date().toISOString().slice(0, 10),
+                    baseCents: htCents,
+                    durationMonths: ASSET_CATEGORIES.materiel.defaultMonths,
+                    method: "LINEAIRE",
+                    source: "DOCUMENT",
+                    sourceRef: `classeur:${document.id}`,
+                    priorDepreciationCents: 0,
+                    warnings: ["catégorie et durée proposées — à ajuster avant validation"],
+                  },
+                },
+              }),
+            ).catch((error: unknown) =>
+              request.log.warn(
+                { err: error instanceof Error ? error.name : "Error" },
+                "classeur asset suggestion failed",
+              ),
+            );
+          }
           // Doorbell 2.17 : le document traité notifie SON auteur (compteur
           // seul — jamais le contenu), regroupé avec les autres actions.
           void recordPushEvent(request.tenantId, [request.authSession.user.id], "actions").catch(
@@ -1929,6 +2054,175 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       byLevel: Object.fromEntries(byLevel.map((row) => [row.level ?? "?", row._count._all])),
       validatedIssues: issues,
     };
+  });
+
+  /*
+   * ── Immobilisations (2.19) ────────────────────────────────────────────────
+   * Registre à visée trésorerie/décision : on CALCULE, on n'écrit JAMAIS
+   * dans la comptabilité. OWNER-ONLY (patrimoine + valeurs financières).
+   * L'impact IS est une ESTIMATION labellisée ; le mur de renouvellement est
+   * un SCÉNARIO ; une dotation n'entre jamais comme décaissement.
+   */
+  const registryAsset = (row: {
+    id: string;
+    label: string;
+    baseCents: bigint;
+    inServiceDate: Date;
+    durationMonths: number;
+    method: string;
+    status: string;
+    renewalCostCents: bigint | null;
+  }): RegistryAsset => ({
+    id: row.id,
+    label: row.label,
+    baseCents: Number(row.baseCents),
+    inServiceDate: row.inServiceDate,
+    durationMonths: row.durationMonths,
+    method: row.method === "DEGRESSIF" ? "DEGRESSIF" : "LINEAIRE",
+    renewalCostCents: row.renewalCostCents === null ? null : Number(row.renewalCostCents),
+    status: row.status,
+  });
+
+  const ownerRoute = [...businessRoute, requireRole(["owner"])];
+
+  app.get("/immobilisations", { preHandler: ownerRoute }, async (request) => {
+    const rows = await withTenant(request.tenantId, (tx) =>
+      tx.fixedAsset.findMany({
+        orderBy: [{ status: "asc" }, { inServiceDate: "asc" }],
+        take: 500,
+      }),
+    );
+    const now = new Date();
+    const year = now.getUTCFullYear();
+    const assets = rows.map((row) => {
+      const model = registryAsset(row);
+      const plan = buildDepreciationPlan(model);
+      // Reprise FEC 28x consommée (audit 2.19) : le cumul affiché est AU
+      // MOINS celui des livres — la VNC recalculée ne contredit jamais un
+      // amortissement déjà constaté par le comptable.
+      const recomputed = plan.lines.filter((l) => l.year <= year).at(-1)?.cumulativeCents ?? 0;
+      const cumulative = Math.min(
+        model.baseCents,
+        Math.max(recomputed, Number(row.priorDepreciationCents)),
+      );
+      const bookValue = model.baseCents - cumulative;
+      return {
+        id: row.id,
+        label: row.label,
+        category: row.category,
+        inServiceDate: row.inServiceDate.toISOString().slice(0, 10),
+        baseCents: Number(row.baseCents),
+        durationMonths: row.durationMonths,
+        method: row.method,
+        source: row.source,
+        status: row.status,
+        renewalCostCents: row.renewalCostCents === null ? null : Number(row.renewalCostCents),
+        bookValueCents: bookValue,
+        wearRatio: model.baseCents > 0 ? cumulative / model.baseCents : 0,
+        planEndYear: plan.lines.at(-1)?.year ?? null,
+      };
+    });
+    const active = rows.filter((r) => r.status === "ACTIF").map(registryAsset);
+    return {
+      assets,
+      totalBookValueCents: assets
+        .filter((a) => a.status === "ACTIF")
+        .reduce((sum, a) => sum + a.bookValueCents, 0),
+      renewalWall: renewalWall(active, now, 24),
+      isImpact: estimateIsImpact(active, now),
+    };
+  });
+
+  app.get("/immobilisations/:id/plan", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid id" });
+    const row = await withTenant(request.tenantId, (tx) =>
+      tx.fixedAsset.findUnique({ where: { id: params.data.id } }),
+    );
+    if (!row) return reply.code(404).send({ error: "unknown asset" });
+    return { plan: buildDepreciationPlan(registryAsset(row)).lines };
+  });
+
+  const FixedAssetBody = z
+    .object({
+      label: z.string().min(1).max(200),
+      category: z.enum(["informatique", "logiciel", "vehicule", "materiel", "mobilier", "agencement"]),
+      inServiceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      baseCents: z.number().int().min(1).max(10_000_000_000),
+      durationMonths: z.number().int().min(1).max(600),
+      method: z.enum(["LINEAIRE", "DEGRESSIF"]).default("LINEAIRE"),
+    })
+    .strict()
+    // CGI 39 A : dégressif réservé aux catégories éligibles (config sourcée).
+    .refine(
+      (data) => data.method !== "DEGRESSIF" || ASSET_CATEGORIES[data.category].decliningAllowed,
+      { message: "dégressif non admis pour cette catégorie" },
+    );
+
+  // Saisie MANUELLE : c'est déjà la décision humaine — création directe owner.
+  app.post("/immobilisations", { preHandler: ownerRoute }, async (request, reply) => {
+    const parsed = FixedAssetBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    const asset = await withTenant(request.tenantId, (tx) =>
+      tx.fixedAsset.create({
+        data: {
+          tenantId: request.tenantId,
+          label: parsed.data.label,
+          category: parsed.data.category,
+          inServiceDate: new Date(`${parsed.data.inServiceDate}T00:00:00Z`),
+          baseCents: BigInt(parsed.data.baseCents),
+          durationMonths: parsed.data.durationMonths,
+          method: parsed.data.method,
+          source: "MANUEL",
+        },
+        select: { id: true },
+      }),
+    );
+    return reply.code(201).send({ id: asset.id });
+  });
+
+  const FixedAssetPatch = z
+    .object({
+      renewalCostCents: z.number().int().min(0).max(10_000_000_000).nullable().optional(),
+      status: z.enum(["ACTIF", "CEDE", "SORTI"]).optional(),
+      disposedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    })
+    .strict()
+    .refine((b) => Object.keys(b).length > 0, { message: "empty patch" })
+    // Une cession/sortie sans date fausserait le plan : date obligatoire.
+    .refine(
+      (b) => !(b.status === "CEDE" || b.status === "SORTI") || typeof b.disposedAt === "string",
+      { message: "disposedAt required when disposing" },
+    );
+
+  app.patch("/immobilisations/:id", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    const body = FixedAssetPatch.safeParse(request.body);
+    if (!params.success || !body.success) return reply.code(400).send({ error: "invalid payload" });
+    const updated = await withTenant(request.tenantId, (tx) =>
+      tx.fixedAsset.updateMany({
+        where: { id: params.data.id },
+        data: {
+          ...(body.data.renewalCostCents !== undefined
+            ? {
+                renewalCostCents:
+                  body.data.renewalCostCents === null ? null : BigInt(body.data.renewalCostCents),
+              }
+            : {}),
+          ...(body.data.status !== undefined ? { status: body.data.status } : {}),
+          ...(body.data.disposedAt !== undefined
+            ? {
+                disposedAt:
+                  body.data.disposedAt === null
+                    ? null
+                    : new Date(`${body.data.disposedAt}T00:00:00Z`),
+              }
+            : {}),
+        },
+      }),
+    );
+    if (updated.count === 0) return reply.code(404).send({ error: "unknown asset" });
+    return { updated: true };
   });
 
   return app;

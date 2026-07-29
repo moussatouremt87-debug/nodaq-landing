@@ -41,6 +41,8 @@ let pushSubscriptionAId: string;
 let pushSubscriptionBId: string;
 let pushDispatchStateAId: string;
 let pushDispatchStateBId: string;
+let fixedAssetAId: string;
+let fixedAssetBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -59,6 +61,7 @@ beforeAll(async () => {
   await admin.stockItem.deleteMany();
   await admin.pushSubscription.deleteMany();
   await admin.pushDispatchState.deleteMany();
+  await admin.fixedAsset.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -392,6 +395,34 @@ beforeAll(async () => {
   );
   pushDispatchStateAId = pushDispatchStateA.id;
   pushDispatchStateBId = pushDispatchStateB.id;
+
+  // label/sourceRef sont des placeholders de test, jamais une vraie immobilisation client.
+  const fixedAssetA = await withTenant(tenantA, (tx) =>
+    tx.fixedAsset.create({
+      data: {
+        tenantId: tenantA,
+        label: "ordinateur A",
+        category: "informatique",
+        inServiceDate: new Date("2025-01-01"),
+        baseCents: 120000n,
+        durationMonths: 36,
+      },
+    }),
+  );
+  const fixedAssetB = await withTenant(tenantB, (tx) =>
+    tx.fixedAsset.create({
+      data: {
+        tenantId: tenantB,
+        label: "véhicule B",
+        category: "vehicule",
+        inServiceDate: new Date("2025-02-01"),
+        baseCents: 2500000n,
+        durationMonths: 60,
+      },
+    }),
+  );
+  fixedAssetAId = fixedAssetA.id;
+  fixedAssetBId = fixedAssetB.id;
 });
 
 afterAll(async () => {
@@ -523,6 +554,14 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur push_dispatch_states", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'push_dispatch_states'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur fixed_assets", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'fixed_assets'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -1012,6 +1051,42 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (fixed_assets) — withTenant(A) ne voit QUE les immobilisations de A", async () => {
+    const assets = await withTenant(tenantA, (tx) => tx.fixedAsset.findMany());
+    expect(assets).toHaveLength(1);
+    expect(assets[0]?.id).toBe(fixedAssetAId);
+    expect(assets.some((a) => a.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (fixed_assets) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const assets = await prisma.fixedAsset.findMany();
+    expect(assets).toHaveLength(0);
+  });
+
+  it("test 3 (fixed_assets) — lire l'immobilisation de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.fixedAsset.findUnique({ where: { id: fixedAssetBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (fixed_assets) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.fixedAsset.create({
+          data: {
+            tenantId: tenantB,
+            label: "intrusion",
+            category: "informatique",
+            inServiceDate: new Date("2025-03-01"),
+            baseCents: 1000n,
+            durationMonths: 12,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -1311,5 +1386,25 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const states = await withTenant(tenantA, (tx) => tx.pushDispatchState.findMany());
     expect(states).toHaveLength(1);
+  });
+
+  it("policy désactivée sur fixed_assets => la fuite se produit aussi (le registre des immobilisations des deux tenants devient visible)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "fixed_assets" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.fixedAsset.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((a) => a.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.fixedAsset.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "fixed_assets" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "fixed_assets" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const assets = await withTenant(tenantA, (tx) => tx.fixedAsset.findMany());
+    expect(assets).toHaveLength(1);
   });
 });

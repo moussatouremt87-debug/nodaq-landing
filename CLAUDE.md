@@ -56,6 +56,14 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > re-notif avant ouverture de la file ; opt-in par appareil/type, `push_subscriptions`
 > RLS ; dispatch = sweep Postgres en process (BullMQ quand Redis existera)
 > (`docs/notifications-push.md`).
+> **Immobilisations (2.19)** : règles fiscales = CONFIG VERSIONNÉE DATÉE sourcée
+> (`frenchTax.ts` — IS, acomptes, coefficients 39 A, durées, seuil 500 € HT) ; moteur pur
+> `depreciation.ts` (linéaire 360 j, dégressif à bascule gelée, cession) vérifié à la
+> main ; registre `fixed_assets` (RLS) alimenté par FEC 2x/28x + classeur + saisie —
+> TOUJOURS via propositions `create_fixed_asset` validées (jamais d'insertion
+> silencieuse) ; AMORTISSEMENT ≠ DÉCAISSEMENT (garde testée) : seuls l'économie d'IS
+> ESTIMÉE (labellisée expert-comptable) et le CAPEX de renouvellement (scénario)
+> touchent la trésorerie ; owner-only (`docs/immobilisations.md`).
 > **Support (2.18)** : schéma Postgres `ops` (tables `support_tickets`/`support_issues`)
 > hors RLS métier MAIS sous RLS gated `app.ops_operator` — accès UNIQUEMENT via
 > `withOps()` + routes OPERATOR (allowlist `OPS_OPERATOR_USER_IDS`, 404 sinon) ;

@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { prisma, withTenant } from "@nodaq/db";
 import { buildToolset } from "@nodaq/agent-runtime";
+import { endOfLifeAssets } from "@nodaq/shared";
+import type { RegistryAsset } from "@nodaq/shared";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
 
 /*
@@ -377,6 +379,26 @@ export async function checkTenantUrgentAlerts(
       if (critical > 0) alerts += critical;
     } catch {
       // No invoicing connector: nothing to alert on.
+    }
+    try {
+      // Fin de vie d'immobilisation (2.19) : >= 80 % amorti -> alerte owner.
+      // Payload minimal comme toujours — jamais le nom de l'asset.
+      const rows = await withTenant(tenantId, (tx) =>
+        tx.fixedAsset.findMany({ where: { status: "ACTIF" } }),
+      );
+      const models: RegistryAsset[] = rows.map((row) => ({
+        id: row.id,
+        label: row.label,
+        baseCents: Number(row.baseCents),
+        inServiceDate: row.inServiceDate,
+        durationMonths: row.durationMonths,
+        method: row.method === "DEGRESSIF" ? "DEGRESSIF" : "LINEAIRE",
+        renewalCostCents: row.renewalCostCents === null ? null : Number(row.renewalCostCents),
+        status: row.status,
+      }));
+      alerts += endOfLifeAssets(models, now).length;
+    } catch {
+      // Registre vide ou indisponible : pas d'alerte immobilisations.
     }
   } finally {
     await toolset.close().catch(() => undefined);

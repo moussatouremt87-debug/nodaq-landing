@@ -81,7 +81,58 @@ function actionLine(action: PendingActionSummary, detail: PendingActionDetail | 
         .join(" · "),
     };
   }
+  if (action.type === "create_fixed_asset" && payload) {
+    return {
+      title: `Immobilisation — ${asString(payload.label) ?? "?"}`,
+      meta: [
+        asString(payload.category),
+        asNumber(payload.baseCents) !== null
+          ? formatEuroCents(asNumber(payload.baseCents) ?? 0)
+          : null,
+        asNumber(payload.durationMonths) !== null
+          ? `${Math.round((asNumber(payload.durationMonths) ?? 0) / 12)} ans`
+          : null,
+        asString(payload.source),
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
   return { title: actionTypeLabel(action.type), meta: "" };
+}
+
+/** Détail lisible d'une proposition d'immobilisation (2.19) : l'owner doit
+ * VOIR base, durée, méthode et surtout les incohérences signalées avant
+ * d'approuver — sinon la validation 1 clic est aveugle. */
+function FixedAssetProposal({ payload }: { payload: Dict }) {
+  const warnings = Array.isArray(payload.warnings)
+    ? payload.warnings.filter((w): w is string => typeof w === "string")
+    : [];
+  return (
+    <div>
+      <p>
+        <strong>{asString(payload.label) ?? "?"}</strong> — {asString(payload.category)} ·{" "}
+        {formatEuroCents(asNumber(payload.baseCents) ?? 0)} ·{" "}
+        {Math.round((asNumber(payload.durationMonths) ?? 0) / 12)} ans ({asString(payload.method)})
+      </p>
+      <p className="muted">
+        Mise en service : {asString(payload.inServiceDate) ?? "?"} · source :{" "}
+        {asString(payload.source) ?? "?"}
+        {asNumber(payload.priorDepreciationCents) ? (
+          <> · amortissements repris : {formatEuroCents(asNumber(payload.priorDepreciationCents) ?? 0)}</>
+        ) : null}
+      </p>
+      {warnings.map((warning) => (
+        <p key={warning} className="warn">
+          ⚠ {warning}
+        </p>
+      ))}
+      <p className="muted">
+        Catégorie ou durée à ajuster ? Rejetez, puis saisissez manuellement dans la page
+        Immobilisations.
+      </p>
+    </div>
+  );
 }
 
 /** Objet d'e-mail dérivé des faits (le brouillon est le corps). */
@@ -344,13 +395,18 @@ export default function ValidationPage() {
                 <div className="titles">
                   <div className="title">Aperçu — {selectedLine?.title ?? "…"}</div>
                 </div>
-                <span className="tag-souverain">Souverain · rédigé par Mistral EU</span>
+                {hasDraft && (
+                  <span className="tag-souverain">Souverain · rédigé par Mistral EU</span>
+                )}
               </div>
 
               {detailNotice && <p className="hint">{detailNotice}</p>}
               {!detail && !detailNotice && <p className="hint">Chargement…</p>}
 
-              {detailPayload && (
+              {detailPayload && selectedSummary?.type === "create_fixed_asset" && (
+                <FixedAssetProposal payload={detailPayload} />
+              )}
+              {detailPayload && selectedSummary?.type !== "create_fixed_asset" && (
                 <>
                   <div className="meta-row">
                     {invoice && (
