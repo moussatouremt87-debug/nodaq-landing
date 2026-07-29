@@ -26,6 +26,14 @@ import { DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.
 import type { DocExtraction } from "./classeur.js";
 import { defaultExecutors } from "./executors.js";
 import type { ExecutorRegistry } from "./executors.js";
+import {
+  isAllowedPushEndpoint,
+  markPushSeen,
+  MAX_PUSH_DEVICES_PER_USER,
+  PushCategorySchema,
+  recordPushEvent,
+  tenantOwnerIds,
+} from "./push.js";
 
 export interface BuildAppOptions {
   /** Executors for approved pending actions (injectable in tests). */
@@ -120,6 +128,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const agentContext = { secretProvider: vault, ...options.agentContext };
   const app = Fastify({ logger: process.env.NODE_ENV !== "test" });
 
+  // Push doorbell (2.17): one more pending action -> the tenant's OWNERS (the
+  // validators) get an "actions" event, grouped by the dispatch window.
+  const notifyPendingAction = async (tenantId: string): Promise<void> => {
+    await recordPushEvent(tenantId, await tenantOwnerIds(tenantId), "actions");
+  };
+
   // Last rampart against detail leaks: an unhandled error must never echo its
   // message (internal URLs, secret refs) to the client — name only, log full.
   app.setErrorHandler((error: unknown, request, reply) => {
@@ -183,6 +197,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // reserved to the owner-gated detail endpoint (RGPD audit 1.5 — the
   // `accountant` role is a delegated third party).
   app.get("/pending-actions", { preHandler: businessRoute }, async (request) => {
+    // Opening the validation queue = the "actions" push events are SEEN:
+    // counter resets, re-notification unlocked (anti-spam rule of 2.17).
+    void markPushSeen(request.tenantId, request.authSession.user.id, "actions").catch(
+      () => undefined,
+    );
     return withTenant(request.tenantId, (tx) =>
       tx.pendingAction.findMany({
         orderBy: { createdAt: "desc" },
@@ -419,6 +438,17 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       requestedBy: request.authSession.user.id,
       // The toolset filters owner-only tools (treasury) on this role.
       role: request.membershipRole,
+      // Push doorbell (2.17): a prepared pending_action notifies the OWNERS
+      // (the validators). Fire-and-forget — a push failure must never break
+      // the chat; and no data crosses this callback by design.
+      onPendingAction: () => {
+        void notifyPendingAction(request.tenantId).catch((error: unknown) => {
+          request.log.warn(
+            { err: error instanceof Error ? error.name : "Error" },
+            "push record failed",
+          );
+        });
+      },
     });
     try {
       await agentRuntime.run(body.data.message, {
@@ -915,6 +945,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
               select: DOC_SELECT,
             }),
           );
+          // Doorbell 2.17 : le document traité notifie SON auteur (compteur
+          // seul — jamais le contenu), regroupé avec les autres actions.
+          void recordPushEvent(request.tenantId, [request.authSession.user.id], "actions").catch(
+            (error: unknown) => {
+              request.log.warn(
+                { err: error instanceof Error ? error.name : "Error" },
+                "push record failed",
+              );
+            },
+          );
           return reply.code(201).send({ alreadyImported: false, document });
         } catch (error) {
           request.log.error(
@@ -1358,6 +1398,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
    * delegated-third-party reasoning as the pending-action detail, audit 1.5).
    */
   app.get("/cockpit/kpis", { preHandler: businessRoute }, async (request) => {
+    // Opening the cockpit = the "alerts" push events are seen (2.17).
+    void markPushSeen(request.tenantId, request.authSession.user.id, "alerts").catch(
+      () => undefined,
+    );
     const byStatus = await withTenant(request.tenantId, (tx) =>
       tx.pendingAction.groupBy({ by: ["status"], _count: { _all: true } }),
     );
@@ -1434,6 +1478,180 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       tx.note.create({ data: { ...parsed.data, tenantId: request.tenantId } }),
     );
     return reply.code(201).send(note);
+  });
+
+  /*
+   * Notifications push Web (2.17). Opt-in par appareil, préférences par type,
+   * révocation — chaîne d'auth complète, subscription rattachée à l'user de
+   * session. Les clés de subscription ENTRENT et ne ressortent jamais : les
+   * réponses ne contiennent ni endpoint ni p256dh/auth (minimisation).
+   * Sans clés VAPID au coffre, la feature dégrade en 503 « non configuré ».
+   */
+  const pushConfigured = (): boolean =>
+    Boolean(process.env.PUSH_VAPID_PUBLIC_KEY && process.env.PUSH_VAPID_PRIVATE_KEY);
+
+  const PUSH_DEVICE_SELECT = {
+    id: true,
+    userAgent: true,
+    actionsEnabled: true,
+    alertsEnabled: true,
+    createdAt: true,
+    lastUsedAt: true,
+  } as const;
+
+  app.get("/push/config", { preHandler: businessRoute }, async () => ({
+    configured: pushConfigured(),
+    vapidPublicKey: process.env.PUSH_VAPID_PUBLIC_KEY ?? null,
+  }));
+
+  const PushSubscriptionBody = z
+    .object({
+      // Anti-SSRF (audit 2.17) : le serveur émettra des requêtes vers cette
+      // URL — https + services push des navigateurs UNIQUEMENT.
+      endpoint: z.string().url().max(1_000).refine(isAllowedPushEndpoint, {
+        message: "endpoint must be a browser push service",
+      }),
+      keys: z
+        .object({ p256dh: z.string().min(1).max(300), auth: z.string().min(1).max(200) })
+        .strict(),
+      userAgent: z.string().max(200).optional(),
+      actionsEnabled: z.boolean().optional(),
+      alertsEnabled: z.boolean().optional(),
+    })
+    .strict();
+
+  app.post("/push/subscriptions", { preHandler: businessRoute }, async (request, reply) => {
+    if (!pushConfigured()) {
+      return reply.code(503).send({ error: "notifications push non configurées" });
+    }
+    const parsed = PushSubscriptionBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    const { endpoint, keys, userAgent, actionsEnabled, alertsEnabled } = parsed.data;
+    const userId = request.authSession.user.id;
+    try {
+      const subscription = await withTenant(request.tenantId, async (tx) => {
+        // Plafond anti-amplification : chaque appareil = des envois réseau
+        // du serveur à chaque sweep.
+        const deviceCount = await tx.pushSubscription.count({ where: { userId } });
+        if (deviceCount >= MAX_PUSH_DEVICES_PER_USER) {
+          throw Object.assign(new Error("device limit"), { statusCode: 429 });
+        }
+        const existing = await tx.pushSubscription.findFirst({ where: { endpoint } });
+        if (existing) {
+          // Même appareil re-souscrit (clés régénérées par le navigateur) :
+          // il doit appartenir au même utilisateur — un endpoint = un
+          // propriétaire, jamais de transfert silencieux.
+          if (existing.userId !== userId) return null;
+          return tx.pushSubscription.update({
+            where: { id: existing.id },
+            data: {
+              p256dh: keys.p256dh,
+              auth: keys.auth,
+              ...(userAgent !== undefined ? { userAgent } : {}),
+              ...(actionsEnabled !== undefined ? { actionsEnabled } : {}),
+              ...(alertsEnabled !== undefined ? { alertsEnabled } : {}),
+            },
+            select: PUSH_DEVICE_SELECT,
+          });
+        }
+        return tx.pushSubscription.create({
+          data: {
+            tenantId: request.tenantId,
+            userId,
+            endpoint,
+            p256dh: keys.p256dh,
+            auth: keys.auth,
+            userAgent: userAgent ?? null,
+            ...(actionsEnabled !== undefined ? { actionsEnabled } : {}),
+            ...(alertsEnabled !== undefined ? { alertsEnabled } : {}),
+          },
+          select: PUSH_DEVICE_SELECT,
+        });
+      });
+      if (!subscription) {
+        // Message UNIQUE pour tous les conflits (audit 2.17) : ne confirme
+        // jamais où ni par qui l'endpoint est déjà enregistré.
+        return reply.code(409).send({ error: "appareil déjà enregistré" });
+      }
+      return reply.code(201).send(subscription);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return reply.code(409).send({ error: "appareil déjà enregistré" });
+      }
+      if (error instanceof Error && "statusCode" in error && error.statusCode === 429) {
+        return reply.code(429).send({ error: "limite d'appareils atteinte pour ce compte" });
+      }
+      throw error;
+    }
+  });
+
+  // SES appareils uniquement : la liste est par utilisateur, pas par tenant.
+  app.get("/push/subscriptions", { preHandler: businessRoute }, async (request) => {
+    return withTenant(request.tenantId, (tx) =>
+      tx.pushSubscription.findMany({
+        where: { userId: request.authSession.user.id },
+        orderBy: { createdAt: "desc" },
+        select: PUSH_DEVICE_SELECT,
+      }),
+    );
+  });
+
+  const PushPrefsBody = z
+    .object({ actionsEnabled: z.boolean().optional(), alertsEnabled: z.boolean().optional() })
+    .strict()
+    .refine((body) => body.actionsEnabled !== undefined || body.alertsEnabled !== undefined, {
+      message: "at least one preference required",
+    });
+
+  app.patch("/push/subscriptions/:id", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    const parsed = PushPrefsBody.safeParse(request.body);
+    if (!params.success || !parsed.success) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    const updated = await withTenant(request.tenantId, (tx) =>
+      tx.pushSubscription.updateMany({
+        // Scopé à l'utilisateur de session : on ne règle jamais l'appareil
+        // d'un collègue, même owner.
+        where: { id: params.data.id, userId: request.authSession.user.id },
+        data: {
+          ...(parsed.data.actionsEnabled !== undefined
+            ? { actionsEnabled: parsed.data.actionsEnabled }
+            : {}),
+          ...(parsed.data.alertsEnabled !== undefined
+            ? { alertsEnabled: parsed.data.alertsEnabled }
+            : {}),
+        },
+      }),
+    );
+    if (updated.count === 0) return reply.code(404).send({ error: "unknown device" });
+    return { updated: true };
+  });
+
+  app.delete("/push/subscriptions/:id", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    const deleted = await withTenant(request.tenantId, (tx) =>
+      tx.pushSubscription.deleteMany({
+        where: { id: params.data.id, userId: request.authSession.user.id },
+      }),
+    );
+    if (deleted.count === 0) return reply.code(404).send({ error: "unknown device" });
+    return { revoked: true };
+  });
+
+  // Marquage explicite « j'ai vu » (le web l'appelle à l'ouverture de la file
+  // de validation) — GET /pending-actions et /cockpit/kpis le font déjà.
+  app.post("/push/seen", { preHandler: businessRoute }, async (request, reply) => {
+    const parsed = z
+      .object({ category: PushCategorySchema })
+      .strict()
+      .safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    await markPushSeen(request.tenantId, request.authSession.user.id, parsed.data.category);
+    return { seen: true };
   });
 
   return app;

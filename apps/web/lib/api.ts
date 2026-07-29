@@ -437,6 +437,56 @@ export const listStockMovements = (id: string): Promise<StockMovement[]> =>
     `/stocks/${encodeURIComponent(id)}/movements`,
   ).then((r) => r.movements);
 
+/*
+ * Notifications push (2.17). Les clés de subscription MONTENT vers l'API et
+ * ne redescendent jamais : PushDevice ne contient ni endpoint ni clés.
+ */
+
+export const PushConfig = z.object({
+  configured: z.boolean(),
+  vapidPublicKey: z.string().nullable(),
+});
+export type PushConfig = z.infer<typeof PushConfig>;
+
+export const PushDevice = z.object({
+  id: z.string(),
+  userAgent: z.string().nullable(),
+  actionsEnabled: z.boolean(),
+  alertsEnabled: z.boolean(),
+  createdAt: z.string(),
+  lastUsedAt: z.string().nullable(),
+});
+export type PushDevice = z.infer<typeof PushDevice>;
+
+export const getPushConfig = (): Promise<PushConfig> => call(PushConfig, "/push/config");
+
+export const listPushDevices = (): Promise<PushDevice[]> =>
+  call(z.array(PushDevice), "/push/subscriptions");
+
+export const registerPushDevice = (subscription: {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+  userAgent?: string;
+}): Promise<PushDevice> =>
+  call(PushDevice, "/push/subscriptions", {
+    method: "POST",
+    body: JSON.stringify(subscription),
+  });
+
+export const updatePushDevice = (
+  id: string,
+  prefs: { actionsEnabled?: boolean; alertsEnabled?: boolean },
+): Promise<{ updated: boolean }> =>
+  call(z.object({ updated: z.boolean() }), `/push/subscriptions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(prefs),
+  });
+
+export const revokePushDevice = (id: string): Promise<{ revoked: boolean }> =>
+  call(z.object({ revoked: z.boolean() }), `/push/subscriptions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {

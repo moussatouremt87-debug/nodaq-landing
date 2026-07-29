@@ -37,6 +37,10 @@ let stockItemAId: string;
 let stockItemBId: string;
 let stockMovementAId: string;
 let stockMovementBId: string;
+let pushSubscriptionAId: string;
+let pushSubscriptionBId: string;
+let pushDispatchStateAId: string;
+let pushDispatchStateBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -53,6 +57,8 @@ beforeAll(async () => {
   // FK order: movements before items.
   await admin.stockMovement.deleteMany();
   await admin.stockItem.deleteMany();
+  await admin.pushSubscription.deleteMany();
+  await admin.pushDispatchState.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -343,6 +349,49 @@ beforeAll(async () => {
   );
   stockMovementAId = stockMovementA.id;
   stockMovementBId = stockMovementB.id;
+
+  // endpoint/p256dh/auth sont des placeholders de test, jamais un vrai
+  // abonnement Web Push d'appareil client.
+  const pushSubscriptionA = await withTenant(tenantA, (tx) =>
+    tx.pushSubscription.create({
+      data: {
+        tenantId: tenantA,
+        userId: tenantA,
+        endpoint: "https://push.example.com/a",
+        p256dh: "p256dh-a",
+        auth: "auth-a",
+        userAgent: "UA-A",
+      },
+    }),
+  );
+  const pushSubscriptionB = await withTenant(tenantB, (tx) =>
+    tx.pushSubscription.create({
+      data: {
+        tenantId: tenantB,
+        userId: tenantB,
+        endpoint: "https://push.example.com/b",
+        p256dh: "p256dh-b",
+        auth: "auth-b",
+        userAgent: "UA-B",
+      },
+    }),
+  );
+  pushSubscriptionAId = pushSubscriptionA.id;
+  pushSubscriptionBId = pushSubscriptionB.id;
+
+  // état de regroupement anti-spam — placeholder de test.
+  const pushDispatchStateA = await withTenant(tenantA, (tx) =>
+    tx.pushDispatchState.create({
+      data: { tenantId: tenantA, userId: tenantA, category: "actions", pendingCount: 1 },
+    }),
+  );
+  const pushDispatchStateB = await withTenant(tenantB, (tx) =>
+    tx.pushDispatchState.create({
+      data: { tenantId: tenantB, userId: tenantB, category: "alerts", pendingCount: 2 },
+    }),
+  );
+  pushDispatchStateAId = pushDispatchStateA.id;
+  pushDispatchStateBId = pushDispatchStateB.id;
 });
 
 afterAll(async () => {
@@ -458,6 +507,22 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur stock_movements", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'stock_movements'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur push_subscriptions", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'push_subscriptions'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur push_dispatch_states", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'push_dispatch_states'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -883,6 +948,70 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (push_subscriptions) — withTenant(A) ne voit QUE les abonnements de A", async () => {
+    const subscriptions = await withTenant(tenantA, (tx) => tx.pushSubscription.findMany());
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]?.id).toBe(pushSubscriptionAId);
+    expect(subscriptions.some((s) => s.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (push_subscriptions) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const subscriptions = await prisma.pushSubscription.findMany();
+    expect(subscriptions).toHaveLength(0);
+  });
+
+  it("test 3 (push_subscriptions) — lire l'abonnement de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.pushSubscription.findUnique({ where: { id: pushSubscriptionBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (push_subscriptions) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.pushSubscription.create({
+          data: {
+            tenantId: tenantB,
+            userId: tenantB,
+            endpoint: "https://push.example.com/intrusion",
+            p256dh: "p256dh-intrusion",
+            auth: "auth-intrusion",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 1 (push_dispatch_states) — withTenant(A) ne voit QUE l'état de A", async () => {
+    const states = await withTenant(tenantA, (tx) => tx.pushDispatchState.findMany());
+    expect(states).toHaveLength(1);
+    expect(states[0]?.id).toBe(pushDispatchStateAId);
+    expect(states.some((s) => s.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (push_dispatch_states) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const states = await prisma.pushDispatchState.findMany();
+    expect(states).toHaveLength(0);
+  });
+
+  it("test 3 (push_dispatch_states) — lire l'état de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.pushDispatchState.findUnique({ where: { id: pushDispatchStateBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (push_dispatch_states) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.pushDispatchState.create({
+          data: { tenantId: tenantB, userId: tenantB, category: "intrusion", pendingCount: 0 },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -1142,5 +1271,45 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const movements = await withTenant(tenantA, (tx) => tx.stockMovement.findMany());
     expect(movements).toHaveLength(1);
+  });
+
+  it("policy désactivée sur push_subscriptions => la fuite se produit aussi (les clés Web Push des deux tenants deviennent visibles)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "push_subscriptions" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.pushSubscription.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((s) => s.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.pushSubscription.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "push_subscriptions" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "push_subscriptions" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const subscriptions = await withTenant(tenantA, (tx) => tx.pushSubscription.findMany());
+    expect(subscriptions).toHaveLength(1);
+  });
+
+  it("policy désactivée sur push_dispatch_states => la fuite se produit aussi (l'état de regroupement anti-spam des deux tenants devient visible)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "push_dispatch_states" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.pushDispatchState.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((s) => s.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.pushDispatchState.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "push_dispatch_states" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "push_dispatch_states" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const states = await withTenant(tenantA, (tx) => tx.pushDispatchState.findMany());
+    expect(states).toHaveLength(1);
   });
 });
