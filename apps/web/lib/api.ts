@@ -65,6 +65,8 @@ export type PendingActionSummary = z.infer<typeof PendingActionSummary>;
 export const CockpitKpis = z.object({
   pendingActions: z.record(z.number()),
   conversations: z.number(),
+  /** Articles sous leur seuil d'alerte (3.2) — visible de tout membre. */
+  stockAlerts: z.number(),
   treasury: z
     .object({
       account: z.string(),

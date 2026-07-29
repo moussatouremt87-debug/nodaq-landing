@@ -38,6 +38,9 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > **Prévision ventes (3.1)** : modèle pur explicable (`salesForecast.ts`, régression
 > clampée) sur les factures de l'interface Pennylane (réel/démo/FEC) — outil
 > `forecast_sales` et carte cockpit OWNER-ONLY (`docs/prevision-ventes.md`).
+> **Stocks (3.2)** : `stock_items`/`stock_movements` (append-only, plancher 0, RLS) —
+> ajustements membre, référentiel owner, alertes sous seuil (cockpit/page/chat),
+> outil `adjust_stock` HITL = premier exécuteur RÉEL (`docs/stocks.md`).
 
 ---
 

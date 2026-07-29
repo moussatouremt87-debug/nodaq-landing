@@ -48,6 +48,8 @@ export const TOOL_POLICIES = {
   draft_dunning: { requiresValidation: true },
   compute_treasury_forecast: { requiresValidation: false },
   forecast_sales: { requiresValidation: false },
+  check_stock_alerts: { requiresValidation: false },
+  adjust_stock: { requiresValidation: true },
 } as const satisfies Record<string, { requiresValidation: boolean }>;
 
 const DUNNING_PROMPT =
@@ -202,6 +204,96 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       const forecast = forecastSales(series, horizonMonths ?? 3);
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ ...forecast, truncated }) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "check_stock_alerts",
+    {
+      description:
+        "Suivi des stocks (lecture seule, ticket 3.2) : liste les articles dont la " +
+        "quantité est au niveau ou sous leur seuil d'alerte. Accessible à tous les " +
+        "rôles — le stock n'est pas une donnée financière.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const items = await withTenant(tenantId, (tx) =>
+        tx.stockItem.findMany({
+          orderBy: { name: "asc" },
+          take: 1000,
+          select: { name: true, unit: true, quantity: true, alertThreshold: true },
+        }),
+      );
+      const alerts = items.filter(
+        (item) => item.alertThreshold > 0 && item.quantity <= item.alertThreshold,
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ alerts, alertCount: alerts.length, totalItems: items.length }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "adjust_stock",
+    {
+      description:
+        "PRÉPARE un ajustement de stock (entrée ou sortie) dans la file de validation. " +
+        "N'exécute JAMAIS le mouvement : un humain valide en 1 clic (requiresValidation).",
+      inputSchema: {
+        itemName: z.string().min(1).max(200).describe("Nom exact de l'article"),
+        delta: z
+          .number()
+          .int()
+          .min(-1_000_000)
+          .max(1_000_000)
+          .refine((value) => value !== 0, { message: "delta must not be zero" })
+          .describe("Quantité : négatif = sortie, positif = entrée"),
+        reason: z.string().max(200).optional().describe("Motif du mouvement"),
+      },
+      annotations,
+    },
+    async ({ itemName, delta, reason }) => {
+      const item = await withTenant(tenantId, (tx) =>
+        tx.stockItem.findUnique({
+          where: { tenantId_name: { tenantId, name: itemName } },
+          select: { id: true, name: true, unit: true, quantity: true },
+        }),
+      );
+      if (!item) throw new Error("unknown stock item");
+
+      // PREPARE, never execute: one pending_action in the validation queue.
+      const pendingAction = await withTenant(tenantId, (tx) =>
+        tx.pendingAction.create({
+          data: {
+            tenantId,
+            type: "adjust_stock",
+            requestedBy: context.requestedBy ?? null,
+            employee: context.employee ?? null,
+            payload: {
+              itemId: item.id,
+              itemName: item.name,
+              unit: item.unit,
+              quantityBefore: item.quantity,
+              delta,
+              reason: reason ?? null,
+            },
+          },
+        }),
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ pendingActionId: pendingAction.id, status: "pending_validation" }),
+          },
+        ],
       };
     },
   );
