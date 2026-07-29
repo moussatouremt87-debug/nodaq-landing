@@ -8,15 +8,17 @@ import { prisma, withTenant } from "@nodaq/db";
 import type { Prisma } from "@nodaq/db";
 import { deriveReceivables, parseFec } from "@nodaq/fec";
 import {
+  BridgeClient,
   connectorSecretName,
   ConnectorNotConfiguredError,
   ConnectorType,
   FEC_CONNECTOR_STATUS,
   FEC_CONNECTOR_TYPE,
-  getQontoClient,
+  getBankClient,
   PennylaneClient,
   QontoClient,
 } from "@nodaq/mcp-connectors";
+import type { BankClient } from "@nodaq/mcp-connectors";
 import { defaultWritableProvider } from "@nodaq/secrets";
 import type { WritableSecretProvider } from "@nodaq/secrets";
 import { CreateNoteInput, TenantId, Uuid } from "@nodaq/shared";
@@ -447,6 +449,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         secretKey: z.string().min(8).max(200),
       })
       .strict(),
+    // Agrégateur DSP2 (2.15) : le userUuid est l'utilisateur Bridge dont la
+    // banque est déjà reliée (le flux Bridge Connect hébergé viendra après).
+    bridge: z
+      .object({
+        clientId: z.string().min(1).max(200),
+        clientSecret: z.string().min(8).max(200),
+        userUuid: z.string().min(1).max(100),
+      })
+      .strict(),
   } as const;
 
   /**
@@ -467,6 +478,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           agentContext.pennylaneBaseUrl,
         );
         await client.listCustomerInvoices({ limit: 1 });
+      } else if (type === "bridge") {
+        const client = new BridgeClient(
+          ConnectorCredentials.bridge.parse(credentials),
+          agentContext.bridgeBaseUrl,
+        );
+        await client.testConnection();
       } else {
         const client = new QontoClient(
           ConnectorCredentials.qonto.parse(credentials),
@@ -1025,9 +1042,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         .catch({ totalInclTax: null, docDate: null })
         .parse(document.extraction ?? {});
 
-      let bank: QontoClient;
+      // Banque agnostique (2.15) : Qonto direct, sinon agrégateur Bridge.
+      let bank: BankClient;
       try {
-        bank = await getQontoClient(request.tenantId);
+        bank = await getBankClient(request.tenantId);
       } catch (error) {
         if (error instanceof ConnectorNotConfiguredError) {
           return { candidates: [], reason: "no-bank" };

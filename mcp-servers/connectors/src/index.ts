@@ -2,14 +2,19 @@ export { PennylaneClient, PennylaneCredentials } from "./pennylane.js";
 export type { CustomerInvoice, Customer, PennylaneListOptions } from "./pennylane.js";
 export { QontoClient, QontoCredentials } from "./qonto.js";
 export type { BankAccount, Transaction, QontoTransactionsOptions } from "./qonto.js";
+export { BridgeClient, BridgeCredentials } from "./bridge.js";
+export type { BridgeTransactionsOptions } from "./bridge.js";
 export {
   ConnectorType,
   ConnectorNotConfiguredError,
   connectorSecretName,
   getPennylaneClient,
   getQontoClient,
+  getBridgeClient,
+  getBankClient,
   DEMO_CONNECTOR_STATUS,
 } from "./registry.js";
+export type { BankClient } from "./registry.js";
 export {
   DemoPennylaneClient,
   DemoQontoClient,

@@ -2,10 +2,12 @@ import { z } from "zod";
 import { withTenant } from "@nodaq/db";
 import { defaultProvider } from "@nodaq/secrets";
 import type { SecretProvider } from "@nodaq/secrets";
+import { BridgeClient, BridgeCredentials } from "./bridge.js";
 import { DemoPennylaneClient, DemoQontoClient } from "./demo.js";
 import { FEC_CONNECTOR_STATUS, FEC_CONNECTOR_TYPE, FecPennylaneClient } from "./fec.js";
 import { PennylaneClient, PennylaneCredentials } from "./pennylane.js";
 import { QontoClient, QontoCredentials } from "./qonto.js";
+import type { QontoTransactionsOptions } from "./qonto.js";
 
 /*
  * Per-tenant connector registry (blueprint §5.6). The `connectors` table stores
@@ -14,7 +16,7 @@ import { QontoClient, QontoCredentials } from "./qonto.js";
  * at call time, in memory only. Nothing from the secret value is ever logged.
  */
 
-export const ConnectorType = z.enum(["pennylane", "qonto"]);
+export const ConnectorType = z.enum(["pennylane", "qonto", "bridge"]);
 export type ConnectorType = z.infer<typeof ConnectorType>;
 
 export class ConnectorNotConfiguredError extends Error {
@@ -42,6 +44,7 @@ export interface RegistryOptions {
   secretProvider?: SecretProvider;
   pennylaneBaseUrl?: string;
   qontoBaseUrl?: string;
+  bridgeBaseUrl?: string;
 }
 
 /**
@@ -135,4 +138,56 @@ export async function getQontoClient(
     await resolveCredentials(tenantId, "qonto", options, row.credentialsRef),
   );
   return new QontoClient(credentials, options.qontoBaseUrl);
+}
+
+/** Sous-ensemble commun consommé par l'agent Compta — agnostique de la banque. */
+export interface BankClient {
+  getOrganization: () => ReturnType<QontoClient["getOrganization"]>;
+  listTransactions: (
+    options?: QontoTransactionsOptions,
+  ) => ReturnType<QontoClient["listTransactions"]>;
+}
+
+export async function getBridgeClient(
+  tenantId: string,
+  options: RegistryOptions = {},
+): Promise<BankClient> {
+  const row = await loadConnectorRow(tenantId, "bridge");
+  // Fixtures bancaires démo existantes (mêmes chiffres, même contrat) : le
+  // mode démo ne dépend pas du fournisseur choisi par le tenant.
+  if (row.status === DEMO_CONNECTOR_STATUS) return new DemoQontoClient();
+  const credentials = BridgeCredentials.parse(
+    await resolveCredentials(tenantId, "bridge", options, row.credentialsRef),
+  );
+  return new BridgeClient(credentials, options.bridgeBaseUrl);
+}
+
+/**
+ * Résout le connecteur bancaire du tenant : Qonto s'il existe (priorité —
+ * connecteur historique), sinon Bridge (agrégateur DSP2 toutes banques),
+ * sinon échec explicite. Comme pour le repli FEC de `getPennylaneClient`, les
+ * existences sont vérifiées AVANT `loadConnectorRow` (pas d'exception pilote,
+ * pas de fausse alerte [CONNECTOR-UNAVAILABLE] pour un tenant en Bridge seul).
+ */
+export async function getBankClient(
+  tenantId: string,
+  options: RegistryOptions = {},
+): Promise<BankClient> {
+  const qontoRow = await withTenant(tenantId, (tx) =>
+    tx.connector.findUnique({
+      where: { tenantId_type: { tenantId, type: "qonto" } },
+      select: { id: true },
+    }),
+  );
+  if (qontoRow) return getQontoClient(tenantId, options);
+
+  const bridgeRow = await withTenant(tenantId, (tx) =>
+    tx.connector.findUnique({
+      where: { tenantId_type: { tenantId, type: "bridge" } },
+      select: { id: true },
+    }),
+  );
+  if (bridgeRow) return getBridgeClient(tenantId, options);
+
+  throw new ConnectorNotConfiguredError(tenantId, "qonto", "no bank connector (qonto or bridge)");
 }

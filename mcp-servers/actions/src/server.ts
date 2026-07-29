@@ -4,7 +4,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { withTenant } from "@nodaq/db";
 import { route } from "@nodaq/llm";
-import { getPennylaneClient, getQontoClient } from "@nodaq/mcp-connectors";
+import { getBankClient, getPennylaneClient } from "@nodaq/mcp-connectors";
 import type { RegistryOptions } from "@nodaq/mcp-connectors";
 import { TenantId } from "@nodaq/shared";
 import { scoreLatePayment } from "./dunning.js";
@@ -135,7 +135,8 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       annotations: { readOnlyHint: true },
     },
     async ({ accountSlug }) => {
-      const qonto = await getQontoClient(tenantId, context);
+      // Banque agnostique (2.15) : Qonto direct, sinon agrégateur Bridge.
+      const qonto = await getBankClient(tenantId, context);
       const { organization } = await qonto.getOrganization();
       const account = accountSlug
         ? organization.bank_accounts.find((a) => a.slug === accountSlug)

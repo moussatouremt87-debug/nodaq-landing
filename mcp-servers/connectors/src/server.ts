@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { TenantId } from "@nodaq/shared";
-import { getPennylaneClient, getQontoClient } from "./registry.js";
+import { getBankClient, getPennylaneClient } from "./registry.js";
 import type { RegistryOptions } from "./registry.js";
 
 /*
@@ -73,13 +73,14 @@ export function createConnectorsMcpServer(context: ConnectorsServerContext): Mcp
     "qonto_get_organization",
     {
       description:
-        "Comptes bancaires Qonto du tenant avec soldes (lecture seule) — " +
+        "Comptes bancaires du tenant avec soldes (lecture seule) — " +
+        "Qonto ou, à défaut, l'agrégateur Bridge (DSP2, toutes banques FR) ; " +
         "la donnée d'entrée de la prévision de trésorerie.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
     async () => {
-      const client = await getQontoClient(tenantId, context);
+      const client = await getBankClient(tenantId, context);
       const { organization } = await client.getOrganization();
       // Accounts are referenced by slug; the IBAN is masked before it can
       // reach the model context.
@@ -99,7 +100,7 @@ export function createConnectorsMcpServer(context: ConnectorsServerContext): Mcp
     "qonto_get_bank_transactions",
     {
       description:
-        "Transactions bancaires Qonto du tenant (lecture seule, paginées). " +
+        "Transactions bancaires du tenant (lecture seule, paginées) — Qonto ou Bridge. " +
         "Compte désigné par son slug (voir qonto_get_organization) — jamais par IBAN.",
       inputSchema: {
         accountSlug: z
@@ -112,7 +113,7 @@ export function createConnectorsMcpServer(context: ConnectorsServerContext): Mcp
       annotations: { readOnlyHint: true },
     },
     async ({ accountSlug, page, perPage }) => {
-      const client = await getQontoClient(tenantId, context);
+      const client = await getBankClient(tenantId, context);
       // The full IBAN needed by the Qonto API is resolved server-side from the
       // slug: it transits in memory only, never through the tool interface.
       const { organization } = await client.getOrganization();

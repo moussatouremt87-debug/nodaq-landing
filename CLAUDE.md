@@ -30,6 +30,11 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > l'Object Storage), extraction vision souveraine, corrections append-only
 > (apprentissage), rapprochement Qonto owner-only, photo servie UNIQUEMENT par la route
 > binaire authentifiée (`docs/classeur.md`).
+> **Banque DSP2 (2.15)** : `getBankClient()` = Qonto direct sinon agrégateur Bridge
+> (toutes banques FR) — TOUS les consommateurs bancaires passent par lui, jamais par
+> un client direct ; identifiants Bridge (clientId/clientSecret/userUuid) testés
+> contre le fournisseur avant coffre ; flux Bridge Connect hébergé = ticket futur
+> (`docs/bridge.md`).
 
 ---
 
