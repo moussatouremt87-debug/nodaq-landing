@@ -375,6 +375,9 @@ export const StockItem = z.object({
   alertThreshold: z.number(),
   belowThreshold: z.boolean(),
   updatedAt: z.string(),
+  // Coût de remplacement et valorisation (3.3) — présents pour l'owner seulement.
+  unitCostCents: z.number().optional(),
+  valueCents: z.number().optional(),
 });
 export type StockItem = z.infer<typeof StockItem>;
 
@@ -397,7 +400,13 @@ export const createStockItem = (input: {
 
 export const updateStockItem = (
   id: string,
-  input: { name?: string; sku?: string | null; unit?: string; alertThreshold?: number },
+  input: {
+    name?: string;
+    sku?: string | null;
+    unit?: string;
+    alertThreshold?: number;
+    unitCostCents?: number;
+  },
 ): Promise<StockItem> =>
   call(StockItemEnvelope, `/stocks/${encodeURIComponent(id)}`, {
     method: "PATCH",

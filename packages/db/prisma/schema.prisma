@@ -444,6 +444,8 @@ model StockItem {
   unit           String          @default("unité")
   quantity       Int             @default(0)
   alertThreshold Int             @default(0) @map("alert_threshold")
+  /// Replacement unit cost in cents (3.3) — financial data, owner-facing only.
+  unitCostCents  Int             @default(0) @map("unit_cost_cents")
   createdAt      DateTime        @default(now()) @map("created_at")
   updatedAt      DateTime        @updatedAt @map("updated_at")
   tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)

@@ -1152,12 +1152,28 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   app.get("/stocks", { preHandler: businessRoute }, async (request) => {
     const rows = await withTenant(request.tenantId, (tx) =>
-      tx.stockItem.findMany({ orderBy: { name: "asc" }, take: 501, select: STOCK_SELECT }),
+      tx.stockItem.findMany({
+        orderBy: { name: "asc" },
+        take: 501,
+        select: { ...STOCK_SELECT, unitCostCents: true },
+      }),
     );
     // Troncature SIGNALÉE, jamais silencieuse (une alerte au-delà de la page
     // ne doit pas disparaître sans trace).
     const hasMore = rows.length > 500;
-    return { items: rows.slice(0, 500).map(stockView), hasMore };
+    // Coûts et valorisation (3.3) = donnée financière : OWNER only — un
+    // membre voit les quantités, jamais les coûts de remplacement.
+    const isOwner = request.membershipRole === "owner";
+    return {
+      items: rows.slice(0, 500).map((row) => {
+        const { unitCostCents, ...base } = row;
+        const view = stockView(base);
+        return isOwner
+          ? { ...view, unitCostCents, valueCents: row.quantity * unitCostCents }
+          : view;
+      }),
+      hasMore,
+    };
   });
 
   const StockItemBody = z
@@ -1166,6 +1182,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       sku: z.string().max(100).nullable().optional(),
       unit: z.string().min(1).max(50).optional(),
       alertThreshold: z.number().int().min(0).max(1_000_000).optional(),
+      // Coût de remplacement (3.3) — routes owner-only, borné (1 M€/unité).
+      unitCostCents: z.number().int().min(0).max(100_000_000).optional(),
     })
     .strict();
 
@@ -1175,7 +1193,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     async (request, reply) => {
       const parsed = StockItemBody.safeParse(request.body);
       if (!parsed.success) return reply.code(400).send({ error: "invalid stock item" });
-      const { name, sku, unit, alertThreshold } = parsed.data;
+      const { name, sku, unit, alertThreshold, unitCostCents } = parsed.data;
       try {
         const item = await withTenant(request.tenantId, (tx) =>
           tx.stockItem.create({
@@ -1185,6 +1203,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
               ...(sku !== undefined ? { sku } : {}),
               ...(unit !== undefined ? { unit } : {}),
               ...(alertThreshold !== undefined ? { alertThreshold } : {}),
+              ...(unitCostCents !== undefined ? { unitCostCents } : {}),
             },
             select: STOCK_SELECT,
           }),
@@ -1214,6 +1233,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       if (fields.sku !== undefined) data.sku = fields.sku;
       if (fields.unit !== undefined) data.unit = fields.unit;
       if (fields.alertThreshold !== undefined) data.alertThreshold = fields.alertThreshold;
+      if (fields.unitCostCents !== undefined) data.unitCostCents = fields.unitCostCents;
       try {
         const item = await withTenant(request.tenantId, async (tx) => {
           const exists = await tx.stockItem.findUnique({ where: { id }, select: { id: true } });

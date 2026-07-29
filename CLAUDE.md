@@ -41,6 +41,10 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > **Stocks (3.2)** : `stock_items`/`stock_movements` (append-only, plancher 0, RLS) —
 > ajustements membre, référentiel owner, alertes sous seuil (cockpit/page/chat),
 > outil `adjust_stock` HITL = premier exécuteur RÉEL (`docs/stocks.md`).
+> **Prix matières (3.3)** : `unitCostCents` sur les articles (owner-only en lecture ET
+> écriture), simulation pure bornée −90 %…+500 % (`materialScenario.ts`), outil
+> `simulate_material_prices` OWNER-ONLY, carte valorisation page Stocks
+> (`docs/prix-matieres.md`).
 
 ---
 
