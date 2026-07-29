@@ -288,20 +288,27 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       annotations: { readOnlyHint: true },
     },
     async ({ hourlyRateEur, horizonMonths }) => {
+      // Bornes de lecture (audit 3.5) : jamais une boucle non plafonnée —
+      // le dépassement est SIGNALÉ, pas silencieux. Le nom (PII) n'est pas
+      // sélectionné : il n'entre jamais dans le processus de l'outil.
       const staff = await withTenant(tenantId, (tx) =>
         tx.staffMember.findMany({
-          select: { id: true, name: true, weeklyHours: true, active: true },
+          select: { id: true, weeklyHours: true, active: true },
+          take: 501,
         }),
       );
       const absences = await withTenant(tenantId, (tx) =>
         tx.staffAbsence.findMany({
           select: { staffId: true, startDate: true, endDate: true },
+          take: 5001,
         }),
       );
+      const inputTruncated = staff.length > 500 || absences.length > 5000;
       // Prévision de ventes (3.1) : absente (pas de connecteur) = verdicts
       // « inconnu » — jamais une charge fabriquée.
       let points: { month: string; revenueCents: number }[] = [];
       let truncated = false;
+      let forecastUnavailable = false;
       try {
         const pennylane = await getPennylaneClient(tenantId, context);
         const window = await fetchInvoiceWindow(pennylane, new Date());
@@ -312,11 +319,13 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
         );
         points = forecast.points;
       } catch {
-        // pas de facturier configuré : capacité seule.
+        // Pas de facturier configuré OU fournisseur en erreur : capacité
+        // seule, et le drapeau le DIT (jamais un motif indistinct).
+        forecastUnavailable = true;
       }
       const plan = buildStaffingPlan(
-        staff,
-        absences.map((absence) => ({
+        staff.slice(0, 500),
+        absences.slice(0, 5000).map((absence) => ({
           staffId: absence.staffId,
           startDate: absence.startDate.toISOString().slice(0, 10),
           endDate: absence.endDate.toISOString().slice(0, 10),
@@ -331,7 +340,16 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
         },
       );
       return {
-        content: [{ type: "text" as const, text: JSON.stringify({ ...plan, truncated }) }],
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              ...plan,
+              truncated: truncated || inputTruncated,
+              forecastUnavailable,
+            }),
+          },
+        ],
       };
     },
   );

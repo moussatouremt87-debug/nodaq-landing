@@ -13,8 +13,9 @@ import type { MonthlyRevenuePoint } from "./salesForecast.js";
 
 export const StaffInput = z.object({
   id: z.string(),
-  /** PII — stays inside the tool output (owner-only), never in logs. */
-  name: z.string(),
+  /** PII — OPTIONAL and unused by the model: a staff name never enters the
+   * tool output nor the LLM context; callers should not even select it. */
+  name: z.string().optional(),
   weeklyHours: z.number().int().min(0).max(80),
   active: z.boolean(),
 });

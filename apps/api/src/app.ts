@@ -2319,15 +2319,30 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return { updated: true };
   });
 
+  // Date STRICTEMENT calendaire (audit 3.5) : "2026-02-31" glisserait au
+  // 3 mars et fausserait la capacité de deux mois — round-trip exigé.
+  const IsoDay = z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .refine((value) => {
+      const date = new Date(`${value}T00:00:00Z`);
+      return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+    }, { message: "invalid calendar date" });
+
   const AbsenceBody = z
     .object({
       staffId: Uuid,
       type: z.enum(["conges", "maladie", "formation", "autre"]).default("conges"),
-      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      startDate: IsoDay,
+      endDate: IsoDay,
     })
     .strict()
-    .refine((body) => body.endDate >= body.startDate, { message: "endDate before startDate" });
+    .refine((body) => body.endDate >= body.startDate, { message: "endDate before startDate" })
+    // Amplitude bornée : une absence > 1 an est une erreur de saisie.
+    .refine(
+      (body) => Date.parse(body.endDate) - Date.parse(body.startDate) <= 366 * 86_400_000,
+      { message: "absence longer than a year" },
+    );
 
   app.post("/rh/absences", { preHandler: ownerRoute }, async (request, reply) => {
     const parsed = AbsenceBody.safeParse(request.body);

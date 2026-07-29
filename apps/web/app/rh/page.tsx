@@ -41,7 +41,9 @@ export default function RhPage() {
       const rh = await getRh();
       setStaff(rh.staff);
       setAbsences(rh.absences);
-      setPlan(await getStaffingPlan(hourlyRate).catch(() => null));
+      const nextPlan = await getStaffingPlan(hourlyRate).catch(() => null);
+      setPlan(nextPlan);
+      if (nextPlan) setRate(String(Math.round(nextPlan.hourlyRateCents / 100)));
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) setForbidden(true);
       else setError("données RH indisponibles — réessayez");
@@ -148,7 +150,12 @@ export default function RhPage() {
               <button
                 onClick={() => {
                   const value = Number(rate);
-                  if (Number.isFinite(value) && value >= 10) void refresh(value);
+                  if (Number.isFinite(value) && value >= 10 && value <= 500) {
+                    setError(null);
+                    void refresh(value);
+                  } else {
+                    setError("taux horaire entre 10 et 500 €/h");
+                  }
                 }}
               >
                 Recalculer
