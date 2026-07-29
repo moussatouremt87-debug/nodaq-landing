@@ -42,6 +42,7 @@ model Tenant {
   stockMovements  StockMovement[]
   pushSubscriptions   PushSubscription[]
   pushDispatchStates  PushDispatchState[]
+  fixedAssets         FixedAsset[]
 
   @@map("tenants")
   @@schema("public")
@@ -555,6 +556,42 @@ model PushDispatchState {
 
   @@unique([tenantId, userId, category])
   @@map("push_dispatch_states")
+  @@schema("public")
+}
+
+/// Ticket 2.19 — registre des immobilisations (amortissements). `source` distingue
+/// une entrée reprise depuis le FEC (comptes 2xx/28x), issue d'un document du
+/// classeur (facture d'achat), ou saisie manuelle. `priorDepreciationCents` porte
+/// les amortissements déjà pratiqués AVANT l'entrée dans nodaq (reprise FEC 28x) —
+/// jamais recalculés, juste reportés. `renewalCostCents` est le CAPEX de
+/// renouvellement prévisionnel, éditable côté app (défaut = base historique).
+model FixedAsset {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  label          String
+  /// 'informatique' | 'logiciel' | 'vehicule' | 'materiel' | 'mobilier' | 'agencement'
+  /// — validé côté app par Zod.
+  category       String
+  inServiceDate  DateTime  @map("in_service_date")
+  baseCents      BigInt    @map("base_cents")
+  durationMonths Int       @map("duration_months")
+  /// 'LINEAIRE' | 'DEGRESSIF' — validé côté app par Zod.
+  method         String    @default("LINEAIRE")
+  /// 'FEC' | 'DOCUMENT' | 'MANUEL' — validé côté app par Zod.
+  source         String    @default("MANUEL")
+  sourceRef      String?   @map("source_ref")
+  /// 'ACTIF' | 'CEDE' | 'SORTI' — validé côté app par Zod.
+  status         String    @default("ACTIF")
+  disposedAt     DateTime? @map("disposed_at")
+  /// Amortissements déjà pratiqués AVANT l'entrée dans nodaq (reprise FEC 28x), en centimes.
+  priorDepreciationCents BigInt  @default(0) @map("prior_depreciation_cents")
+  renewalCostCents       BigInt? @map("renewal_cost_cents")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status])
+  @@map("fixed_assets")
   @@schema("public")
 }
 
