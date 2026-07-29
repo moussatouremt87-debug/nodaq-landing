@@ -72,6 +72,9 @@ importers:
       '@nodaq/fec':
         specifier: workspace:*
         version: link:../../packages/fec
+      '@nodaq/llm':
+        specifier: workspace:*
+        version: link:../../packages/llm
       '@nodaq/mcp-connectors':
         specifier: workspace:*
         version: link:../../mcp-servers/connectors

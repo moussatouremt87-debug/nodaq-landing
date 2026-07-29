@@ -21,12 +21,24 @@ export type { ChatMessage } from "./litellm.js";
  * This module is the ONLY place business code calls a model from.
  */
 
+/**
+ * Inline image (photographed document). MIME allowlist on purpose: never
+ * SVG (scripts) nor formats the sovereign vision models don't ingest.
+ */
+export const RouteImage = z.object({
+  mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+  base64: z.string().min(1).max(14_000_000), // ≈ 10 MiB decoded, same cap as OCR
+});
+export type RouteImage = z.infer<typeof RouteImage>;
+
 export const RouteTask = z.object({
   text: z.string().min(1).max(200_000),
   category: SensitivityCategory.optional(),
   tenantId: TenantId,
   requestId: z.string().min(1).max(200),
   hints: z.object({ public: z.boolean().optional(), ambiguous: z.boolean().optional() }).optional(),
+  /** Photographed documents are confidential BY CONSTRUCTION (hardened below). */
+  images: z.array(RouteImage).max(4).optional(),
 });
 export type RouteTask = z.infer<typeof RouteTask>;
 
@@ -134,6 +146,12 @@ export async function route(task: RouteTask, opts: RouteOptions = {}): Promise<R
     category = parsed.category;
     decidedBy = "rules";
   }
+  // A photographed document is confidential BY CONSTRUCTION: the text-only
+  // classifier cannot see what the image contains, so images can only harden.
+  if (parsed.images?.length && SEVERITY[category] < SEVERITY.confidentiel) {
+    category = "confidentiel";
+    decidedBy = "rules";
+  }
 
   // 2) Tenant routing policy — read UNDER withTenant (RLS context required).
   const policy = await withTenant(tenantId, (tx) =>
@@ -146,6 +164,11 @@ export async function route(task: RouteTask, opts: RouteOptions = {}): Promise<R
     opts.forceGroup ??
     (opts.preferFrontier && allowed.includes("frontier") ? "frontier" : "sovereign-fast");
 
+  // Hash covers EVERYTHING sent to the model: the text and every image.
+  const contentHash = createHash("sha256").update(text, "utf8");
+  for (const image of parsed.images ?? []) contentHash.update(image.base64);
+  const hash = contentHash.digest("hex");
+
   const audit = (outcome: "allowed" | "blocked" | "failed"): Promise<unknown> =>
     withTenant(tenantId, (tx) =>
       tx.classification.create({
@@ -156,7 +179,7 @@ export async function route(task: RouteTask, opts: RouteOptions = {}): Promise<R
           tier: group,
           decidedBy,
           outcome,
-          contentHash: sha256(text),
+          contentHash: hash,
         },
       }),
     );
@@ -176,8 +199,18 @@ export async function route(task: RouteTask, opts: RouteOptions = {}): Promise<R
   }
 
   // 5) Model call through LiteLLM (OpenAI-compatible), never a provider SDK.
-  //    Failures are audited as well (hash only, never content).
-  const messages: ChatMessage[] = [{ role: "user", content: text }];
+  //    Failures are audited as well (hash only, never content). Images travel
+  //    as data-URI content parts (multimodal sovereign models, e.g. vision).
+  const content: ChatMessage["content"] = parsed.images?.length
+    ? [
+        { type: "text", text },
+        ...parsed.images.map((image) => ({
+          type: "image_url" as const,
+          image_url: { url: `data:${image.mimeType};base64,${image.base64}` },
+        })),
+      ]
+    : text;
+  const messages: ChatMessage[] = [{ role: "user", content }];
   let responseText: string;
   try {
     responseText = await chatCompletion(group, messages);

@@ -227,6 +227,129 @@ export const importFec = async (bytes: ArrayBuffer, fileName: string): Promise<F
   return FecImportReport.parse(await response.json());
 };
 
+// ── Classeur documentaire photo (ticket 2.16) ────────────────────────────────
+// La photo elle-même ne transite JAMAIS en JSON : elle est servie par la
+// route binaire dédiée (classeurPhotoUrl), authentifiée et scellée au tenant.
+
+export const ClasseurExtraction = z
+  .object({
+    docType: z.string().optional(),
+    supplierName: z.string().nullable().optional(),
+    pieceNumber: z.string().nullable().optional(),
+    docDate: z.string().nullable().optional(),
+    currency: z.string().nullable().optional(),
+    totalExclTax: z.number().nullable().optional(),
+    totalTax: z.number().nullable().optional(),
+    totalInclTax: z.number().nullable().optional(),
+  })
+  .nullable();
+export type ClasseurExtraction = z.infer<typeof ClasseurExtraction>;
+
+export const ClasseurDocument = z.object({
+  id: z.string(),
+  fileName: z.string(),
+  mimeType: z.string(),
+  byteSize: z.number(),
+  docType: z.string(),
+  status: z.string(),
+  extraction: ClasseurExtraction,
+  originalExtraction: ClasseurExtraction,
+  corrections: z.array(z.unknown()),
+  matchedTransactionId: z.string().nullable(),
+  matchedAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type ClasseurDocument = z.infer<typeof ClasseurDocument>;
+
+const ClasseurDocumentEnvelope = z.object({ document: ClasseurDocument });
+
+export const listClasseurDocuments = (): Promise<ClasseurDocument[]> =>
+  call(z.object({ documents: z.array(ClasseurDocument) }), "/classeur/documents").then(
+    (r) => r.documents,
+  );
+
+export interface ClasseurUpload {
+  alreadyImported: boolean;
+  document: ClasseurDocument;
+}
+
+export const uploadClasseurDocument = async (
+  bytes: ArrayBuffer,
+  fileName: string,
+): Promise<ClasseurUpload> => {
+  const response = await fetch("/backend/classeur/documents", {
+    method: "POST",
+    headers: {
+      "content-type": "application/octet-stream",
+      "x-doc-filename": encodeURIComponent(fileName),
+    },
+    body: bytes,
+  });
+  if (!response.ok) throw new ApiError(response.status, `HTTP ${response.status}`);
+  const body: unknown = await response.json();
+  const parsed = z
+    .object({ alreadyImported: z.boolean(), document: ClasseurDocument })
+    .parse(body);
+  return parsed;
+};
+
+export interface ClasseurCorrection {
+  docType?: string;
+  supplierName?: string | null;
+  pieceNumber?: string | null;
+  docDate?: string | null;
+  currency?: string | null;
+  totalExclTax?: number | null;
+  totalTax?: number | null;
+  totalInclTax?: number | null;
+}
+
+export const correctClasseurDocument = (
+  id: string,
+  fields: ClasseurCorrection,
+): Promise<ClasseurDocument> =>
+  call(ClasseurDocumentEnvelope, `/classeur/documents/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(fields),
+  }).then((r) => r.document);
+
+export const MatchCandidate = z.object({
+  transactionId: z.string(),
+  label: z.string().nullable(),
+  amountCents: z.number(),
+  settledAt: z.string().nullable(),
+  score: z.number(),
+});
+export type MatchCandidate = z.infer<typeof MatchCandidate>;
+
+export const getClasseurCandidates = (
+  id: string,
+): Promise<{ candidates: MatchCandidate[]; reason?: string }> =>
+  call(
+    z.object({ candidates: z.array(MatchCandidate), reason: z.string().optional() }),
+    `/classeur/documents/${encodeURIComponent(id)}/candidates`,
+  );
+
+export const matchClasseurDocument = (
+  id: string,
+  transactionId: string | null,
+): Promise<ClasseurDocument> =>
+  call(ClasseurDocumentEnvelope, `/classeur/documents/${encodeURIComponent(id)}/match`, {
+    method: "POST",
+    body: JSON.stringify({ transactionId }),
+  }).then((r) => r.document);
+
+export const deleteClasseurDocument = async (id: string): Promise<void> => {
+  const response = await fetch(`/backend/classeur/documents/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) throw new ApiError(response.status, `HTTP ${response.status}`);
+};
+
+export const classeurPhotoUrl = (id: string): string =>
+  `/backend/classeur/documents/${encodeURIComponent(id)}/photo`;
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {

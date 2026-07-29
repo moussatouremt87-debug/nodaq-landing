@@ -24,6 +24,12 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > connecteur fichier (statut `file`, posé UNIQUEMENT par `POST /connectors/fec/import`,
 > owner, 50 Mo) — données CONFIDENTIELLES : jamais une ligne du journal dans les
 > logs/erreurs/réponses ; repli registre vers l'interface Pennylane (`docs/fec-import.md`).
+> **Classeur photo (2.16)** : `route()` accepte des images (data-URI, MIME allowlist) —
+> catégorie `confidentiel` PAR CONSTRUCTION dès qu'une image est présente, hash d'audit
+> texte+images. Table `classeur_documents` (photo en `Bytes` sous RLS, V1 assumée avant
+> l'Object Storage), extraction vision souveraine, corrections append-only
+> (apprentissage), rapprochement Qonto owner-only, photo servie UNIQUEMENT par la route
+> binaire authentifiée (`docs/classeur.md`).
 
 ---
 
