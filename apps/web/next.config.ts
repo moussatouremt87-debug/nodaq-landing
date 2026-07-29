@@ -20,6 +20,7 @@ const BUSINESS_PREFIXES = [
   "stocks",
   "push",
   "ops",
+  "immobilisations",
 ];
 
 const nextConfig: NextConfig = {

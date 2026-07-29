@@ -32,9 +32,60 @@ const AdjustStockPayload = z.object({
 
 const MAX_STOCK_QUANTITY = 1_000_000_000;
 
+/** Proposition d'immobilisation (2.19) — FEC, classeur ou saisie assistée.
+ * Bornes larges mais réelles : base <= 100 M€, durée 1 mois..50 ans. */
+const CreateFixedAssetPayload = z
+  .object({
+    label: z.string().min(1).max(200),
+    category: z.enum(["informatique", "logiciel", "vehicule", "materiel", "mobilier", "agencement"]),
+    inServiceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    baseCents: z.number().int().min(1).max(10_000_000_000),
+    durationMonths: z.number().int().min(1).max(600),
+    method: z.enum(["LINEAIRE", "DEGRESSIF"]).default("LINEAIRE"),
+    source: z.enum(["FEC", "DOCUMENT", "MANUEL"]).default("MANUEL"),
+    sourceRef: z.string().max(200).nullish(),
+    priorDepreciationCents: z.number().int().min(0).default(0),
+  });
+// (strip, pas strict : le payload transporte aussi des champs d'AFFICHAGE
+// pour la file — warnings de dérivation — que l'exécuteur ignore.)
+
 export const defaultExecutors: ExecutorRegistry = {
   send_dunning: () => Promise.resolve({ sent: true, simulated: true }),
   book_invoice: () => Promise.resolve({ booked: true, simulated: true }),
+  // EXÉCUTEUR RÉEL (2.19) : crée l'immobilisation UNIQUEMENT après validation
+  // humaine — la frontière charge/immobilisation est une décision de gestion.
+  create_fixed_asset: async (payload, { tenantId }) => {
+    const parsed = CreateFixedAssetPayload.safeParse(payload);
+    if (!parsed.success) throw new Error("invalid create_fixed_asset payload");
+    const data = parsed.data;
+    return withTenant(tenantId, async (tx) => {
+      if (data.sourceRef) {
+        // Idempotence par référence source (compte FEC, document classeur) :
+        // re-valider une proposition déjà exécutée ne duplique jamais.
+        const existing = await tx.fixedAsset.findFirst({
+          where: { source: data.source, sourceRef: data.sourceRef },
+          select: { id: true },
+        });
+        if (existing) return { fixedAssetId: existing.id, alreadyExisted: true };
+      }
+      const asset = await tx.fixedAsset.create({
+        data: {
+          tenantId,
+          label: data.label,
+          category: data.category,
+          inServiceDate: new Date(`${data.inServiceDate}T00:00:00Z`),
+          baseCents: BigInt(data.baseCents),
+          durationMonths: data.durationMonths,
+          method: data.method,
+          source: data.source,
+          sourceRef: data.sourceRef ?? null,
+          priorDepreciationCents: BigInt(data.priorDepreciationCents),
+        },
+        select: { id: true },
+      });
+      return { fixedAssetId: asset.id, alreadyExisted: false };
+    });
+  },
   create_quote: () => Promise.resolve({ created: true, simulated: true }),
   submit_reconciliation: () => Promise.resolve({ submitted: true, simulated: true }),
   adjust_stock: async (payload, { tenantId, userId }) => {

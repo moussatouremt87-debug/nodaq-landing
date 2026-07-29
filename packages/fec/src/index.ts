@@ -14,3 +14,4 @@ export {
   type FecDerivation,
   type DeriveOptions,
 } from "./derive.js";
+export { deriveFixedAssets, type FixedAssetProposal } from "./assets.js";

@@ -582,6 +582,90 @@ export const validateSupportIssue = (id: string): Promise<{ validated: boolean }
     body: "{}",
   });
 
+/*
+ * Immobilisations (2.19) — owner-only côté API. L'impact IS est une
+ * ESTIMATION labellisée ; le mur de renouvellement est un SCÉNARIO.
+ */
+
+export const FixedAsset = z.object({
+  id: z.string(),
+  label: z.string(),
+  category: z.string(),
+  inServiceDate: z.string(),
+  baseCents: z.number(),
+  durationMonths: z.number(),
+  method: z.string(),
+  source: z.string(),
+  status: z.string(),
+  renewalCostCents: z.number().nullable(),
+  bookValueCents: z.number(),
+  wearRatio: z.number(),
+  planEndYear: z.number().nullable(),
+});
+export type FixedAsset = z.infer<typeof FixedAsset>;
+
+export const FixedAssetRegistry = z.object({
+  assets: z.array(FixedAsset),
+  totalBookValueCents: z.number(),
+  renewalWall: z.array(
+    z.object({
+      quarter: z.string(),
+      capexCents: z.number(),
+      assets: z.array(z.object({ id: z.string(), label: z.string() })),
+    }),
+  ),
+  isImpact: z.object({
+    currentYearDepreciationCents: z.number(),
+    estimatedTaxSavingCents: z.number(),
+    marginalRate: z.number(),
+    upcomingInstallments: z.array(z.string()),
+    label: z.string(),
+  }),
+});
+export type FixedAssetRegistry = z.infer<typeof FixedAssetRegistry>;
+
+export const getFixedAssets = (): Promise<FixedAssetRegistry> =>
+  call(FixedAssetRegistry, "/immobilisations");
+
+export const getFixedAssetPlan = (
+  id: string,
+): Promise<{ year: number; dotationCents: number; endBookValueCents: number }[]> =>
+  call(
+    z.object({
+      plan: z.array(
+        z.object({
+          year: z.number(),
+          dotationCents: z.number(),
+          cumulativeCents: z.number(),
+          endBookValueCents: z.number(),
+        }),
+      ),
+    }),
+    `/immobilisations/${encodeURIComponent(id)}/plan`,
+  ).then((r) => r.plan);
+
+export const createFixedAsset = (asset: {
+  label: string;
+  category: string;
+  inServiceDate: string;
+  baseCents: number;
+  durationMonths: number;
+  method?: string;
+}): Promise<{ id: string }> =>
+  call(z.object({ id: z.string() }), "/immobilisations", {
+    method: "POST",
+    body: JSON.stringify(asset),
+  });
+
+export const updateFixedAsset = (
+  id: string,
+  patch: { renewalCostCents?: number | null; status?: string; disposedAt?: string | null },
+): Promise<{ updated: boolean }> =>
+  call(z.object({ updated: z.boolean() }), `/immobilisations/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {

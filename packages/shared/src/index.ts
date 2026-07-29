@@ -49,3 +49,5 @@ export function assert(condition: unknown, message: string): asserts condition {
   }
 }
 export * from "./frenchTax.js";
+export * from "./depreciation.js";
+export * from "./capex.js";
