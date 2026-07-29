@@ -46,7 +46,10 @@ factures : `analyze_customer_signals` est dans `OWNER_ONLY_TOOLS`, invisible
 pour un membre ou un expert-comptable. Lecture seule
 (`requiresValidation: false`) : l'outil n'écrit rien — la relance d'un client
 à risque passe par les outils d'écriture existants et leur file de
-validation. Sortie bornée à 100 clients (`totalCustomers` reste exact).
+validation. Sortie bornée à 100 clients — bornage **signalé**
+(`customersTruncated`), `totalCustomers` reste exact. La fenêtre de 24 mois
+est appliquée par le modèle lui-même (minimisation) : une facture plus
+ancienne n'entre jamais dans l'analyse, même si la collecte l'a ramenée.
 
 ## À ne pas faire
 

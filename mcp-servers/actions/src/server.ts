@@ -236,7 +236,9 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
         invoices,
         new Date(),
       );
-      // Liste bornée pour le contexte du modèle ; le compte total reste exact.
+      // Liste bornée pour le contexte du modèle ; le compte total reste
+      // exact et le bornage est SIGNALÉ (jamais une vue partielle présentée
+      // comme exhaustive).
       const MAX_CUSTOMERS = 100;
       return {
         content: [
@@ -245,6 +247,7 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
             text: JSON.stringify({
               customers: customers.slice(0, MAX_CUSTOMERS),
               totalCustomers: customers.length,
+              customersTruncated: customers.length > MAX_CUSTOMERS,
               analyzedInvoices,
               unattributedInvoices,
               truncated,

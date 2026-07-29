@@ -179,11 +179,20 @@ function classify(bucket: CustomerBucket, nowMs: number): CustomerSignal {
  * skipped silently (same per-item safeParse discipline as buildMonthlySeries);
  * valid sales without a customer reference are COUNTED, not dropped silently —
  * they bound what the analysis can claim.
+ *
+ * The window is enforced HERE, not only by the caller's crawl (data
+ * minimization): invoices older than `monthsBack` never enter the analysis —
+ * fetchInvoiceWindow bounds the walk but can legitimately return older rows,
+ * and a customer whose whole history predates the window must not be
+ * published (name + revenue) as "at risk" years later.
  */
 export function analyzeCustomerSignals(
   invoices: SignalInvoice[],
   now: Date,
+  monthsBack = 24,
 ): CustomerSignalsResult {
+  // Same window start convention as fetchInvoiceWindow.
+  const windowStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - monthsBack, 1);
   const buckets = new Map<string, CustomerBucket>();
   let analyzedInvoices = 0;
   let unattributedInvoices = 0;
@@ -198,7 +207,7 @@ export function analyzeCustomerSignals(
     const cents = euroToCents(inv.amount);
     if (cents === null || cents <= 0) continue;
     const timeMs = Date.parse(inv.date);
-    if (Number.isNaN(timeMs)) continue;
+    if (Number.isNaN(timeMs) || timeMs < windowStartMs) continue;
 
     analyzedInvoices += 1;
     if (!inv.customer?.id) {

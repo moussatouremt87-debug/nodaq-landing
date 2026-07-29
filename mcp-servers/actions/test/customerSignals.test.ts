@@ -124,6 +124,29 @@ describe("analyzeCustomerSignals", () => {
     expect(customers.map((c) => c.segment)).toEqual(["a_risque", "fidele", "nouveau"]);
   });
 
+  it("applique la fenêtre de 24 mois : l'historique plus ancien n'entre jamais dans l'analyse", () => {
+    const { customers, analyzedInvoices } = analyzeCustomerSignals(
+      [
+        // Client dont TOUTE l'histoire précède la fenêtre : il ne doit pas
+        // être publié (nom + CA) comme « à risque » des années plus tard.
+        invoice("cus-old", daysAgo(860), "900.00"),
+        invoice("cus-old", daysAgo(820), "900.00"),
+        invoice("cus-old", daysAgo(780), "900.00"),
+        // Client actif : seule sa facture DANS la fenêtre compte.
+        invoice("cus-live", daysAgo(790), "100.00"),
+        invoice("cus-live", daysAgo(30), "200.00"),
+      ],
+      NOW,
+    );
+    expect(analyzedInvoices).toBe(1);
+    expect(customers).toHaveLength(1);
+    expect(customers[0]).toMatchObject({
+      customerId: "cus-live",
+      invoiceCount: 1,
+      totalCents: 20_000,
+    });
+  });
+
   it("sans aucune facture attribuée : résultat vide, pas d'erreur", () => {
     const result = analyzeCustomerSignals([], NOW);
     expect(result).toMatchObject({ customers: [], analyzedInvoices: 0, unattributedInvoices: 0 });

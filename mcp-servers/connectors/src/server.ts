@@ -36,7 +36,8 @@ export function createConnectorsMcpServer(context: ConnectorsServerContext): Mcp
     {
       description:
         "Liste les factures clients Pennylane du tenant (lecture seule). " +
-        "Retourne id, numéro, montant, devise, date, échéance, statut.",
+        "Retourne id, numéro, montant, devise, date, échéance, statut et la " +
+        "référence client (id, nom — PII) quand elle est disponible.",
       inputSchema: {
         limit: z.number().int().min(1).max(100).optional().describe("Nombre max de factures"),
         cursor: z.string().optional().describe("Curseur de pagination"),
