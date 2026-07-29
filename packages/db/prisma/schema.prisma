@@ -517,6 +517,10 @@ model PushSubscription {
   id              String    @id @default(uuid()) @db.Uuid
   tenantId        String    @map("tenant_id") @db.Uuid
   userId          String    @map("user_id") @db.Uuid
+  /// Canal de livraison : WEBPUSH aujourd'hui — FCM/APNS arriveront avec les
+  /// app stores (T.11). Enum applicative (Zod) ; un sender par canal derrière
+  /// l'interface commune PushSender.
+  channel         String    @default("WEBPUSH")
   /// URL du service push navigateur. Unicité PAR TENANT : un même appareil
   /// peut servir plusieurs organisations (expert-comptable multi-tenants).
   endpoint        String

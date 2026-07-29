@@ -41,6 +41,7 @@ import {
   markPushSeen,
   MAX_PUSH_DEVICES_PER_USER,
   PushCategorySchema,
+  PushChannelSchema,
   recordPushEvent,
   tenantOwnerIds,
 } from "./push.js";
@@ -1649,10 +1650,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         .object({ p256dh: z.string().min(1).max(300), auth: z.string().min(1).max(200) })
         .strict(),
       userAgent: z.string().max(200).optional(),
+      // WEBPUSH par défaut ; FCM/APNS réservés aux apps stores (T.11) —
+      // refusés tant qu'aucun sender n'existe pour eux.
+      channel: PushChannelSchema.optional(),
       actionsEnabled: z.boolean().optional(),
       alertsEnabled: z.boolean().optional(),
     })
-    .strict();
+    .strict()
+    .refine((body) => (body.channel ?? "WEBPUSH") === "WEBPUSH", {
+      message: "channel not available yet",
+    });
 
   app.post("/push/subscriptions", { preHandler: businessRoute }, async (request, reply) => {
     if (!pushConfigured()) {
