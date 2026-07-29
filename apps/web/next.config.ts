@@ -18,6 +18,7 @@ const BUSINESS_PREFIXES = [
   "connectors",
   "classeur",
   "stocks",
+  "push",
 ];
 
 const nextConfig: NextConfig = {

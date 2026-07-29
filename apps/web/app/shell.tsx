@@ -48,6 +48,17 @@ const ICONS: Record<string, ReactNode> = {
       <path d="m4.6 7.6 2 2 3.8-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+  notifications: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path
+        d="M7.5 1.5a4 4 0 0 1 4 4c0 2.6.7 3.6 1.3 4.3H2.2c.6-.7 1.3-1.7 1.3-4.3a4 4 0 0 1 4-4Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path d="M6 12.2a1.6 1.6 0 0 0 3 0" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  ),
   classeur: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path
@@ -68,6 +79,7 @@ const LINKS = [
   { href: "/stocks", label: "Stocks", icon: "stocks" },
   { href: "/connecteurs", label: "Connecteurs", icon: "connecteurs" },
   { href: "/validation", label: "File de validation", icon: "validation" },
+  { href: "/reglages/notifications", label: "Notifications", icon: "notifications" },
 ];
 
 const TITLES: Record<string, string> = {
@@ -77,6 +89,7 @@ const TITLES: Record<string, string> = {
   "/stocks": "Stocks",
   "/connecteurs": "Connecteurs",
   "/validation": "File de validation",
+  "/reglages/notifications": "Notifications",
 };
 
 export function Shell({ children }: { children: ReactNode }) {

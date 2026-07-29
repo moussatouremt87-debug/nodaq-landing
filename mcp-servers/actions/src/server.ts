@@ -34,6 +34,12 @@ export interface ActionsServerContext extends OcrClientOptions, RegistryOptions 
   requestedBy?: string;
   /** Virtual employee preparing the actions (e.g. 'compta') — audit attribution. */
   employee?: string;
+  /**
+   * Fire-and-forget doorbell rung each time a tool PREPARES a pending_action
+   * (push notifications 2.17). Carries NO data by design — the recipient
+   * learns "something awaits validation", nothing else.
+   */
+  onPendingAction?: () => void;
 }
 
 /** requiresValidation is the repo-wide convention marker for write tools. */
@@ -110,6 +116,8 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
           },
         }),
       );
+
+      context.onPendingAction?.();
 
       // Minimization: the extracted fields are `confidentiel` — they stay in
       // the pending_action payload (validation queue), NOT in the calling
@@ -412,6 +420,7 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
           },
         }),
       );
+      context.onPendingAction?.();
       return {
         content: [
           {
@@ -506,6 +515,7 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
           },
         }),
       );
+      context.onPendingAction?.();
 
       return {
         content: [

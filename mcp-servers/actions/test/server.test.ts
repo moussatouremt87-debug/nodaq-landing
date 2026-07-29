@@ -151,7 +151,7 @@ beforeEach(() => {
   modelCalls.length = 0;
 });
 
-function connectedClient() {
+function connectedClient(extraContext: { onPendingAction?: () => void } = {}) {
   const saasBase = `http://127.0.0.1:${(fakeSaas.address() as AddressInfo).port}`;
   const server = createActionsMcpServer({
     tenantId,
@@ -161,6 +161,7 @@ function connectedClient() {
     secretProvider: vault,
     qontoBaseUrl: saasBase,
     pennylaneBaseUrl: saasBase,
+    ...extraContext,
   });
   const client = new Client({ name: "test-client", version: "0.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -367,6 +368,19 @@ describe("stocks (ticket 3.2) — lecture libre, ajustement HITL", () => {
     });
     expect(unknown.isError).toBe(true);
     expect(await withTenant(tenantId, (tx) => tx.pendingAction.count())).toBe(before);
+  });
+});
+
+describe("sonnette push (2.17)", () => {
+  it("préparer une pending_action sonne onPendingAction — un signal, zéro donnée", async () => {
+    let rings = 0;
+    const client = await connectedClient({ onPendingAction: () => void (rings += 1) });
+    const result = await client.callTool({
+      name: "adjust_stock",
+      arguments: { itemName: "Disjoncteur 20A", delta: 1, reason: "test sonnette" },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(rings).toBe(1);
   });
 });
 

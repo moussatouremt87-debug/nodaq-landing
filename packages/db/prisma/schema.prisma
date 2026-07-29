@@ -36,6 +36,8 @@ model Tenant {
   classeurDocuments ClasseurDocument[]
   stockItems      StockItem[]
   stockMovements  StockMovement[]
+  pushSubscriptions   PushSubscription[]
+  pushDispatchStates  PushDispatchState[]
 
   @@map("tenants")
 }
@@ -476,4 +478,54 @@ model StockMovement {
 
   @@index([tenantId, itemId])
   @@map("stock_movements")
+}
+
+/// Ticket 2.17 — notifications push Web/PWA. Un abonnement Web Push par
+/// appareil navigateur (`endpoint` est l'URL du service push, unique tous
+/// tenants confondus — un même appareil ne peut être abonné qu'une fois).
+/// `userId` est l'utilisateur de session propriétaire de l'appareil (plan
+/// AUTH séparé, pas de FK vers `users` — même logique que `PendingAction.requestedBy`).
+/// `p256dh`/`auth` sont les clés de chiffrement de la subscription — sensibles
+/// comme un secret d'appareil, jamais loggées. Sealed by RLS (see the migration
+/// `rls_push_notifications`).
+model PushSubscription {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  /// URL du service push navigateur — clé d'unicité de l'appareil.
+  endpoint        String    @unique
+  /// Clés Web Push de la subscription — sensibles, jamais loggées.
+  p256dh          String
+  auth            String
+  /// Libellé d'appareil (ex. user agent), pour affichage dans les réglages.
+  userAgent       String?   @map("user_agent")
+  actionsEnabled  Boolean   @default(true) @map("actions_enabled")
+  alertsEnabled   Boolean   @default(true) @map("alerts_enabled")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  lastUsedAt      DateTime? @map("last_used_at")
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId])
+  @@map("push_subscriptions")
+}
+
+/// Ticket 2.17 — état de regroupement anti-spam des notifications push, une
+/// ligne par (tenant, user, catégorie). Permet de fenêtrer/agréger les envois
+/// (ex. ne pas notifier à chaque pending_action mais regrouper sur une fenêtre)
+/// sans rejouer de logique métier en DB. Sealed by RLS (see the migration
+/// `rls_push_notifications`).
+model PushDispatchState {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  /// 'actions' | 'alerts' — validated app-side by Zod.
+  category        String
+  pendingCount    Int       @default(0) @map("pending_count")
+  windowStartedAt DateTime? @map("window_started_at")
+  lastSentAt      DateTime? @map("last_sent_at")
+  lastSeenAt      DateTime? @map("last_seen_at")
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId, category])
+  @@map("push_dispatch_states")
 }

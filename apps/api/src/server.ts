@@ -15,15 +15,32 @@ await injectSecrets([
   { name: "AUTH_SECRET", required: isProd },
   { name: "APP_DATABASE_URL", required: isProd },
   { name: "AUTH_BASE_URL", required: false },
+  // Notifications push (2.17) — optionnelles : absentes, la feature dégrade
+  // (routes 503, aucun envoi), le reste de l'app est intact.
+  { name: "PUSH_VAPID_PUBLIC_KEY", required: false },
+  { name: "PUSH_VAPID_PRIVATE_KEY", required: false },
+  { name: "PUSH_VAPID_SUBJECT", required: false },
 ]);
 
 const { buildApp } = await import("./app.js");
 const { prisma } = await import("@nodaq/db");
+const { createWebPushSender, startPushSweep } = await import("./push.js");
 
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? "0.0.0.0";
 
 const app = buildApp();
+
+// Dispatch push : sweep périodique en process (Postgres porte l'état de
+// regroupement — pas de Redis provisionné ; l'envoyeur est injectable).
+const pushSender = createWebPushSender();
+if (pushSender) {
+  const stopPushSweep = startPushSweep({ sender: pushSender });
+  app.addHook("onClose", async () => stopPushSweep());
+  app.log.info("push sweep started");
+} else {
+  app.log.info("push notifications not configured (no VAPID keys) — disabled");
+}
 
 async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, "graceful shutdown");

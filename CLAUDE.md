@@ -50,6 +50,12 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > chaque verdict chiffré) — factures avec `customer {id,name}` (Pennylane/démo/FEC),
 > outil `analyze_customer_signals` OWNER-ONLY (PII + CA par client), non-attribuées
 > comptées jamais tues (`docs/signaux-clients.md`).
+> **Push (2.17)** : payload push = `{type, count, deepLink}` STRUCTUREL (`PushPayload`
+> clos, `apps/api/src/push.ts`) — jamais une donnée métier vers FCM/Apple ; clés VAPID
+> au coffre (absentes = 503, dégradation propre) ; regroupement 15 min + pas de
+> re-notif avant ouverture de la file ; opt-in par appareil/type, `push_subscriptions`
+> RLS ; dispatch = sweep Postgres en process (BullMQ quand Redis existera)
+> (`docs/notifications-push.md`).
 
 ---
 
