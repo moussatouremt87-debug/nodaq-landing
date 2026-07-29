@@ -193,7 +193,7 @@ model Classification {
 model Connector {
   id              String   @id @default(uuid()) @db.Uuid
   tenantId        String   @map("tenant_id") @db.Uuid
-  /// 'pennylane' | 'qonto' — validated app-side by Zod.
+  /// 'pennylane' | 'qonto' | 'bridge' — validated app-side by Zod.
   type            String
   /// Secret NAME in the vault (Scaleway Secret Manager in prod) — never the credential itself.
   credentialsRef  String   @map("credentials_ref")

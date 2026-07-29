@@ -9,10 +9,14 @@ import { createAdminClient } from "@nodaq/db/admin";
 import type { SecretProvider } from "@nodaq/secrets";
 import {
   ConnectorNotConfiguredError,
+  DEMO_CONNECTOR_STATUS,
   connectorSecretName,
+  getBankClient,
   getPennylaneClient,
   getQontoClient,
 } from "../src/registry.js";
+import { BridgeClient } from "../src/bridge.js";
+import { DemoQontoClient } from "../src/demo.js";
 import { createConnectorsMcpServer } from "../src/server.js";
 
 /**
@@ -265,5 +269,139 @@ describe("registry — tenant isolation & failure modes", () => {
         }),
       );
     }
+  });
+});
+
+describe("getBankClient — Qonto priority, Bridge fallback (ticket 2.15)", () => {
+  let admin: PrismaClient;
+  let tenantQontoOnly: string;
+  let tenantBridgeOnly: string;
+  let tenantBoth: string;
+  let tenantNeither: string;
+  let tenantBridgeDemo: string;
+
+  const bankVaultEntries: Record<string, string> = {};
+  const bankVault: SecretProvider = {
+    get(name) {
+      return Promise.resolve(bankVaultEntries[name]);
+    },
+  };
+
+  beforeAll(async () => {
+    admin = createAdminClient();
+    const names = [
+      "Bank Qonto Only",
+      "Bank Bridge Only",
+      "Bank Both",
+      "Bank Neither",
+      "Bank Bridge Demo",
+    ];
+    await admin.connector.deleteMany({ where: { tenant: { name: { in: names } } } });
+    await admin.tenant.deleteMany({ where: { name: { in: names } } });
+    tenantQontoOnly = (await admin.tenant.create({ data: { name: "Bank Qonto Only" } })).id;
+    tenantBridgeOnly = (await admin.tenant.create({ data: { name: "Bank Bridge Only" } })).id;
+    tenantBoth = (await admin.tenant.create({ data: { name: "Bank Both" } })).id;
+    tenantNeither = (await admin.tenant.create({ data: { name: "Bank Neither" } })).id;
+    tenantBridgeDemo = (await admin.tenant.create({ data: { name: "Bank Bridge Demo" } })).id;
+
+    bankVaultEntries[connectorSecretName(tenantQontoOnly, "qonto")] = JSON.stringify({
+      organizationSlug: "qonto-only-org",
+      secretKey: "sk-qonto-only",
+    });
+    bankVaultEntries[connectorSecretName(tenantBridgeOnly, "bridge")] = JSON.stringify({
+      clientId: "bridge-client-id",
+      clientSecret: "bridge-client-secret",
+      userUuid: "bridge-user-only",
+    });
+    bankVaultEntries[connectorSecretName(tenantBoth, "qonto")] = JSON.stringify({
+      organizationSlug: "both-org",
+      secretKey: "sk-both",
+    });
+    bankVaultEntries[connectorSecretName(tenantBoth, "bridge")] = JSON.stringify({
+      clientId: "should-never-be-read",
+      clientSecret: "should-never-be-read",
+      userUuid: "should-never-be-read",
+    });
+
+    await withTenant(tenantQontoOnly, (tx) =>
+      tx.connector.create({
+        data: {
+          tenantId: tenantQontoOnly,
+          type: "qonto",
+          credentialsRef: connectorSecretName(tenantQontoOnly, "qonto"),
+        },
+      }),
+    );
+    await withTenant(tenantBridgeOnly, (tx) =>
+      tx.connector.create({
+        data: {
+          tenantId: tenantBridgeOnly,
+          type: "bridge",
+          credentialsRef: connectorSecretName(tenantBridgeOnly, "bridge"),
+        },
+      }),
+    );
+    await withTenant(tenantBoth, (tx) =>
+      tx.connector.createMany({
+        data: [
+          { tenantId: tenantBoth, type: "qonto", credentialsRef: connectorSecretName(tenantBoth, "qonto") },
+          { tenantId: tenantBoth, type: "bridge", credentialsRef: connectorSecretName(tenantBoth, "bridge") },
+        ],
+      }),
+    );
+    await withTenant(tenantBridgeDemo, (tx) =>
+      tx.connector.create({
+        data: {
+          tenantId: tenantBridgeDemo,
+          type: "bridge",
+          status: DEMO_CONNECTOR_STATUS,
+          credentialsRef: connectorSecretName(tenantBridgeDemo, "bridge"),
+        },
+      }),
+    );
+  });
+
+  afterAll(async () => {
+    await admin.$disconnect();
+  });
+
+  it("row qonto -> QontoClient (priority over Bridge)", async () => {
+    const client = await getBankClient(tenantQontoOnly, {
+      secretProvider: bankVault,
+      qontoBaseUrl: baseUrl,
+    });
+    const { organization } = await client.getOrganization();
+    expect(organization.slug).toBe("org-a"); // fixed slug from the fake SaaS server fixture
+  });
+
+  it("qonto + bridge both configured -> qonto wins, bridge vault never read", async () => {
+    const client = await getBankClient(tenantBoth, {
+      secretProvider: bankVault,
+      qontoBaseUrl: baseUrl,
+    });
+    const { organization } = await client.getOrganization();
+    expect(organization.slug).toBe("org-a");
+  });
+
+  it("no qonto, row bridge -> BridgeClient", async () => {
+    const client = await getBankClient(tenantBridgeOnly, { secretProvider: bankVault });
+    expect(client).toBeInstanceOf(BridgeClient);
+    expect(client).not.toBeInstanceOf(DemoQontoClient);
+  });
+
+  it("neither qonto nor bridge configured -> ConnectorNotConfiguredError", async () => {
+    await expect(
+      getBankClient(tenantNeither, { secretProvider: bankVault }),
+    ).rejects.toBeInstanceOf(ConnectorNotConfiguredError);
+  });
+
+  it("row bridge in status demo -> DemoQontoClient (demo fixtures, no vault read)", async () => {
+    const explodingVault: SecretProvider = {
+      get() {
+        throw new Error("vault must never be read in demo mode");
+      },
+    };
+    const client = await getBankClient(tenantBridgeDemo, { secretProvider: explodingVault });
+    expect(client).toBeInstanceOf(DemoQontoClient);
   });
 });

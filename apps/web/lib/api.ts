@@ -146,7 +146,7 @@ export const listConnectors = (): Promise<ConnectorSummary[]> =>
   );
 
 export const connectConnector = (
-  type: "pennylane" | "qonto",
+  type: "pennylane" | "qonto" | "bridge",
   credentials: Record<string, string>,
 ): Promise<void> =>
   call(z.object({ type: z.string() }), "/connectors", {

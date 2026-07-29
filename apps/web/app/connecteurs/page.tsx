@@ -21,7 +21,7 @@ import type { ConnectorSummary, FecImportReport, FecStatus } from "../../lib/api
  */
 
 interface ConnectorSpec {
-  type: "qonto" | "pennylane";
+  type: "qonto" | "pennylane" | "bridge";
   title: string;
   purpose: string;
   fields: { name: string; label: string; secret: boolean }[];
@@ -35,6 +35,17 @@ const CONNECTORS: ConnectorSpec[] = [
     fields: [
       { name: "organizationSlug", label: "Identifiant d'organisation (slug)", secret: false },
       { name: "secretKey", label: "Clé secrète API", secret: true },
+    ],
+  },
+  {
+    type: "bridge",
+    title: "Bridge — toutes banques",
+    purpose:
+      "Agrégateur DSP2 : soldes et transactions de toutes les banques françaises. Utilisé automatiquement si Qonto n'est pas connecté.",
+    fields: [
+      { name: "clientId", label: "Client ID", secret: false },
+      { name: "clientSecret", label: "Client Secret", secret: true },
+      { name: "userUuid", label: "UUID utilisateur Bridge (banque reliée)", secret: false },
     ],
   },
   {
