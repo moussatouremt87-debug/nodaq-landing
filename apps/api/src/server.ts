@@ -20,6 +20,18 @@ await injectSecrets([
   { name: "PUSH_VAPID_PUBLIC_KEY", required: false },
   { name: "PUSH_VAPID_PRIVATE_KEY", required: false },
   { name: "PUSH_VAPID_SUBJECT", required: false },
+  // Canal support (2.18) — même dégradation propre : sans boîte IMAP ou sans
+  // Object Storage, le canal est inactif ; sans TEM, l'envoi répond 503.
+  { name: "SUPPORT_IMAP_HOST", required: false },
+  { name: "SUPPORT_IMAP_PORT", required: false },
+  { name: "SUPPORT_IMAP_USER", required: false },
+  { name: "SUPPORT_IMAP_PASSWORD", required: false },
+  { name: "SUPPORT_S3_ENDPOINT", required: false },
+  { name: "SUPPORT_S3_BUCKET", required: false },
+  { name: "SUPPORT_S3_ACCESS_KEY", required: false },
+  { name: "SUPPORT_S3_SECRET_KEY", required: false },
+  { name: "SUPPORT_FROM_EMAIL", required: false },
+  { name: "OPS_OPERATOR_EMAILS", required: false },
 ]);
 
 const { buildApp } = await import("./app.js");
@@ -44,6 +56,45 @@ if (pushSender) {
   app.log.info("push sweep started");
 } else {
   app.log.info("push notifications not configured (no VAPID keys) — disabled");
+}
+
+// Canal support (2.18) : polling IMAP -> Object Storage -> triage -> brouillons.
+// Tout est optionnel : boîte OU stockage absents = canal inactif, app intacte.
+const { createImapMailSource } = await import("./support/imap.js");
+const { createSupportStorage } = await import("./support/storage.js");
+const { ingestSupportMailbox } = await import("./support/ingest.js");
+const supportSource = createImapMailSource();
+const supportStorage = createSupportStorage();
+if (supportSource && supportStorage) {
+  let ingesting = false;
+  const supportTimer = setInterval(() => {
+    if (ingesting) return;
+    ingesting = true;
+    void ingestSupportMailbox({
+      storage: supportStorage,
+      source: supportSource,
+      operatorEmails: (process.env.OPS_OPERATOR_EMAILS ?? "")
+        .split(",")
+        .map((email) => email.trim().toLowerCase())
+        .filter(Boolean),
+      // Nom d'erreur SEULEMENT — jamais un contenu d'e-mail dans les logs.
+      onError: (name) => app.log.warn({ err: name }, "support ingest error"),
+    })
+      .catch((error: unknown) =>
+        app.log.warn(
+          { err: error instanceof Error ? error.name : "Error" },
+          "support ingest failed",
+        ),
+      )
+      .finally(() => {
+        ingesting = false;
+      });
+  }, 90_000);
+  supportTimer.unref();
+  app.addHook("onClose", async () => clearInterval(supportTimer));
+  app.log.info("support mailbox polling started");
+} else {
+  app.log.info("support channel not configured (IMAP/storage) — disabled");
 }
 
 async function shutdown(signal: string): Promise<void> {

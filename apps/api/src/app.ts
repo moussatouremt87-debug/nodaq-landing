@@ -34,6 +34,11 @@ import {
   recordPushEvent,
   tenantOwnerIds,
 } from "./push.js";
+import { createSupportStorage } from "./support/storage.js";
+import type { SupportStorage } from "./support/storage.js";
+import { createTemMailer } from "./support/tem.js";
+import type { SupportMailer } from "./support/tem.js";
+import { assertAnonymized, SupportOrigin } from "./support/triage.js";
 
 export interface BuildAppOptions {
   /** Executors for approved pending actions (injectable in tests). */
@@ -42,6 +47,10 @@ export interface BuildAppOptions {
   agentContext?: Partial<Omit<ToolsetContext, "tenantId">>;
   /** Writable vault for connector credentials (injectable in tests). */
   vault?: WritableSecretProvider;
+  /** Object Storage du support (2.18) — factice en test, S3 sinon. */
+  supportStorage?: SupportStorage | null;
+  /** Envoi des réponses support (2.18) — factice en test, Scaleway TEM sinon. */
+  supportMailer?: SupportMailer | null;
 }
 
 type AuthSession = NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>;
@@ -1652,6 +1661,251 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
     await markPushSeen(request.tenantId, request.authSession.user.id, parsed.data.category);
     return { seen: true };
+  });
+
+  /*
+   * ── Back-office support (2.18) ─────────────────────────────────────────────
+   * Rôle plateforme OPERATOR = allowlist d'e-mails au coffre
+   * (OPS_OPERATOR_EMAILS) — hors rôles tenant. Les tables ops (schéma `ops`)
+   * ne sont accessibles QUE par ces routes ; un non-opérateur reçoit 404
+   * (l'existence même du back-office n'est pas confirmée).
+   * RÈGLE : rien ne part vers un client sans validation ici (envoi TEM), et
+   * le corps d'un e-mail ne quitte l'Object Storage que vers l'opérateur.
+   */
+  const supportStorage =
+    options.supportStorage !== undefined ? options.supportStorage : createSupportStorage();
+  const supportMailer =
+    options.supportMailer !== undefined ? options.supportMailer : createTemMailer();
+
+  const operatorEmails = (): string[] =>
+    (process.env.OPS_OPERATOR_EMAILS ?? "")
+      .split(",")
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean);
+
+  async function requireOperator(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const email = request.authSession.user.email?.toLowerCase();
+    if (!email || !operatorEmails().includes(email)) {
+      await reply.code(404).send({ error: "not found" });
+    }
+  }
+  const operatorRoute = [requireAuth, requireOperator];
+
+  const TICKET_SELECT = {
+    id: true,
+    fromEmail: true,
+    subject: true,
+    tenantId: true,
+    origin: true,
+    level: true,
+    status: true,
+    authSignal: true,
+    inReplyTo: true,
+    repliedAt: true,
+    createdAt: true,
+    updatedAt: true,
+  } as const;
+
+  app.get("/ops/support/tickets", { preHandler: operatorRoute }, async (request, reply) => {
+    const query = z
+      .object({
+        status: z.string().max(30).optional(),
+        level: z.string().max(5).optional(),
+        origin: z.string().max(30).optional(),
+      })
+      .safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send({ error: "invalid query" });
+    return prisma.supportTicket.findMany({
+      where: {
+        ...(query.data.status ? { status: query.data.status } : {}),
+        ...(query.data.level ? { level: query.data.level } : {}),
+        ...(query.data.origin ? { origin: query.data.origin } : {}),
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      select: TICKET_SELECT,
+    });
+  });
+
+  app.get("/ops/support/tickets/:id", { preHandler: operatorRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid id" });
+    const ticket = await prisma.supportTicket.findUnique({
+      where: { id: params.data.id },
+      select: { ...TICKET_SELECT, draftReply: true, agentReport: true, objectKeys: true },
+    });
+    if (!ticket) return reply.code(404).send({ error: "unknown ticket" });
+    return ticket;
+  });
+
+  // Corps original : lu depuis l'Object Storage, servi à l'OPÉRATEUR seul.
+  app.get(
+    "/ops/support/tickets/:id/body",
+    { preHandler: operatorRoute },
+    async (request, reply) => {
+      const params = z.object({ id: Uuid }).safeParse(request.params);
+      if (!params.success) return reply.code(400).send({ error: "invalid id" });
+      if (!supportStorage) return reply.code(503).send({ error: "stockage non configuré" });
+      const ticket = await prisma.supportTicket.findUnique({
+        where: { id: params.data.id },
+        select: { objectKeys: true },
+      });
+      const keys = z.array(z.string()).catch([]).parse(ticket?.objectKeys ?? []);
+      const bodyKey = keys.find((key) => key.endsWith("/body.txt"));
+      if (!bodyKey) return reply.code(404).send({ error: "no body" });
+      const object = await supportStorage.get(bodyKey);
+      if (!object) return reply.code(404).send({ error: "no body" });
+      reply.header("content-type", "text/plain; charset=utf-8");
+      reply.header("x-content-type-options", "nosniff");
+      return reply.send(Buffer.from(object.body));
+    },
+  );
+
+  app.patch("/ops/support/tickets/:id", { preHandler: operatorRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    const body = z
+      .object({ draftReply: z.string().min(1).max(20_000) })
+      .strict()
+      .safeParse(request.body);
+    if (!params.success || !body.success) return reply.code(400).send({ error: "invalid payload" });
+    const updated = await prisma.supportTicket.updateMany({
+      where: { id: params.data.id, status: { in: ["TRIE", "BROUILLON_PRET"] } },
+      data: { draftReply: body.data.draftReply, status: "BROUILLON_PRET" },
+    });
+    if (updated.count === 0) return reply.code(404).send({ error: "unknown ticket" });
+    return { updated: true };
+  });
+
+  // LA validation 1 clic : seul chemin d'envoi vers un client (jamais d'envoi
+  // automatique — auto_reply n'existe qu'en flag documenté, OFF).
+  app.post(
+    "/ops/support/tickets/:id/send",
+    { preHandler: operatorRoute },
+    async (request, reply) => {
+      const params = z.object({ id: Uuid }).safeParse(request.params);
+      if (!params.success) return reply.code(400).send({ error: "invalid id" });
+      if (!supportMailer) return reply.code(503).send({ error: "envoi non configuré (TEM)" });
+      const ticket = await prisma.supportTicket.findUnique({ where: { id: params.data.id } });
+      if (!ticket || !ticket.draftReply) return reply.code(404).send({ error: "no draft" });
+      if (ticket.status !== "BROUILLON_PRET") {
+        return reply.code(409).send({ error: "ticket not ready" });
+      }
+      await supportMailer.send({
+        to: ticket.fromEmail,
+        subject: ticket.subject.startsWith("Re:") ? ticket.subject : `Re: ${ticket.subject}`,
+        text: ticket.draftReply,
+        ...(ticket.inReplyTo ? { inReplyTo: ticket.inReplyTo } : {}),
+      });
+      await prisma.supportTicket.update({
+        where: { id: ticket.id },
+        data: { status: "REPONDU", repliedAt: new Date() },
+      });
+      return { sent: true };
+    },
+  );
+
+  const ResolveBody = z
+    .object({
+      /** Incrémenter une entrée existante du recueil… */
+      issueId: Uuid.optional(),
+      /** …ou en proposer une nouvelle (anonymisée, garde vérifiée). */
+      issue: z
+        .object({
+          title: z.string().min(1).max(200),
+          symptoms: z.string().min(1).max(2_000),
+          cause: z.string().max(2_000).default(""),
+          resolution: z.string().max(2_000).default(""),
+          origin: SupportOrigin,
+        })
+        .strict()
+        .optional(),
+    })
+    .strict();
+
+  app.post(
+    "/ops/support/tickets/:id/resolve",
+    { preHandler: operatorRoute },
+    async (request, reply) => {
+      const params = z.object({ id: Uuid }).safeParse(request.params);
+      const body = ResolveBody.safeParse(request.body ?? {});
+      if (!params.success || !body.success) {
+        return reply.code(400).send({ error: "invalid payload" });
+      }
+      const ticket = await prisma.supportTicket.findUnique({ where: { id: params.data.id } });
+      if (!ticket) return reply.code(404).send({ error: "unknown ticket" });
+
+      let issueId: string | null = null;
+      if (body.data.issueId) {
+        const updated = await prisma.supportIssue.updateMany({
+          where: { id: body.data.issueId },
+          data: { occurrences: { increment: 1 } },
+        });
+        if (updated.count === 0) return reply.code(404).send({ error: "unknown issue" });
+        issueId = body.data.issueId;
+      } else if (body.data.issue) {
+        // Garde d'anonymisation : le recueil sert TOUS les tenants — jamais
+        // l'adresse de l'expéditeur, son domaine ou le nom du tenant dedans.
+        const tenant = ticket.tenantId
+          ? await prisma.tenant.findUnique({
+              where: { id: ticket.tenantId },
+              select: { name: true },
+            })
+          : null;
+        const text = `${body.data.issue.title} ${body.data.issue.symptoms} ${body.data.issue.cause} ${body.data.issue.resolution}`;
+        try {
+          assertAnonymized(text, [
+            ticket.fromEmail,
+            ticket.fromEmail.split("@")[1] ?? "",
+            tenant?.name ?? "",
+          ]);
+        } catch {
+          return reply
+            .code(400)
+            .send({ error: "entrée non anonymisée (adresse, domaine ou tenant présent)" });
+        }
+        const issue = await prisma.supportIssue.create({ data: body.data.issue });
+        issueId = issue.id;
+      }
+
+      await prisma.supportTicket.update({
+        where: { id: ticket.id },
+        data: { status: "RESOLU" },
+      });
+      return { resolved: true, issueId };
+    },
+  );
+
+  app.get("/ops/support/issues", { preHandler: operatorRoute }, async () => {
+    return prisma.supportIssue.findMany({ orderBy: { updatedAt: "desc" }, take: 200 });
+  });
+
+  app.post(
+    "/ops/support/issues/:id/validate",
+    { preHandler: operatorRoute },
+    async (request, reply) => {
+      const params = z.object({ id: Uuid }).safeParse(request.params);
+      if (!params.success) return reply.code(400).send({ error: "invalid id" });
+      const updated = await prisma.supportIssue.updateMany({
+        where: { id: params.data.id },
+        data: { validated: true },
+      });
+      if (updated.count === 0) return reply.code(404).send({ error: "unknown issue" });
+      return { validated: true };
+    },
+  );
+
+  app.get("/ops/support/stats", { preHandler: operatorRoute }, async () => {
+    const byStatus = await prisma.supportTicket.groupBy({
+      by: ["status"],
+      _count: { _all: true },
+    });
+    const byLevel = await prisma.supportTicket.groupBy({ by: ["level"], _count: { _all: true } });
+    const issues = await prisma.supportIssue.count({ where: { validated: true } });
+    return {
+      byStatus: Object.fromEntries(byStatus.map((row) => [row.status, row._count._all])),
+      byLevel: Object.fromEntries(byLevel.map((row) => [row.level ?? "?", row._count._all])),
+      validatedIssues: issues,
+    };
   });
 
   return app;
