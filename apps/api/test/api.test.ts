@@ -633,6 +633,22 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       const anon = await execApp.inject({ method: "GET", url: "/cockpit/kpis" });
       expect(anon.statusCode).toBe(401);
 
+      // Pennylane démo pour orgA : la prévision des ventes (3.1) s'appuie sur
+      // les fixtures (12 mois d'historique payé), zéro réseau.
+      const { withTenant: wt } = await import("@nodaq/db");
+      await wt(orgA, (tx) =>
+        tx.connector.upsert({
+          where: { tenantId_type: { tenantId: orgA, type: "pennylane" } },
+          update: { status: "demo" },
+          create: {
+            tenantId: orgA,
+            type: "pennylane",
+            status: "demo",
+            credentialsRef: `connector/${orgA}/pennylane`,
+          },
+        }),
+      );
+
       // Owner: pending-action counts + a real Qonto-backed forecast.
       const owner = await execApp.inject({
         method: "GET",
@@ -648,6 +664,11 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
           currentBalanceCents: number;
           points: { horizonDays: number; projectedBalanceCents: number }[];
         } | null;
+        sales: {
+          observedMonths: number;
+          method: string;
+          points: { month: string; revenueCents: number }[];
+        } | null;
       };
       expect(kpis.pendingActions.executed).toBeGreaterThanOrEqual(1);
       // Shape pinned here because the web cockpit parses EXACTLY these fields
@@ -655,6 +676,11 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       expect(kpis.treasury).toMatchObject({ account: "main", currentBalanceCents: 500_000 });
       expect(kpis.treasury?.points.map((p) => p.horizonDays)).toEqual([30, 60, 90]);
       expect(typeof kpis.treasury?.points[0]?.projectedBalanceCents).toBe("number");
+      // Prévision des ventes (3.1) : 12 mois d'historique démo => régression.
+      expect(kpis.sales).toMatchObject({ method: "regression-lineaire" });
+      expect(kpis.sales?.observedMonths).toBeGreaterThanOrEqual(12);
+      expect(kpis.sales?.points).toHaveLength(3);
+      expect(kpis.sales?.points.every((p) => p.revenueCents > 0)).toBe(true);
 
       // A MEMBER of the same tenant sees the counts but NOT the treasury.
       const cookieM2 = await signup("cockpit-membre@example.com", "Cockpit Membre");
@@ -675,6 +701,8 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       });
       expect(member.statusCode).toBe(200);
       expect(member.json().treasury).toBeNull();
+      // Le CA agrégé est owner-only, comme la trésorerie (3.1).
+      expect(member.json().sales).toBeNull();
       expect(member.json().pendingActions).toEqual(kpis.pendingActions);
     });
 

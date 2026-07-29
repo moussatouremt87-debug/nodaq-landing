@@ -1,6 +1,8 @@
 export { createActionsMcpServer, TOOL_POLICIES } from "./server.js";
 export { forecastTreasury, TreasuryTransaction } from "./treasury.js";
 export type { TreasuryForecast, TreasuryForecastPoint } from "./treasury.js";
+export { buildMonthlySeries, forecastSales, ForecastInvoice } from "./salesForecast.js";
+export type { MonthlyRevenuePoint, SalesForecast } from "./salesForecast.js";
 export { scoreLatePayment, ScorableInvoice } from "./dunning.js";
 export type { LatePaymentScore, RiskBand } from "./dunning.js";
 export type { ActionsServerContext } from "./server.js";

@@ -144,6 +144,14 @@ export default function CockpitPage() {
   }
 
   const treasury = kpis?.treasury ?? null;
+  const sales = kpis?.sales ?? null;
+  const salesBars = sales
+    ? [
+        ...sales.series.map((p) => ({ month: p.month, revenueCents: p.revenueCents, forecast: false })),
+        ...sales.points.map((p) => ({ month: p.month, revenueCents: p.revenueCents, forecast: true })),
+      ]
+    : [];
+  const salesMax = Math.max(1, ...salesBars.map((b) => b.revenueCents));
   const executed = kpis?.pendingActions.executed ?? 0;
 
   // Projection linéaire — exactement le modèle de l'API (flux net moyen/j).
@@ -304,6 +312,50 @@ export default function CockpitPage() {
               Projection indisponible — connectez Qonto (ou vous n&apos;êtes pas owner de
               l&apos;organisation).
             </p>
+          )}
+
+          {sales && sales.observedMonths > 0 && (
+            <>
+              <hr className="divider" />
+              <div className="card-header">
+                <div className="titles">
+                  <div className="title">Prévision des ventes</div>
+                  <div className="sub">
+                    CA mensuel observé ({sales.observedMonths} mois) · prévision{" "}
+                    {sales.points.length} mois
+                  </div>
+                </div>
+              </div>
+              <div
+                className="chart"
+                role="img"
+                aria-label="Chiffre d'affaires mensuel et prévision des ventes"
+              >
+                {salesBars.map((bar) => (
+                  <div
+                    key={bar.month}
+                    className={`bar ${bar.forecast ? "low" : ""}`}
+                    style={{ height: `${Math.max(4, (bar.revenueCents / salesMax) * 100)}%` }}
+                    title={`${bar.month} : ${formatEuroCents(bar.revenueCents)}${bar.forecast ? " (prévision)" : ""}`}
+                  />
+                ))}
+              </div>
+              <div className="xlabels">
+                <span>{salesBars[0]?.month}</span>
+                <span>prévision → {salesBars[salesBars.length - 1]?.month}</span>
+              </div>
+              <div className="annotation">
+                <span className="dot" aria-hidden />
+                <span>
+                  {sales.trendCentsPerMonth >= 0 ? "Tendance +" : "Tendance −"}
+                  {formatEuroCents(Math.abs(sales.trendCentsPerMonth))}/mois (
+                  {sales.method === "regression-lineaire"
+                    ? "régression linéaire explicable"
+                    : "moyenne — historique court"}
+                  )
+                </span>
+              </div>
+            </>
           )}
         </div>
 

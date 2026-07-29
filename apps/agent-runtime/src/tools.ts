@@ -29,7 +29,9 @@ export interface ToolsetContext extends Omit<ActionsServerContext, "tenantId"> {
  * (delegated third party) must not obtain it through the agent either.
  * Fail-closed: no role provided = not owner.
  */
-const OWNER_ONLY_TOOLS = new Set(["compute_treasury_forecast"]);
+// forecast_sales : le chiffre d'affaires agrégé est une donnée financière
+// globale du tenant, même raisonnement tiers-délégué que la trésorerie.
+const OWNER_ONLY_TOOLS = new Set(["compute_treasury_forecast", "forecast_sales"]);
 
 export interface Toolset {
   definitions: ToolDefinition[];

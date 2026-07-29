@@ -74,6 +74,18 @@ export const CockpitKpis = z.object({
       points: z.array(z.object({ horizonDays: z.number(), projectedBalanceCents: z.number() })),
     })
     .nullable(),
+  // Prévision des ventes (3.1) — owner only côté API, null sinon.
+  sales: z
+    .object({
+      series: z.array(
+        z.object({ month: z.string(), revenueCents: z.number(), invoiceCount: z.number() }),
+      ),
+      points: z.array(z.object({ month: z.string(), revenueCents: z.number() })),
+      observedMonths: z.number(),
+      trendCentsPerMonth: z.number(),
+      method: z.string(),
+    })
+    .nullable(),
 });
 export type CockpitKpis = z.infer<typeof CockpitKpis>;
 

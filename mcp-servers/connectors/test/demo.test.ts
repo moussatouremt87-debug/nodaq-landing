@@ -107,10 +107,12 @@ describe("registre en mode démo", () => {
     expect(transactions.every((t) => t.settled_at && t.side)).toBe(true);
   });
 
-  it("pennylane : 7 factures dont 3 en retard totalisant 8 030 €", async () => {
+  it("pennylane : 19 factures (7 récentes + 12 mois d'historique payé) dont 3 en retard totalisant 8 030 €", async () => {
     const pennylane = await getPennylaneClient(tenantDemo, { secretProvider: explodingVault });
     const { items } = await pennylane.listCustomerInvoices({ limit: 100 });
-    expect(items).toHaveLength(7);
+    // 7 récentes + 12 mensuelles payées (historique pour la prévision 3.1).
+    expect(items).toHaveLength(19);
+    expect(items.filter((i) => i.id.startsWith("inv-hist-"))).toHaveLength(12);
     const late = items.filter((invoice) => invoice.status === "late");
     expect(late).toHaveLength(3);
     const lateCents = late.reduce(

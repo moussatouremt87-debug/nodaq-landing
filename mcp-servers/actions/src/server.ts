@@ -11,6 +11,7 @@ import { scoreLatePayment } from "./dunning.js";
 import { extractInvoiceFields } from "./invoiceExtraction.js";
 import type { OcrClientOptions } from "./ocrClient.js";
 import { extractInvoiceText } from "./ocrClient.js";
+import { buildMonthlySeries, forecastSales } from "./salesForecast.js";
 import { forecastTreasury } from "./treasury.js";
 import type { TreasuryTransaction } from "./treasury.js";
 
@@ -46,6 +47,7 @@ export const TOOL_POLICIES = {
   ocr_and_book_invoice: { requiresValidation: true },
   draft_dunning: { requiresValidation: true },
   compute_treasury_forecast: { requiresValidation: false },
+  forecast_sales: { requiresValidation: false },
 } as const satisfies Record<string, { requiresValidation: boolean }>;
 
 const DUNNING_PROMPT =
@@ -168,6 +170,48 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
             text: JSON.stringify({ account: account.slug, ...forecast }),
           },
         ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "forecast_sales",
+    {
+      description:
+        "Prévision des ventes (lecture seule, ticket 3.1) : chiffre d'affaires mensuel " +
+        "observé sur les factures clients (12 derniers mois) projeté sur 3 mois par " +
+        "régression linéaire explicable. Fonctionne avec Pennylane, la démo ou un " +
+        "import FEC.",
+      inputSchema: {
+        horizonMonths: z
+          .number()
+          .int()
+          .min(1)
+          .max(6)
+          .optional()
+          .describe("Horizon de prévision en mois (défaut 3)"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ horizonMonths }) => {
+      const pennylane = await getPennylaneClient(tenantId, context);
+      // Fenêtre bornée : jusqu'à 5 pages de 100 factures (couvre largement
+      // 12 mois d'une PME sans jamais aspirer un historique entier).
+      const invoices = [];
+      let cursor: string | undefined;
+      for (let pageIndex = 0; pageIndex < 5; pageIndex++) {
+        const { items, next_cursor } = await pennylane.listCustomerInvoices({
+          limit: 100,
+          ...(cursor ? { cursor } : {}),
+        });
+        invoices.push(...items);
+        if (!next_cursor) break;
+        cursor = next_cursor;
+      }
+      const series = buildMonthlySeries(invoices, new Date());
+      const forecast = forecastSales(series, horizonMonths ?? 3);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(forecast) }],
       };
     },
   );

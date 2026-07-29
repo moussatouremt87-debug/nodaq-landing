@@ -190,7 +190,26 @@ export class DemoPennylaneClient extends PennylaneClient {
       { id: "inv-2026-112", invoice_number: "2026-112", amount: "7900.00", currency: "EUR", date: isoDaysAgo(now, 75), deadline: isoDaysAgo(now, 45), status: "paid" },
       { id: "inv-2026-109", invoice_number: "2026-109", amount: "2140.00", currency: "EUR", date: isoDaysAgo(now, 96), deadline: isoDaysAgo(now, 66), status: "paid" },
     ];
-    return { items: [...late, ...others], next_cursor: null };
+    // Historique 12 mois pour la prévision des ventes (3.1) : électricien du
+    // bâtiment — creux d'hiver, gros chantiers au printemps, légère croissance.
+    const monthlyPaidCents = [
+      812_000, 743_000, 918_000, 1_065_000, 1_231_000, 1_148_000, 1_309_000, 986_000, 1_074_000,
+      1_282_000, 1_390_000, 1_243_000,
+    ];
+    const history = monthlyPaidCents.map((cents, index) => {
+      const monthsAgo = monthlyPaidCents.length - index; // 12 -> 1 mois en arrière
+      const issued = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - monthsAgo, 12));
+      return {
+        id: `inv-hist-${index + 1}`,
+        invoice_number: `H-${String(index + 1).padStart(3, "0")}`,
+        amount: euros(cents),
+        currency: "EUR",
+        date: issued.toISOString(),
+        deadline: new Date(issued.getTime() + 30 * 86_400_000).toISOString(),
+        status: "paid",
+      };
+    });
+    return { items: [...late, ...others, ...history], next_cursor: null };
   }
 
   override async listCustomers(_options = {}) {
