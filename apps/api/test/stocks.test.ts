@@ -192,6 +192,73 @@ describe("référentiel /stocks", () => {
     expect(updated.json().item).toMatchObject({ alertThreshold: 10, belowThreshold: false });
   });
 
+  it("coûts et valorisation (3.3) : OWNER only — un membre voit les quantités, jamais les coûts", async () => {
+    const updated = await app.inject({
+      method: "PATCH",
+      url: `/stocks/${itemId}`,
+      headers: { cookie: ownerCookie, "content-type": "application/json" },
+      payload: { unitCostCents: 120 },
+    });
+    expect(updated.statusCode).toBe(200);
+    // La réponse du PATCH (route owner) porte coût ET valorisation : la page
+    // remplace l'article en état local avec cette réponse (audit 3.3).
+    expect(updated.json().item).toMatchObject({ unitCostCents: 120, valueCents: 40 * 120 });
+
+    const ownerList = await app.inject({
+      method: "GET",
+      url: "/stocks",
+      headers: { cookie: ownerCookie },
+    });
+    const ownerItem = ownerList.json().items.find((i: { id: string }) => i.id === itemId);
+    expect(ownerItem).toMatchObject({ unitCostCents: 120, valueCents: 40 * 120 });
+
+    const memberList = await app.inject({
+      method: "GET",
+      url: "/stocks",
+      headers: { cookie: memberCookie },
+    });
+    const memberItem = memberList.json().items.find((i: { id: string }) => i.id === itemId);
+    expect(memberItem.quantity).toBe(40);
+    expect(memberList.body).not.toContain("unitCostCents");
+    expect(memberList.body).not.toContain("valueCents");
+
+    // Le membre ne peut pas non plus l'écrire (route owner).
+    const denied = await app.inject({
+      method: "PATCH",
+      url: `/stocks/${itemId}`,
+      headers: { cookie: memberCookie, "content-type": "application/json" },
+      payload: { unitCostCents: 999 },
+    });
+    expect(denied.statusCode).toBe(403);
+
+    // L'ACCOUNTANT (tiers délégué — le cas le plus sensible) est strippé
+    // par le même chemin fail-closed : asserté explicitement.
+    const accountantCookie = await signup(
+      `stocks-accountant-${RUN}@example.com`,
+      "Stocks Accountant",
+    );
+    const accountantId = (
+      await app.inject({ method: "GET", url: "/me", headers: { cookie: accountantCookie } })
+    ).json().userId as string;
+    await admin.membership.create({
+      data: { tenantId: orgA, userId: accountantId, role: "accountant" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/auth/organization/set-active",
+      headers: { cookie: accountantCookie },
+      payload: { organizationId: orgA },
+    });
+    const accountantList = await app.inject({
+      method: "GET",
+      url: "/stocks",
+      headers: { cookie: accountantCookie },
+    });
+    expect(accountantList.statusCode).toBe(200);
+    expect(accountantList.body).not.toContain("unitCostCents");
+    expect(accountantList.body).not.toContain("valueCents");
+  });
+
   it("isolation : le tenant B ne voit rien", async () => {
     const list = await app.inject({ method: "GET", url: "/stocks", headers: { cookie: otherCookie } });
     expect(list.json().items).toEqual([]);

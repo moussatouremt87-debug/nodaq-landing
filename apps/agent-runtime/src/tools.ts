@@ -40,6 +40,8 @@ export const OWNER_ONLY_TOOLS = new Set([
   "pennylane_get_invoices",
   "qonto_get_organization",
   "qonto_get_bank_transactions",
+  // Valorisation du stock = donnée financière agrégée (3.3).
+  "simulate_material_prices",
 ]);
 
 export interface Toolset {

@@ -30,12 +30,18 @@ export default function StocksPage() {
   const [newUnit, setNewUnit] = useState("");
   const [newThreshold, setNewThreshold] = useState("");
   const [thresholdDraft, setThresholdDraft] = useState("");
+  const [costDraft, setCostDraft] = useState("");
+  const [scenarioPct, setScenarioPct] = useState("10");
+  const [hasMore, setHasMore] = useState(false);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
 
   const refresh = useCallback(() => {
     listStockItems()
-      .then(setItems)
+      .then((result) => {
+        setItems(result.items);
+        setHasMore(result.hasMore);
+      })
       .catch(() => undefined);
   }, []);
 
@@ -44,6 +50,9 @@ export default function StocksPage() {
   function select(item: StockItem): void {
     setSelectedId(item.id);
     setThresholdDraft(String(item.alertThreshold));
+    setCostDraft(
+      item.unitCostCents !== undefined ? (item.unitCostCents / 100).toFixed(2) : "",
+    );
     setMovements(null);
     setNotice(null);
     listStockMovements(item.id)
@@ -112,10 +121,23 @@ export default function StocksPage() {
       setNotice("Seuil invalide.");
       return;
     }
+    const cost =
+      costDraft.trim() === ""
+        ? undefined
+        : Math.round(Number.parseFloat(costDraft.replace(",", ".")) * 100);
+    if (cost !== undefined && (!Number.isFinite(cost) || cost < 0)) {
+      setNotice("Coût unitaire invalide.");
+      return;
+    }
     setBusy(true);
     try {
-      patchLocal(await updateStockItem(selected.id, { alertThreshold: threshold }));
-      setNotice("Seuil enregistré.");
+      patchLocal(
+        await updateStockItem(selected.id, {
+          alertThreshold: threshold,
+          ...(cost !== undefined ? { unitCostCents: cost } : {}),
+        }),
+      );
+      setNotice("Réglages enregistrés.");
     } catch (error) {
       if (error instanceof ApiError && error.status === 403) setIsOwner(false);
       setNotice(
@@ -150,6 +172,28 @@ export default function StocksPage() {
 
   const alerts = items.filter((i) => i.belowThreshold);
 
+  // Valorisation (3.3) — l'API n'expose les coûts qu'à l'owner : la carte
+  // n'apparaît que si les champs sont présents. Simulation côté client,
+  // même formule que l'outil agent (explicable).
+  const valuedItems = items.filter((i) => i.valueCents !== undefined);
+  const totalValueCents = valuedItems.reduce((sum, i) => sum + (i.valueCents ?? 0), 0);
+  const parsedPct = Number.parseFloat(scenarioPct.replace(",", "."));
+  const scenarioValid = Number.isFinite(parsedPct) && parsedPct >= -90 && parsedPct <= 500;
+  const simulatedValueCents = scenarioValid
+    ? valuedItems.reduce(
+        (sum, i) =>
+          sum +
+          i.quantity * Math.max(0, Math.round((i.unitCostCents ?? 0) * (1 + parsedPct / 100))),
+        0,
+      )
+    : totalValueCents;
+
+  function euro(cents: number): string {
+    return new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" }).format(
+      cents / 100,
+    );
+  }
+
   return (
     <>
       <h1 className="page-title">Stocks</h1>
@@ -165,6 +209,40 @@ export default function StocksPage() {
           </span>
           <p className="hint" style={{ margin: "4px 0 0" }}>
             {alerts.map((i) => `${i.name} (${i.quantity} ${i.unit})`).join(" · ")}
+          </p>
+        </div>
+      )}
+
+      {valuedItems.length > 0 && totalValueCents > 0 && (
+        <div className="card" style={{ marginBottom: 18, maxWidth: 560 }}>
+          <span className="overline">Valorisation du stock — simulation prix matières</span>
+          <p className="hint" style={{ margin: "4px 0 10px" }}>
+            Valeur de remplacement actuelle : <strong>{euro(totalValueCents)}</strong> (aux coûts
+            unitaires renseignés{hasMore ? " — valorisation PARTIELLE : 500 premiers articles" : ""}
+            ).
+          </p>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <span className="hint">Si les prix matières varient de</span>
+            <input
+              value={scenarioPct}
+              onChange={(e) => setScenarioPct(e.target.value)}
+              inputMode="decimal"
+              style={{ width: 70 }}
+              aria-label="Variation en pourcentage"
+            />
+            <span className="hint">% :</span>
+            {scenarioValid ? (
+              <strong>
+                {euro(simulatedValueCents)} ({simulatedValueCents >= totalValueCents ? "+" : "−"}
+                {euro(Math.abs(simulatedValueCents - totalValueCents))})
+              </strong>
+            ) : (
+              <span className="hint">variation entre −90 et +500</span>
+            )}
+          </div>
+          <p className="hint" style={{ margin: "8px 0 0" }}>
+            Simulation explicable : quantités × coûts de remplacement. Demandez à l&apos;employé
+            Compta « et si le cuivre prend 10 % ? » pour un scénario par matière.
           </p>
         </div>
       )}
@@ -246,6 +324,15 @@ export default function StocksPage() {
                       value={thresholdDraft}
                       onChange={(e) => setThresholdDraft(e.target.value)}
                       inputMode="numeric"
+                    />
+                  </label>
+                  <label>
+                    <span className="overline">Coût de remplacement (€/{selected.unit})</span>
+                    <input
+                      value={costDraft}
+                      onChange={(e) => setCostDraft(e.target.value)}
+                      inputMode="decimal"
+                      placeholder="1.20"
                     />
                   </label>
                   <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>

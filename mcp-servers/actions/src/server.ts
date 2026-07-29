@@ -11,6 +11,7 @@ import { scoreLatePayment } from "./dunning.js";
 import { extractInvoiceFields } from "./invoiceExtraction.js";
 import type { OcrClientOptions } from "./ocrClient.js";
 import { extractInvoiceText } from "./ocrClient.js";
+import { simulateMaterialPrices } from "./materialScenario.js";
 import { buildMonthlySeries, fetchInvoiceWindow, forecastSales } from "./salesForecast.js";
 import { forecastTreasury } from "./treasury.js";
 import type { TreasuryTransaction } from "./treasury.js";
@@ -50,6 +51,7 @@ export const TOOL_POLICIES = {
   forecast_sales: { requiresValidation: false },
   check_stock_alerts: { requiresValidation: false },
   adjust_stock: { requiresValidation: true },
+  simulate_material_prices: { requiresValidation: false },
 } as const satisfies Record<string, { requiresValidation: boolean }>;
 
 const DUNNING_PROMPT =
@@ -243,6 +245,71 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
               alerts,
               alertCount: totals.alertCount,
               totalItems: totals.totalItems,
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "simulate_material_prices",
+    {
+      description:
+        "Simulation prix matières premières (lecture seule, ticket 3.3) : valorise le " +
+        "stock aux coûts de remplacement courants puis sous un scénario de prix " +
+        "(« cuivre +10 % », « tout +5 % »). Donnée financière agrégée — owner only.",
+      inputSchema: {
+        globalChangePct: z
+          .number()
+          .min(-90)
+          .max(500)
+          .optional()
+          .describe("Variation en % appliquée à toutes les matières"),
+        items: z
+          .array(
+            z.object({
+              itemName: z.string().min(1).max(200).describe("Nom exact de l'article"),
+              changePct: z.number().min(-90).max(500).describe("Variation en %"),
+            }),
+          )
+          .max(50)
+          .optional()
+          .describe("Variations ciblées par article (prioritaires sur la globale)"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ globalChangePct, items }) => {
+      const stock = await withTenant(tenantId, (tx) =>
+        tx.stockItem.findMany({
+          orderBy: { name: "asc" },
+          take: 1001,
+          select: { name: true, unit: true, quantity: true, unitCostCents: true },
+        }),
+      );
+      // Troncature SIGNALÉE, jamais silencieuse : un total financier partiel
+      // doit se présenter comme tel (même règle que GET /stocks).
+      const truncated = stock.length > 1000;
+      const window = stock.slice(0, 1000);
+      let result;
+      try {
+        result = simulateMaterialPrices(window, {
+          ...(globalChangePct !== undefined ? { globalChangePct } : {}),
+          ...(items !== undefined ? { items } : {}),
+        });
+      } catch {
+        // Défensif : une ZodError interne ne remonte jamais dans le transcript.
+        throw new Error("invalid scenario");
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              ...result,
+              truncated,
+              // 0 = coût non renseigné : compté pour que le modèle le dise.
+              itemsWithoutCost: window.filter((item) => item.unitCostCents === 0).length,
             }),
           },
         ],

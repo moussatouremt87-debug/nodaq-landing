@@ -375,15 +375,17 @@ export const StockItem = z.object({
   alertThreshold: z.number(),
   belowThreshold: z.boolean(),
   updatedAt: z.string(),
+  // Coût de remplacement et valorisation (3.3) — présents pour l'owner seulement.
+  unitCostCents: z.number().optional(),
+  valueCents: z.number().optional(),
 });
 export type StockItem = z.infer<typeof StockItem>;
 
 const StockItemEnvelope = z.object({ item: StockItem });
 
-export const listStockItems = (): Promise<StockItem[]> =>
-  call(z.object({ items: z.array(StockItem), hasMore: z.boolean() }), "/stocks").then(
-    (r) => r.items,
-  );
+/** `hasMore` remonté tel quel : une valorisation partielle doit se dire. */
+export const listStockItems = (): Promise<{ items: StockItem[]; hasMore: boolean }> =>
+  call(z.object({ items: z.array(StockItem), hasMore: z.boolean() }), "/stocks");
 
 export const createStockItem = (input: {
   name: string;
@@ -397,7 +399,13 @@ export const createStockItem = (input: {
 
 export const updateStockItem = (
   id: string,
-  input: { name?: string; sku?: string | null; unit?: string; alertThreshold?: number },
+  input: {
+    name?: string;
+    sku?: string | null;
+    unit?: string;
+    alertThreshold?: number;
+    unitCostCents?: number;
+  },
 ): Promise<StockItem> =>
   call(StockItemEnvelope, `/stocks/${encodeURIComponent(id)}`, {
     method: "PATCH",
