@@ -41,6 +41,7 @@ import {
   markPushSeen,
   MAX_PUSH_DEVICES_PER_USER,
   PushCategorySchema,
+  PushChannelSchema,
   recordPushEvent,
   tenantOwnerIds,
 } from "./push.js";
@@ -218,7 +219,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.get("/pending-actions", { preHandler: businessRoute }, async (request) => {
     // Opening the validation queue = the "actions" push events are SEEN:
     // counter resets, re-notification unlocked (anti-spam rule of 2.17).
-    void markPushSeen(request.tenantId, request.authSession.user.id, "actions").catch(
+    // AWAITED : en fire-and-forget, le marquage pouvait s'exécuter APRÈS un
+    // événement arrivé juste ensuite et l'effacer (course constatée en CI).
+    await markPushSeen(request.tenantId, request.authSession.user.id, "actions").catch(
       () => undefined,
     );
     return withTenant(request.tenantId, (tx) =>
@@ -1532,8 +1535,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
    * delegated-third-party reasoning as the pending-action detail, audit 1.5).
    */
   app.get("/cockpit/kpis", { preHandler: businessRoute }, async (request) => {
-    // Opening the cockpit = the "alerts" push events are seen (2.17).
-    void markPushSeen(request.tenantId, request.authSession.user.id, "alerts").catch(
+    // Opening the cockpit = the "alerts" push events are seen (2.17) —
+    // awaited (même course que la file de validation).
+    await markPushSeen(request.tenantId, request.authSession.user.id, "alerts").catch(
       () => undefined,
     );
     const byStatus = await withTenant(request.tenantId, (tx) =>
@@ -1626,6 +1630,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   const PUSH_DEVICE_SELECT = {
     id: true,
+    channel: true,
     userAgent: true,
     actionsEnabled: true,
     alertsEnabled: true,
@@ -1649,10 +1654,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         .object({ p256dh: z.string().min(1).max(300), auth: z.string().min(1).max(200) })
         .strict(),
       userAgent: z.string().max(200).optional(),
+      // WEBPUSH par défaut ; FCM/APNS réservés aux apps stores (T.11) —
+      // refusés tant qu'aucun sender n'existe pour eux.
+      channel: PushChannelSchema.optional(),
       actionsEnabled: z.boolean().optional(),
       alertsEnabled: z.boolean().optional(),
     })
-    .strict();
+    .strict()
+    .refine((body) => (body.channel ?? "WEBPUSH") === "WEBPUSH", {
+      message: "channel not available yet",
+    });
 
   app.post("/push/subscriptions", { preHandler: businessRoute }, async (request, reply) => {
     if (!pushConfigured()) {
@@ -1662,7 +1673,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     if (!parsed.success) {
       return reply.code(400).send({ error: "invalid payload" });
     }
-    const { endpoint, keys, userAgent, actionsEnabled, alertsEnabled } = parsed.data;
+    const { endpoint, keys, userAgent, channel, actionsEnabled, alertsEnabled } = parsed.data;
     const userId = request.authSession.user.id;
     try {
       const subscription = await withTenant(request.tenantId, async (tx) => {
@@ -1683,6 +1694,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             data: {
               p256dh: keys.p256dh,
               auth: keys.auth,
+              // Persisté EXPLICITEMENT (audit) : le refine reste la garde
+              // d'acceptation, la colonne dit toujours la vérité du canal.
+              channel: channel ?? "WEBPUSH",
               ...(userAgent !== undefined ? { userAgent } : {}),
               ...(actionsEnabled !== undefined ? { actionsEnabled } : {}),
               ...(alertsEnabled !== undefined ? { alertsEnabled } : {}),
@@ -1697,6 +1711,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             endpoint,
             p256dh: keys.p256dh,
             auth: keys.auth,
+            channel: channel ?? "WEBPUSH",
             userAgent: userAgent ?? null,
             ...(actionsEnabled !== undefined ? { actionsEnabled } : {}),
             ...(alertsEnabled !== undefined ? { alertsEnabled } : {}),

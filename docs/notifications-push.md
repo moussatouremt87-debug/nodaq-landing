@@ -30,6 +30,14 @@ Pas d'app native : service worker + Push API (VAPID).
    iOS Safari hors PWA et affiche le guide « Ajouter à l'écran d'accueil »
    AVANT toute demande de permission (sinon échec silencieux).
 
+## Canaux de livraison
+
+`push_subscriptions.channel` : **WEBPUSH** aujourd'hui — FCM/APNS arriveront
+avec les apps stores (T.11). Un **sender par canal** derrière l'interface
+commune `PushSender` (`PushSenderRegistry`) : un canal sans sender est
+**sauté** au flush (fail-closed), et la souscription FCM/APNS est refusée
+(400) tant qu'aucun sender n'existe pour elle.
+
 ## Architecture du dispatch
 
 Postgres porte l'état de regroupement ; un **sweep en process** dans l'API

@@ -299,10 +299,10 @@ describe("regroupement anti-spam", () => {
     const { sends, sender } = fakeSender();
 
     // Fenêtre non échue : rien ne part.
-    expect(await flushTenantPushWindows(orgA, sender, t0)).toBe(0);
+    expect(await flushTenantPushWindows(orgA, { WEBPUSH: sender }, t0)).toBe(0);
 
     const afterWindow = new Date(t0.getTime() + WINDOW_MS + 60_000);
-    expect(await flushTenantPushWindows(orgA, sender, afterWindow)).toBe(1);
+    expect(await flushTenantPushWindows(orgA, { WEBPUSH: sender }, afterWindow)).toBe(1);
     expect(sends).toHaveLength(1);
     expect(sends[0]!.payload).toEqual({
       type: "actions_en_attente",
@@ -314,7 +314,7 @@ describe("regroupement anti-spam", () => {
     // depuis le dernier envoi : PAS de re-notification.
     await recordPushEvent(orgA, [ownerId], "actions", 1, { now: afterWindow });
     const later = new Date(afterWindow.getTime() + WINDOW_MS + 60_000);
-    expect(await flushTenantPushWindows(orgA, sender, later)).toBe(0);
+    expect(await flushTenantPushWindows(orgA, { WEBPUSH: sender }, later)).toBe(0);
 
     // L'utilisateur ouvre la file (GET /pending-actions marque « vu ») ;
     // un événement suivant re-notifie normalement.
@@ -326,7 +326,7 @@ describe("regroupement anti-spam", () => {
     expect(seen.statusCode).toBe(200);
     await recordPushEvent(orgA, [ownerId], "actions", 1, { now: later });
     const t3 = new Date(later.getTime() + WINDOW_MS + 60_000);
-    expect(await flushTenantPushWindows(orgA, sender, t3)).toBe(1);
+    expect(await flushTenantPushWindows(orgA, { WEBPUSH: sender }, t3)).toBe(1);
     expect(sends[1]!.payload.count).toBe(1);
   });
 
@@ -335,7 +335,7 @@ describe("regroupement anti-spam", () => {
     const t0 = new Date(Date.now() - 30 * 60_000);
     await recordPushEvent(orgA, [ownerId], "alerts", 3, { now: t0, mode: "set" });
     const { sends, sender } = fakeSender();
-    expect(await flushTenantPushWindows(orgA, sender, new Date(t0.getTime() + 1_000))).toBe(1);
+    expect(await flushTenantPushWindows(orgA, { WEBPUSH: sender }, new Date(t0.getTime() + 1_000))).toBe(1);
     expect(sends[0]!.payload).toEqual({ type: "alerte_urgente", count: 3, deepLink: "/" });
   });
 
@@ -353,7 +353,7 @@ describe("regroupement anti-spam", () => {
     await recordPushEvent(orgA, [ownerId], "alerts", 1, { now: t0, mode: "set" });
     await recordPushEvent(orgA, [ownerId], "actions", 1, { now: t0 });
     const { sends, sender } = fakeSender();
-    await flushTenantPushWindows(orgA, sender, new Date(t0.getTime() + WINDOW_MS + 60_000));
+    await flushTenantPushWindows(orgA, { WEBPUSH: sender }, new Date(t0.getTime() + WINDOW_MS + 60_000));
     expect(sends).toHaveLength(1);
     expect(sends[0]!.payload.type).toBe("actions_en_attente");
   });
@@ -366,11 +366,60 @@ describe("regroupement anti-spam", () => {
     const t0 = new Date(Date.now() - 40 * 60_000);
     await recordPushEvent(orgA, [ownerId], "actions", 1, { now: t0 });
     const { sender } = fakeSender({ [endpoint]: "gone" });
-    await flushTenantPushWindows(orgA, sender, new Date(t0.getTime() + WINDOW_MS + 60_000));
+    await flushTenantPushWindows(orgA, { WEBPUSH: sender }, new Date(t0.getTime() + WINDOW_MS + 60_000));
     const remaining = await withTenant(orgA, (tx) =>
       tx.pushSubscription.findMany({ where: { userId: ownerId } }),
     );
     expect(remaining).toHaveLength(0);
+  });
+});
+
+describe("canaux de livraison (spec amendée)", () => {
+  it("FCM/APNS refusés tant qu'aucun sender n'existe ; canal inconnu = 400 ; un canal sans sender est sauté au flush", async () => {
+    const fcm = await subscribe(ownerCookie, `https://fcm.googleapis.com/fcm/send/${RUN}-fcm`, {
+      channel: "FCM",
+    });
+    expect(fcm.statusCode).toBe(400);
+    const unknown = await subscribe(ownerCookie, `https://fcm.googleapis.com/fcm/send/${RUN}-x`, {
+      channel: "PIGEON",
+    });
+    expect(unknown.statusCode).toBe(400);
+
+    // Subscription FCM posée en base (jour où l'app store arrivera) : le
+    // flush la SAUTE tant que le registre n'a pas de sender FCM — fail-closed.
+    await withTenant(orgA, (tx) =>
+      tx.pushSubscription.create({
+        data: {
+          tenantId: orgA,
+          userId: ownerId,
+          channel: "FCM",
+          endpoint: `https://fcm.googleapis.com/fcm/send/${RUN}-native`,
+          p256dh: "k",
+          auth: "a",
+        },
+      }),
+    );
+    // Coexistence prouvée : un appareil WEBPUSH délivré, le FCM sauté.
+    const webpushEndpoint = `https://fcm.googleapis.com/fcm/send/${RUN}-coexist`;
+    await subscribe(ownerCookie, webpushEndpoint);
+    await markPushSeen(orgA, ownerId, "actions");
+    const t0 = new Date(Date.now() - 40 * 60_000);
+    await recordPushEvent(orgA, [ownerId], "actions", 1, { now: t0 });
+    const { sends, sender } = fakeSender();
+    try {
+      await flushTenantPushWindows(
+        orgA,
+        { WEBPUSH: sender },
+        new Date(t0.getTime() + WINDOW_MS + 60_000),
+      );
+      expect(sends.map((send) => send.endpoint)).toEqual([webpushEndpoint]);
+    } finally {
+      await withTenant(orgA, (tx) =>
+        tx.pushSubscription.deleteMany({
+          where: { userId: ownerId, endpoint: { contains: RUN } },
+        }),
+      );
+    }
   });
 });
 
@@ -382,7 +431,7 @@ describe("isolation tenant", () => {
     await recordPushEvent(orgA, [ownerId], "actions", 1, { now: t0 });
     const { sends, sender } = fakeSender();
     const later = new Date(t0.getTime() + WINDOW_MS + 60_000);
-    await flushTenantPushWindows(orgB, sender, later);
+    await flushTenantPushWindows(orgB, { WEBPUSH: sender }, later);
     expect(sends).toHaveLength(0);
     // Et l'état de dispatch du tenant B est vierge.
     const statesB = await withTenant(orgB, (tx) => tx.pushDispatchState.findMany());

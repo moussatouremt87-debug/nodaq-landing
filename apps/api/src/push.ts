@@ -110,6 +110,16 @@ export type PushSendResult = "ok" | "gone" | "failed";
 export type PushSender = (target: PushEndpoint, payload: PushPayload) => Promise<PushSendResult>;
 
 /**
+ * Delivery channels (spec 2.17 amendée) : WEBPUSH aujourd'hui, FCM/APNS avec
+ * les app stores (T.11). Un sender PAR canal derrière l'interface commune —
+ * un canal sans sender est simplement ignoré (fail-closed, jamais un crash).
+ */
+export const PUSH_CHANNELS = ["WEBPUSH", "FCM", "APNS"] as const;
+export type PushChannel = (typeof PUSH_CHANNELS)[number];
+export const PushChannelSchema = z.enum(PUSH_CHANNELS);
+export type PushSenderRegistry = Partial<Record<PushChannel, PushSender>>;
+
+/**
  * Real sender (web-push, VAPID). Returns null when the VAPID keys are not
  * provisioned — the feature then degrades cleanly: routes answer 503, the
  * sweep never starts, nothing else changes.
@@ -210,7 +220,7 @@ export async function markPushSeen(
  */
 export async function flushTenantPushWindows(
   tenantId: string,
-  sender: PushSender,
+  senders: PushSenderRegistry,
   now = new Date(),
 ): Promise<number> {
   const due = await withTenant(tenantId, async (tx) => {
@@ -256,10 +266,20 @@ export async function flushTenantPushWindows(
     }
     const payload = buildPushPayload(category, state.pendingCount);
     let delivered = false;
+    let attempted = 0;
     for (const subscription of subscriptions) {
+      // Sender par canal : un canal inconnu ou non câblé (FCM/APNS avant
+      // T.11) est sauté — jamais un crash, jamais un envoi hasardeux.
+      const parsedChannel = PushChannelSchema.safeParse(subscription.channel);
+      const sender = parsedChannel.success ? senders[parsedChannel.data] : undefined;
+      if (!sender) continue;
+      attempted += 1;
       const result = await sender(
         { endpoint: subscription.endpoint, p256dh: subscription.p256dh, auth: subscription.auth },
-        payload,
+        // Chokepoint INDÉPENDANT du canal (audit) : quel que soit le sender
+        // (web-push aujourd'hui, FCM/APNS demain), seul un payload clos
+        // validé peut franchir cette ligne.
+        PushPayload.parse(payload),
       );
       if (result === "gone") {
         await withTenant(tenantId, (tx) =>
@@ -283,6 +303,16 @@ export async function flushTenantPushWindows(
           data: { pendingCount: 0, windowStartedAt: null, lastSentAt: now },
         }),
       );
+    } else if (attempted === 0) {
+      // Tous les appareils sont sur un canal sans sender : même traitement
+      // que « aucun appareil » — on jette le lot au lieu de thésauriser un
+      // compteur qui exploserait au premier sender branché (audit).
+      await withTenant(tenantId, (tx) =>
+        tx.pushDispatchState.updateMany({
+          where: { id: state.id },
+          data: { pendingCount: 0, windowStartedAt: null },
+        }),
+      );
     }
   }
   return sent;
@@ -290,7 +320,7 @@ export async function flushTenantPushWindows(
 
 /** Sweeps every tenant (tenant list = auth plane; per-tenant data under RLS). */
 export async function flushPushWindows(
-  sender: PushSender,
+  senders: PushSenderRegistry,
   now = new Date(),
   onError: (name: string) => void = () => undefined,
 ): Promise<number> {
@@ -298,7 +328,7 @@ export async function flushPushWindows(
   let sent = 0;
   for (const tenant of tenants) {
     try {
-      sent += await flushTenantPushWindows(tenant.id, sender, now);
+      sent += await flushTenantPushWindows(tenant.id, senders, now);
     } catch (error) {
       // One broken tenant must never stall the others' notifications — but
       // never silently: the error NAME (nothing else) reaches the logs.
@@ -412,7 +442,7 @@ export async function checkTenantUrgentAlerts(
 }
 
 export interface PushSweepOptions {
-  sender: PushSender;
+  senders: PushSenderRegistry;
   agentContext?: Partial<Omit<ToolsetContext, "tenantId">>;
   /** Flush cadence (default 60 s). */
   intervalMs?: number;
@@ -452,7 +482,7 @@ export function startPushSweep(options: PushSweepOptions): () => void {
           );
         }
       }
-      await flushPushWindows(options.sender, now, onError);
+      await flushPushWindows(options.senders, now, onError);
     } finally {
       running = false;
     }

@@ -49,7 +49,9 @@ const app = buildApp();
 const pushSender = createWebPushSender();
 if (pushSender) {
   const stopPushSweep = startPushSweep({
-    sender: pushSender,
+    // Un sender par canal (interface commune) — FCM/APNS rejoindront le
+    // registre avec les app stores (T.11).
+    senders: { WEBPUSH: pushSender },
     // Nom de l'erreur SEULEMENT — jamais un contenu dans les logs.
     onError: (name) => app.log.warn({ err: name }, "push sweep failed"),
   });
