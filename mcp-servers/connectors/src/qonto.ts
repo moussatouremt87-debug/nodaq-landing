@@ -49,6 +49,9 @@ const TransactionList = z.object({
 
 export interface QontoTransactionsOptions {
   iban?: string;
+  /** Contrat `BankClient` : Qonto filtre par IBAN, le slug est ignoré ici
+   * (Bridge, lui, route par slug — l'IBAN y est souvent absent). */
+  accountSlug?: string;
   page?: number;
   perPage?: number;
 }

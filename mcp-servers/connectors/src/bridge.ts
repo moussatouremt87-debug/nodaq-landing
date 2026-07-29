@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { resolveBaseUrl } from "./baseurl.js";
 import { fetchJson } from "./http.js";
@@ -26,7 +27,10 @@ import { fetchJson } from "./http.js";
  *   champs utiles aux outils métier traversent la frontière.
  */
 
-const BRIDGE_API_VERSION = process.env.BRIDGE_API_VERSION ?? "2025-01-15";
+/** Lu à l'APPEL (pas à l'import) : compatible avec injectSecrets() au boot. */
+function bridgeApiVersion(): string {
+  return process.env.BRIDGE_API_VERSION ?? "2025-01-15";
+}
 
 export const BridgeCredentials = z.object({
   clientId: z.string().min(1),
@@ -69,10 +73,10 @@ const TransactionsResponse = z.object({
 });
 
 export interface BridgeTransactionsOptions {
-  /** Accepté pour compatibilité d'interface (contrat `BankClient`) — Bridge
-   * filtre par `account_id`, pas par IBAN ; ignoré en V1 (une seule page,
-   * tous comptes confondus). */
+  /** Filtre par IBAN (contrat `BankClient`) : résolu en `account_id` Bridge. */
   iban?: string;
+  /** Filtre par slug de compte (= id Bridge) — toujours présent, contrairement à l'IBAN. */
+  accountSlug?: string;
   page?: number;
   perPage?: number;
 }
@@ -85,7 +89,7 @@ function toIsoDateTime(value: string | null | undefined): string | null {
 
 export class BridgeClient {
   private readonly baseUrl: string;
-  private accessToken: string | undefined;
+  private tokenPromise: Promise<string> | undefined;
 
   constructor(
     private readonly credentials: BridgeCredentials,
@@ -98,57 +102,91 @@ export class BridgeClient {
     return {
       "Client-Id": this.credentials.clientId,
       "Client-Secret": this.credentials.clientSecret,
-      "Bridge-Version": BRIDGE_API_VERSION,
+      "Bridge-Version": bridgeApiVersion(),
       accept: "application/json",
     };
   }
 
-  private async getToken(): Promise<string> {
-    if (this.accessToken) return this.accessToken;
-    const body = await fetchJson(`${this.baseUrl}/aggregation/authorization/token`, {
-      method: "POST",
-      headers: { ...this.appHeaders(), "content-type": "application/json" },
-      body: JSON.stringify({ user_uuid: this.credentials.userUuid }),
-    });
-    const { access_token } = TokenResponse.parse(body);
-    this.accessToken = access_token;
-    return access_token;
+  private getToken(): Promise<string> {
+    // Verrou de concurrence : deux appels parallèles partagent la MÊME
+    // promesse de token (jamais deux demandes simultanées).
+    this.tokenPromise ??= (async () => {
+      const body = await fetchJson(`${this.baseUrl}/aggregation/authorization/token`, {
+        method: "POST",
+        headers: { ...this.appHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ user_uuid: this.credentials.userUuid }),
+      });
+      return TokenResponse.parse(body).access_token;
+    })();
+    return this.tokenPromise;
   }
 
-  private async authHeaders(): Promise<Record<string, string>> {
-    const token = await this.getToken();
-    return { ...this.appHeaders(), authorization: `Bearer ${token}` };
+  /** GET authentifié utilisateur, avec UN rejeu sur 401 (token expiré). */
+  private async authorizedJson(url: string): Promise<unknown> {
+    for (let attempt = 0; ; attempt++) {
+      const token = await this.getToken().catch((error: unknown) => {
+        this.tokenPromise = undefined; // une demande de token ratée ne se fige pas
+        throw error;
+      });
+      try {
+        return await fetchJson(url, {
+          headers: { ...this.appHeaders(), authorization: `Bearer ${token}` },
+        });
+      } catch (error) {
+        const expired = error instanceof Error && / 401 /.test(error.message);
+        if (!expired || attempt >= 1) throw error;
+        this.tokenPromise = undefined; // token invalidé : un seul rejeu
+      }
+    }
   }
 
   async getOrganization() {
-    const body = await fetchJson(`${this.baseUrl}/aggregation/accounts`, {
-      headers: await this.authHeaders(),
-    });
-    const { resources } = AccountsResponse.parse(body);
+    const { resources } = AccountsResponse.parse(
+      await this.authorizedJson(`${this.baseUrl}/aggregation/accounts`),
+    );
     return {
       organization: {
-        slug: `bridge-${this.credentials.userUuid.slice(0, 8)}`,
-        bank_accounts: resources.map((account) => {
-          const balanceCents = account.balance == null ? null : Math.round(account.balance * 100);
-          return {
-            slug: account.id,
-            iban: account.iban ?? null,
-            currency: account.currency_code ?? null,
-            balance_cents: balanceCents,
-            authorized_balance_cents: balanceCents,
-          };
-        }),
+        // Jamais un fragment du userUuid (identifiant du coffre) vers le
+        // contexte modèle : empreinte hashée, stable et opaque.
+        slug: `bridge-${createHash("sha256").update(this.credentials.userUuid).digest("hex").slice(0, 8)}`,
+        bank_accounts: resources.map((account) => ({
+          slug: account.id,
+          iban: account.iban ?? null,
+          currency: account.currency_code ?? null,
+          balance_cents: account.balance == null ? null : Math.round(account.balance * 100),
+          // Bridge ne distingue pas le solde autorisé : null plutôt qu'une
+          // copie silencieuse du solde comptable (découvert invisible sinon).
+          authorized_balance_cents: null,
+        })),
       },
     };
   }
 
-  async listTransactions({ perPage = 25 }: BridgeTransactionsOptions = {}) {
-    // Pagination V1 : une seule page de `perPage` éléments — Bridge pagine par
-    // curseur (`after`), pas encore branché ici.
+  async listTransactions({ iban, accountSlug, page = 1, perPage = 25 }: BridgeTransactionsOptions = {}) {
+    // Pagination V1 : une seule page (curseur Bridge non branché). meta annonce
+    // total_pages: 1 ; toute page > 1 est donc VIDE, jamais une re-livraison
+    // qui ferait croire à l'agent qu'il découvre de nouvelles données.
+    if (page > 1) {
+      return { transactions: [], meta: { current_page: page, total_pages: 1 } };
+    }
+    // Confidentialité : un user Bridge agrège potentiellement PLUSIEURS
+    // banques/comptes (perso, épargne...). On scope TOUJOURS sur un compte :
+    // celui demandé (slug ou IBAN), sinon le premier — jamais « tous ».
+    const { organization } = await this.getOrganization();
+    const account =
+      accountSlug || iban
+        ? organization.bank_accounts.find(
+            (candidate) =>
+              (accountSlug !== undefined && candidate.slug === accountSlug) ||
+              (iban !== undefined && candidate.iban === iban),
+          )
+        : organization.bank_accounts[0];
+    if (!account) throw new Error("unknown bank account");
+
     const url = new URL(`${this.baseUrl}/aggregation/transactions`);
+    url.searchParams.set("account_id", account.slug);
     url.searchParams.set("limit", String(perPage));
-    const body = await fetchJson(url.toString(), { headers: await this.authHeaders() });
-    const { resources } = TransactionsResponse.parse(body);
+    const { resources } = TransactionsResponse.parse(await this.authorizedJson(url.toString()));
     return {
       transactions: resources.map((tx) => ({
         transaction_id: tx.id,

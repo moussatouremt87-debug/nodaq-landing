@@ -18,6 +18,7 @@ interface Recorded {
 const recorded: Recorded[] = [];
 let tokenCalls = 0;
 let failNextTokenWith401 = false;
+let failNextAccountsWith401 = false;
 
 const fake = createServer((req, res) => {
   const chunks: Buffer[] = [];
@@ -46,6 +47,12 @@ const fake = createServer((req, res) => {
       return;
     }
     if (path.startsWith("/aggregation/accounts")) {
+      if (failNextAccountsWith401) {
+        failNextAccountsWith401 = false;
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "token expired" }));
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
@@ -113,6 +120,7 @@ beforeEach(() => {
   recorded.length = 0;
   tokenCalls = 0;
   failNextTokenWith401 = false;
+  failNextAccountsWith401 = false;
 });
 
 function client() {
@@ -155,14 +163,18 @@ describe("BridgeClient", () => {
 
   it("maps accounts to bank_accounts: euros -> cents (rounded), strips unknown fields", async () => {
     const { organization } = await client().getOrganization();
-    expect(organization.slug).toBe("bridge-user-uui"); // userUuid.slice(0, 8) prefixed
+    // Le slug est une empreinte OPAQUE : jamais un fragment du userUuid (qui
+    // fait partie du bundle d'identifiants du coffre) vers le contexte modèle.
+    expect(organization.slug).toMatch(/^bridge-[0-9a-f]{8}$/);
+    expect(organization.slug).not.toContain("user-uui");
     expect(organization.bank_accounts).toHaveLength(1);
     expect(organization.bank_accounts[0]).toMatchObject({
       slug: "4242",
       iban: "FR7630006000011234567890189",
       currency: "EUR",
       balance_cents: 123456,
-      authorized_balance_cents: 123456,
+      // Bridge ne fournit pas le solde autorisé : null, jamais une copie.
+      authorized_balance_cents: null,
     });
     expect(JSON.stringify(organization)).not.toContain("loan");
   });
@@ -195,6 +207,38 @@ describe("BridgeClient", () => {
     await client().listTransactions({ perPage: 50 });
     const txRequest = recorded.find((r) => r.path.startsWith("/aggregation/transactions"));
     expect(txRequest?.path).toContain("limit=50");
+  });
+
+  it("scope compte OBLIGATOIRE : account_id envoyé (défaut = premier compte, filtre slug/iban résolu)", async () => {
+    // Un user Bridge peut agréger des comptes perso/épargne : jamais « tous ».
+    await client().listTransactions();
+    let txRequest = recorded.find((r) => r.path.startsWith("/aggregation/transactions"));
+    expect(txRequest?.path).toContain("account_id=4242");
+
+    recorded.length = 0;
+    await client().listTransactions({ iban: "FR7630006000011234567890189" });
+    txRequest = recorded.find((r) => r.path.startsWith("/aggregation/transactions"));
+    expect(txRequest?.path).toContain("account_id=4242");
+
+    // Filtre demandé mais introuvable => échec FERMÉ, aucune transaction lue.
+    recorded.length = 0;
+    await expect(client().listTransactions({ accountSlug: "9999" })).rejects.toThrow(
+      "unknown bank account",
+    );
+    expect(recorded.some((r) => r.path.startsWith("/aggregation/transactions"))).toBe(false);
+  });
+
+  it("page > 1 => liste VIDE (une seule page annoncée), jamais une re-livraison", async () => {
+    const { transactions, meta } = await client().listTransactions({ page: 2 });
+    expect(transactions).toEqual([]);
+    expect(meta).toEqual({ current_page: 2, total_pages: 1 });
+  });
+
+  it("401 sur une ressource => token invalidé et UN rejeu (puis succès)", async () => {
+    failNextAccountsWith401 = true;
+    const { organization } = await client().getOrganization();
+    expect(organization.bank_accounts).toHaveLength(1);
+    expect(tokenCalls).toBe(2); // token initial + token du rejeu
   });
 
   it("testConnection fails cleanly on a 401, with a generic message (no credentials leaked)", async () => {

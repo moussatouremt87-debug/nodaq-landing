@@ -141,10 +141,16 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       const account = accountSlug
         ? organization.bank_accounts.find((a) => a.slug === accountSlug)
         : organization.bank_accounts[0];
-      if (!account?.iban) {
+      // Routage par slug (toujours présent) — l'IBAN manque souvent chez un
+      // agrégateur ; solde ET flux portent ainsi sur le MÊME compte.
+      if (!account) {
         throw new Error(`unknown bank account${accountSlug ? ` "${accountSlug}"` : ""}`);
       }
-      const { transactions } = await qonto.listTransactions({ iban: account.iban, perPage: 100 });
+      const { transactions } = await qonto.listTransactions({
+        accountSlug: account.slug,
+        ...(account.iban ? { iban: account.iban } : {}),
+        perPage: 100,
+      });
       if (account.balance_cents == null) {
         // A missing balance must not silently become a zero-balance forecast.
         throw new Error(`bank account "${account.slug}" has no balance available`);

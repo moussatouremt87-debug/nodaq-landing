@@ -114,18 +114,21 @@ export function createConnectorsMcpServer(context: ConnectorsServerContext): Mcp
     },
     async ({ accountSlug, page, perPage }) => {
       const client = await getBankClient(tenantId, context);
-      // The full IBAN needed by the Qonto API is resolved server-side from the
-      // slug: it transits in memory only, never through the tool interface.
+      // Routage par SLUG (toujours présent — l'IBAN manque souvent chez un
+      // agrégateur : cartes, épargne). L'IBAN, quand il existe, est résolu
+      // côté serveur pour Qonto : il transite en mémoire seulement, jamais
+      // par l'interface de l'outil.
       const { organization } = await client.getOrganization();
       const account = accountSlug
         ? organization.bank_accounts.find((a) => a.slug === accountSlug)
         : organization.bank_accounts[0];
-      if (!account?.iban) {
+      if (!account) {
         throw new Error(`unknown bank account${accountSlug ? ` "${accountSlug}"` : ""}`);
       }
       return asJsonContent(
         await client.listTransactions({
-          iban: account.iban,
+          accountSlug: account.slug,
+          ...(account.iban ? { iban: account.iban } : {}),
           ...(page !== undefined ? { page } : {}),
           ...(perPage !== undefined ? { perPage } : {}),
         }),

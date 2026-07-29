@@ -173,17 +173,20 @@ export async function getBankClient(
   tenantId: string,
   options: RegistryOptions = {},
 ): Promise<BankClient> {
+  // Sondes filtrées par statut UTILISABLE : une ligne qonto "disabled" ne
+  // doit pas masquer un Bridge actif (le repli irait sinon dans le mur).
+  const usable = { in: ["active", DEMO_CONNECTOR_STATUS] };
   const qontoRow = await withTenant(tenantId, (tx) =>
-    tx.connector.findUnique({
-      where: { tenantId_type: { tenantId, type: "qonto" } },
+    tx.connector.findFirst({
+      where: { tenantId, type: "qonto", status: usable },
       select: { id: true },
     }),
   );
   if (qontoRow) return getQontoClient(tenantId, options);
 
   const bridgeRow = await withTenant(tenantId, (tx) =>
-    tx.connector.findUnique({
-      where: { tenantId_type: { tenantId, type: "bridge" } },
+    tx.connector.findFirst({
+      where: { tenantId, type: "bridge", status: usable },
       select: { id: true },
     }),
   );

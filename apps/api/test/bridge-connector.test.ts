@@ -36,6 +36,7 @@ const fakeBridge = createServer((req, res) => {
 
 let app: FastifyInstance;
 let ownerCookie: string;
+let orgId: string;
 const vaultStore = new Map<string, string>();
 const RUN = Date.now().toString(36);
 
@@ -83,6 +84,7 @@ beforeAll(async () => {
     payload: { name: `Org Bridge ${RUN}`, slug: `org-bridge-${RUN}` },
   });
   expect(org.statusCode).toBe(200);
+  orgId = org.json().id as string;
 }, 60_000);
 
 afterAll(async () => {
@@ -114,8 +116,8 @@ describe("POST /connectors (bridge)", () => {
     expect(res.json().status).toBe("active");
     // Jamais renvoyés, mais bien au coffre sous l'espace de noms du tenant.
     expect(res.body).not.toContain(GOOD.clientSecret);
-    const key = [...vaultStore.keys()].find((k) => k.endsWith("/bridge"));
-    expect(key).toBeDefined();
+    // Verrouille l'espace de noms tenant du coffre (pas juste le suffixe).
+    expect(vaultStore.has(`connector/${orgId}/bridge`)).toBe(true);
 
     const list = await app.inject({
       method: "GET",
