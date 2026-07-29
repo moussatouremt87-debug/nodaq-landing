@@ -11,6 +11,7 @@ import { scoreLatePayment } from "./dunning.js";
 import { extractInvoiceFields } from "./invoiceExtraction.js";
 import type { OcrClientOptions } from "./ocrClient.js";
 import { extractInvoiceText } from "./ocrClient.js";
+import { analyzeCustomerSignals } from "./customerSignals.js";
 import { simulateMaterialPrices } from "./materialScenario.js";
 import { buildMonthlySeries, fetchInvoiceWindow, forecastSales } from "./salesForecast.js";
 import { forecastTreasury } from "./treasury.js";
@@ -49,6 +50,7 @@ export const TOOL_POLICIES = {
   draft_dunning: { requiresValidation: true },
   compute_treasury_forecast: { requiresValidation: false },
   forecast_sales: { requiresValidation: false },
+  analyze_customer_signals: { requiresValidation: false },
   check_stock_alerts: { requiresValidation: false },
   adjust_stock: { requiresValidation: true },
   simulate_material_prices: { requiresValidation: false },
@@ -206,6 +208,49 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       const forecast = forecastSales(series, horizonMonths ?? 3);
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ ...forecast, truncated }) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "analyze_customer_signals",
+    {
+      description:
+        "Signaux clients (lecture seule, ticket 3.4) : analyse cadence, récence et " +
+        "tendance des montants par client sur 24 mois de factures — segments « à " +
+        "risque » (régulier devenu silencieux), « en croissance » (opportunité " +
+        "upsell), « fidèle », « nouveau », « ponctuel », chacun justifié par ses " +
+        "chiffres. Fonctionne avec Pennylane, la démo ou un import FEC.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const pennylane = await getPennylaneClient(tenantId, context);
+      // 24 mois : il faut voir la régularité PASSÉE pour détecter le silence.
+      // Fenêtre bornée + signal de troncature (jamais une analyse partielle
+      // présentée comme complète).
+      const { invoices, truncated } = await fetchInvoiceWindow(pennylane, new Date(), {
+        monthsBack: 24,
+      });
+      const { customers, analyzedInvoices, unattributedInvoices } = analyzeCustomerSignals(
+        invoices,
+        new Date(),
+      );
+      // Liste bornée pour le contexte du modèle ; le compte total reste exact.
+      const MAX_CUSTOMERS = 100;
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              customers: customers.slice(0, MAX_CUSTOMERS),
+              totalCustomers: customers.length,
+              analyzedInvoices,
+              unattributedInvoices,
+              truncated,
+            }),
+          },
+        ],
       };
     },
   );

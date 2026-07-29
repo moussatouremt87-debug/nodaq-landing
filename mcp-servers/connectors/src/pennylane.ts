@@ -23,6 +23,13 @@ const CustomerInvoice = z.object({
   date: z.string().nullish(),
   deadline: z.string().nullish(),
   status: z.string().nullish(),
+  /** Référence client (3.4) — alimente churn/upsell ; absente = non attribuée. */
+  customer: z
+    .object({
+      id: z.union([z.string(), z.number()]).transform(String),
+      name: z.string().nullish(),
+    })
+    .nullish(),
 });
 export type CustomerInvoice = z.infer<typeof CustomerInvoice>;
 

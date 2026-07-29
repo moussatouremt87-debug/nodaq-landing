@@ -45,6 +45,11 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > écriture), simulation pure bornée −90 %…+500 % (`materialScenario.ts`), outil
 > `simulate_material_prices` OWNER-ONLY, carte valorisation page Stocks
 > (`docs/prix-matieres.md`).
+> **Signaux clients (3.4)** : modèle pur `customerSignals.ts` (cadence/récence/tendance
+> par client sur 24 mois → segments `a_risque|en_croissance|fidele|nouveau|ponctuel`,
+> chaque verdict chiffré) — factures avec `customer {id,name}` (Pennylane/démo/FEC),
+> outil `analyze_customer_signals` OWNER-ONLY (PII + CA par client), non-attribuées
+> comptées jamais tues (`docs/signaux-clients.md`).
 
 ---
 

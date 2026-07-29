@@ -107,12 +107,19 @@ describe("registre en mode démo", () => {
     expect(transactions.every((t) => t.settled_at && t.side)).toBe(true);
   });
 
-  it("pennylane : 19 factures (7 récentes + 12 mois d'historique payé) dont 3 en retard totalisant 8 030 €", async () => {
+  it("pennylane : 22 factures (7 récentes + 12 mois d'historique + 3 dormantes) dont 3 en retard totalisant 8 030 €", async () => {
     const pennylane = await getPennylaneClient(tenantDemo, { secretProvider: explodingVault });
     const { items } = await pennylane.listCustomerInvoices({ limit: 100 });
-    // 7 récentes + 12 mensuelles payées (historique pour la prévision 3.1).
-    expect(items).toHaveLength(19);
+    // 7 récentes + 12 mensuelles payées (prévision 3.1) + 3 anciennes payées
+    // d'un client devenu silencieux (cas « à risque » des signaux clients 3.4).
+    expect(items).toHaveLength(22);
     expect(items.filter((i) => i.id.startsWith("inv-hist-"))).toHaveLength(12);
+    // Signaux clients (3.4) : chaque facture démo est attribuée à un client,
+    // et le client dormant n'apparaît que sur les factures anciennes payées.
+    expect(items.every((i) => i.customer?.id)).toBe(true);
+    const dormant = items.filter((i) => i.customer?.id === "cus-4");
+    expect(dormant).toHaveLength(3);
+    expect(dormant.every((i) => i.status === "paid")).toBe(true);
     const late = items.filter((invoice) => invoice.status === "late");
     expect(late).toHaveLength(3);
     const lateCents = late.reduce(
