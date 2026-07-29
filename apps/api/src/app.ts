@@ -1182,8 +1182,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       sku: z.string().max(100).nullable().optional(),
       unit: z.string().min(1).max(50).optional(),
       alertThreshold: z.number().int().min(0).max(1_000_000).optional(),
-      // Coût de remplacement (3.3) — routes owner-only, borné (1 M€/unité).
-      unitCostCents: z.number().int().min(0).max(100_000_000).optional(),
+      // Coût de remplacement (3.3) — routes owner-only. Borné à 100 k€/unité :
+      // combiné au plafond de quantité, le produit reste loin de
+      // Number.MAX_SAFE_INTEGER (pas de perte de précision silencieuse).
+      unitCostCents: z.number().int().min(0).max(10_000_000).optional(),
     })
     .strict();
 

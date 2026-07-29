@@ -283,15 +283,37 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       const stock = await withTenant(tenantId, (tx) =>
         tx.stockItem.findMany({
           orderBy: { name: "asc" },
-          take: 1000,
+          take: 1001,
           select: { name: true, unit: true, quantity: true, unitCostCents: true },
         }),
       );
-      const result = simulateMaterialPrices(stock, {
-        ...(globalChangePct !== undefined ? { globalChangePct } : {}),
-        ...(items !== undefined ? { items } : {}),
-      });
-      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      // Troncature SIGNALÉE, jamais silencieuse : un total financier partiel
+      // doit se présenter comme tel (même règle que GET /stocks).
+      const truncated = stock.length > 1000;
+      const window = stock.slice(0, 1000);
+      let result;
+      try {
+        result = simulateMaterialPrices(window, {
+          ...(globalChangePct !== undefined ? { globalChangePct } : {}),
+          ...(items !== undefined ? { items } : {}),
+        });
+      } catch {
+        // Défensif : une ZodError interne ne remonte jamais dans le transcript.
+        throw new Error("invalid scenario");
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              ...result,
+              truncated,
+              // 0 = coût non renseigné : compté pour que le modèle le dise.
+              itemsWithoutCost: window.filter((item) => item.unitCostCents === 0).length,
+            }),
+          },
+        ],
+      };
     },
   );
 

@@ -32,12 +32,16 @@ export default function StocksPage() {
   const [thresholdDraft, setThresholdDraft] = useState("");
   const [costDraft, setCostDraft] = useState("");
   const [scenarioPct, setScenarioPct] = useState("10");
+  const [hasMore, setHasMore] = useState(false);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
 
   const refresh = useCallback(() => {
     listStockItems()
-      .then(setItems)
+      .then((result) => {
+        setItems(result.items);
+        setHasMore(result.hasMore);
+      })
       .catch(() => undefined);
   }, []);
 
@@ -214,7 +218,8 @@ export default function StocksPage() {
           <span className="overline">Valorisation du stock — simulation prix matières</span>
           <p className="hint" style={{ margin: "4px 0 10px" }}>
             Valeur de remplacement actuelle : <strong>{euro(totalValueCents)}</strong> (aux coûts
-            unitaires renseignés).
+            unitaires renseignés{hasMore ? " — valorisation PARTIELLE : 500 premiers articles" : ""}
+            ).
           </p>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <span className="hint">Si les prix matières varient de</span>

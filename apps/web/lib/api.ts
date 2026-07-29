@@ -383,10 +383,9 @@ export type StockItem = z.infer<typeof StockItem>;
 
 const StockItemEnvelope = z.object({ item: StockItem });
 
-export const listStockItems = (): Promise<StockItem[]> =>
-  call(z.object({ items: z.array(StockItem), hasMore: z.boolean() }), "/stocks").then(
-    (r) => r.items,
-  );
+/** `hasMore` remonté tel quel : une valorisation partielle doit se dire. */
+export const listStockItems = (): Promise<{ items: StockItem[]; hasMore: boolean }> =>
+  call(z.object({ items: z.array(StockItem), hasMore: z.boolean() }), "/stocks");
 
 export const createStockItem = (input: {
   name: string;
