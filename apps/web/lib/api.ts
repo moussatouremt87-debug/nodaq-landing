@@ -381,7 +381,9 @@ export type StockItem = z.infer<typeof StockItem>;
 const StockItemEnvelope = z.object({ item: StockItem });
 
 export const listStockItems = (): Promise<StockItem[]> =>
-  call(z.object({ items: z.array(StockItem) }), "/stocks").then((r) => r.items);
+  call(z.object({ items: z.array(StockItem), hasMore: z.boolean() }), "/stocks").then(
+    (r) => r.items,
+  );
 
 export const createStockItem = (input: {
   name: string;

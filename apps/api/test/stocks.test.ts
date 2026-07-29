@@ -264,4 +264,33 @@ describe("référentiel /stocks", () => {
     expect(unchanged.quantity).toBe(35);
     expect(ownerId).toBeTruthy();
   });
+
+  it("payload forgé cross-tenant : l'itemId d'un AUTRE tenant est invisible => failed, rien ne bouge", async () => {
+    // Article du tenant B (créé en admin) référencé dans une pending_action
+    // du tenant A : withTenant(A) + RLS doivent le rendre introuvable.
+    const orgBId = (
+      await admin.tenant.findFirstOrThrow({ where: { name: `Org Stocks B ${RUN}` } })
+    ).id;
+    const foreign = await admin.stockItem.create({
+      data: { tenantId: orgBId, name: `Article B ${RUN}`, quantity: 77 },
+    });
+    const forged = await admin.pendingAction.create({
+      data: {
+        tenantId: orgA,
+        type: "adjust_stock",
+        payload: { itemId: foreign.id, delta: -50 },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: `/pending-actions/${forged.id}/approve`,
+      headers: { cookie: ownerCookie, "content-type": "application/json" },
+      payload: {},
+    });
+    const row = await admin.pendingAction.findUnique({ where: { id: forged.id } });
+    expect(row?.status).toBe("failed");
+    const untouched = await admin.stockItem.findUnique({ where: { id: foreign.id } });
+    expect(untouched?.quantity).toBe(77);
+    expect(await admin.stockMovement.count({ where: { itemId: foreign.id } })).toBe(0);
+  });
 });

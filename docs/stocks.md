@@ -9,10 +9,14 @@ dans le cockpit, la page Stocks et le chat de l'employé.
 
 - `stock_items` : article (nom unique par tenant, unité, quantité, seuil
   d'alerte) — RLS + tests d'isolation.
-- `stock_movements` : journal **append-only** des entrées/sorties (delta ≠ 0,
-  motif, auteur = user de session). **La quantité ne se modifie jamais
-  directement** : chaque changement passe par un mouvement ; plancher à zéro
-  (une sortie qui rendrait le stock négatif est refusée, 409).
+- `stock_movements` : journal des entrées/sorties (delta ≠ 0, motif, auteur =
+  user de session ou approbateur HITL) — **append-only par convention
+  applicative** (aucune route ne modifie/supprime un mouvement ; la
+  suppression d'un article par l'owner emporte son historique en cascade).
+  **La quantité ne se modifie jamais directement** : chaque changement passe
+  par un mouvement ; plancher à zéro et plafond appliqués **atomiquement**
+  dans l'update conditionnel (deux sorties concurrentes ne franchissent
+  jamais le zéro).
 - « Sous seuil » = seuil > 0 **et** quantité ≤ seuil (un article neuf à 0
   avec un seuil naît donc en alerte : il est à approvisionner).
 
@@ -20,7 +24,8 @@ dans le cockpit, la page Stocks et le chat de l'employé.
 
 | Action | Rôle |
 |---|---|
-| Consulter, ajuster (mouvements) | tout membre |
+| Consulter | tout membre (accountant compris) |
+| Ajuster (mouvements) | owner, member — pas l'expert-comptable (tiers délégué) |
 | Créer/modifier articles et seuils, supprimer | owner |
 
 Le stock n'est **pas** une donnée financière : pas de gate owner-only sur la

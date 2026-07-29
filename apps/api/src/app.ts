@@ -354,7 +354,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         outcome = { status: "failed", result: { error: "no-executor" } };
       } else {
         try {
-          const result = await executor(action.payload, { tenantId: request.tenantId });
+          const result = await executor(action.payload, {
+            tenantId: request.tenantId,
+            userId: request.authSession.user.id,
+          });
           outcome = { status: "executed", result: (result ?? {}) as object };
         } catch (error) {
           // Error NAME only — an executor error must never echo payload content.
@@ -1148,10 +1151,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   });
 
   app.get("/stocks", { preHandler: businessRoute }, async (request) => {
-    const items = await withTenant(request.tenantId, (tx) =>
-      tx.stockItem.findMany({ orderBy: { name: "asc" }, take: 500, select: STOCK_SELECT }),
+    const rows = await withTenant(request.tenantId, (tx) =>
+      tx.stockItem.findMany({ orderBy: { name: "asc" }, take: 501, select: STOCK_SELECT }),
     );
-    return { items: items.map(stockView) };
+    // Troncature SIGNALÉE, jamais silencieuse (une alerte au-delà de la page
+    // ne doit pas disparaître sans trace).
+    const hasMore = rows.length > 500;
+    return { items: rows.slice(0, 500).map(stockView), hasMore };
   });
 
   const StockItemBody = z
@@ -1250,42 +1256,54 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     })
     .strict();
 
-  app.post("/stocks/:id/movements", { preHandler: businessRoute }, async (request, reply) => {
-    const { id } = z.object({ id: Uuid }).parse(request.params);
-    const parsed = MovementBody.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: "invalid movement" });
-    const { delta, reason } = parsed.data;
+  // Plafond de quantité : évite le débordement INTEGER par entrées répétées.
+  const MAX_STOCK_QUANTITY = 1_000_000_000;
 
-    const outcome = await withTenant(request.tenantId, async (tx) => {
-      const item = await tx.stockItem.findUnique({
-        where: { id },
-        select: { id: true, quantity: true },
+  app.post(
+    "/stocks/:id/movements",
+    // L'expert-comptable (tiers délégué) consulte mais ne sort pas de matériel.
+    { preHandler: [...businessRoute, requireRole(["owner", "member"])] },
+    async (request, reply) => {
+      const { id } = z.object({ id: Uuid }).parse(request.params);
+      const parsed = MovementBody.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: "invalid movement" });
+      const { delta, reason } = parsed.data;
+
+      const outcome = await withTenant(request.tenantId, async (tx) => {
+        const exists = await tx.stockItem.findUnique({ where: { id }, select: { id: true } });
+        if (!exists) return null;
+        // ATOMIQUE : plancher (0) et plafond appliqués DANS le même update
+        // conditionnel — deux sorties concurrentes ne franchissent jamais le
+        // zéro (audit RGPD 3.2), aucun read-modify-write en mémoire.
+        const { count } = await tx.stockItem.updateMany({
+          where: {
+            id,
+            quantity: {
+              gte: delta < 0 ? -delta : 0,
+              lte: MAX_STOCK_QUANTITY - Math.max(0, delta),
+            },
+          },
+          data: { quantity: { increment: delta } },
+        });
+        if (count === 0) return "conflict" as const;
+        await tx.stockMovement.create({
+          data: {
+            tenantId: request.tenantId,
+            itemId: id,
+            delta,
+            reason: reason ?? null,
+            createdBy: request.authSession.user.id,
+          },
+        });
+        return tx.stockItem.findUnique({ where: { id }, select: STOCK_SELECT });
       });
-      if (!item) return null;
-      const quantity = item.quantity + delta;
-      if (quantity < 0) return "insufficient" as const;
-      const updated = await tx.stockItem.update({
-        where: { id },
-        data: { quantity },
-        select: STOCK_SELECT,
-      });
-      await tx.stockMovement.create({
-        data: {
-          tenantId: request.tenantId,
-          itemId: id,
-          delta,
-          reason: reason ?? null,
-          createdBy: request.authSession.user.id,
-        },
-      });
-      return updated;
-    });
-    if (outcome === null) return reply.code(404).send({ error: "not found" });
-    if (outcome === "insufficient") {
-      return reply.code(409).send({ error: "insufficient stock" });
-    }
-    return { item: stockView(outcome) };
-  });
+      if (outcome === null) return reply.code(404).send({ error: "not found" });
+      if (outcome === "conflict") {
+        return reply.code(409).send({ error: "insufficient stock" });
+      }
+      return { item: stockView(outcome!) };
+    },
+  );
 
   app.get("/stocks/:id/movements", { preHandler: businessRoute }, async (request, reply) => {
     const { id } = z.object({ id: Uuid }).parse(request.params);
@@ -1318,12 +1336,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const conversations = await withTenant(request.tenantId, (tx) => tx.agentConversation.count());
 
     // Alertes stock (3.2) — métadonnée non financière, visible de tout membre.
-    const stockRows = await withTenant(request.tenantId, (tx) =>
-      tx.stockItem.findMany({ take: 1000, select: { quantity: true, alertThreshold: true } }),
+    // Compté côté SQL (comparaison colonne à colonne, RLS scelle au tenant) :
+    // jamais une troncature silencieuse du compteur.
+    const stockAlertRows = await withTenant(request.tenantId, (tx) =>
+      tx.$queryRaw<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM stock_items
+        WHERE alert_threshold > 0 AND quantity <= alert_threshold`,
     );
-    const stockAlerts = stockRows.filter(
-      (row) => row.alertThreshold > 0 && row.quantity <= row.alertThreshold,
-    ).length;
+    const stockAlerts = stockAlertRows[0]?.count ?? 0;
 
     // Treasury via the SAME tenant-bound toolset as the agent (read-only,
     // OWNER-only — enforced by the toolset's role gate AND skipped here).

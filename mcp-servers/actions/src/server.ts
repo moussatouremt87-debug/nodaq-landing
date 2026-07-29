@@ -219,21 +219,31 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       annotations: { readOnlyHint: true },
     },
     async () => {
-      const items = await withTenant(tenantId, (tx) =>
-        tx.stockItem.findMany({
-          orderBy: { name: "asc" },
-          take: 1000,
-          select: { name: true, unit: true, quantity: true, alertThreshold: true },
-        }),
-      );
-      const alerts = items.filter(
-        (item) => item.alertThreshold > 0 && item.quantity <= item.alertThreshold,
-      );
+      // Comparaison colonne à colonne côté SQL (RLS scelle au tenant) : le
+      // compte n'est jamais tronqué, la liste est bornée pour le contexte.
+      const [alerts, totals] = await withTenant(tenantId, async (tx) => {
+        const alertRows = await tx.$queryRaw<
+          { name: string; unit: string; quantity: number; alertThreshold: number }[]
+        >`
+          SELECT name, unit, quantity, alert_threshold AS "alertThreshold"
+          FROM stock_items
+          WHERE alert_threshold > 0 AND quantity <= alert_threshold
+          ORDER BY name ASC LIMIT 200`;
+        const totalItems = await tx.stockItem.count();
+        const alertCount = await tx.$queryRaw<{ count: number }[]>`
+          SELECT count(*)::int AS count FROM stock_items
+          WHERE alert_threshold > 0 AND quantity <= alert_threshold`;
+        return [alertRows, { totalItems, alertCount: alertCount[0]?.count ?? 0 }] as const;
+      });
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify({ alerts, alertCount: alerts.length, totalItems: items.length }),
+            text: JSON.stringify({
+              alerts,
+              alertCount: totals.alertCount,
+              totalItems: totals.totalItems,
+            }),
           },
         ],
       };
