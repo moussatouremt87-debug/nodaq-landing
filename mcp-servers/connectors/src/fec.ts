@@ -62,6 +62,8 @@ export class FecPennylaneClient extends PennylaneClient {
             : row.residualCents > 0n && dueIso < todayIso
               ? "late"
               : "pending",
+          // Comptes 411 + CompAux du FEC : la référence client est native (3.4).
+          customer: { id: row.customerRef, name: row.customerName ?? null },
         };
       }),
       next_cursor: rows.length > limit ? String(offset + limit) : null,

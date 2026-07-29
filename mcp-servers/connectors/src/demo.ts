@@ -175,6 +175,13 @@ export class DemoPennylaneClient extends PennylaneClient {
   override async listCustomerInvoices(_options = {}) {
     const now = this.clock();
     const euros = (cents: number) => (cents / 100).toFixed(2);
+    // Attribution client (3.4) : mêmes identités que listCustomers.
+    const customersByName: Record<string, { id: string; name: string }> = {
+      "SCCV Les Terrasses du Parc": { id: "cus-1", name: "SCCV Les Terrasses du Parc" },
+      "Syndic Lemaire & Associés": { id: "cus-2", name: "Syndic Lemaire & Associés" },
+      "Entreprise Générale Bardin": { id: "cus-3", name: "Entreprise Générale Bardin" },
+      "M. Bernard": { id: "cus-4", name: "M. Bernard" },
+    };
     const late = DEMO_LATE_INVOICES.map((invoice) => ({
       id: invoice.id,
       invoice_number: invoice.number,
@@ -183,12 +190,13 @@ export class DemoPennylaneClient extends PennylaneClient {
       date: isoDaysAgo(now, invoice.daysLate + 30),
       deadline: isoDaysAgo(now, invoice.daysLate),
       status: "late",
+      customer: customersByName[invoice.customer] ?? null,
     }));
     const others = [
-      { id: "inv-2026-125", invoice_number: "2026-125", amount: "5400.00", currency: "EUR", date: isoDaysAgo(now, 6), deadline: isoDaysAhead(now, 24), status: "pending" },
-      { id: "inv-2026-126", invoice_number: "2026-126", amount: "3250.00", currency: "EUR", date: isoDaysAgo(now, 2), deadline: isoDaysAhead(now, 38), status: "pending" },
-      { id: "inv-2026-112", invoice_number: "2026-112", amount: "7900.00", currency: "EUR", date: isoDaysAgo(now, 75), deadline: isoDaysAgo(now, 45), status: "paid" },
-      { id: "inv-2026-109", invoice_number: "2026-109", amount: "2140.00", currency: "EUR", date: isoDaysAgo(now, 96), deadline: isoDaysAgo(now, 66), status: "paid" },
+      { id: "inv-2026-125", invoice_number: "2026-125", amount: "5400.00", currency: "EUR", date: isoDaysAgo(now, 6), deadline: isoDaysAhead(now, 24), status: "pending", customer: customersByName["Entreprise Générale Bardin"] },
+      { id: "inv-2026-126", invoice_number: "2026-126", amount: "3250.00", currency: "EUR", date: isoDaysAgo(now, 2), deadline: isoDaysAhead(now, 38), status: "pending", customer: customersByName["Syndic Lemaire & Associés"] },
+      { id: "inv-2026-112", invoice_number: "2026-112", amount: "7900.00", currency: "EUR", date: isoDaysAgo(now, 75), deadline: isoDaysAgo(now, 45), status: "paid", customer: customersByName["SCCV Les Terrasses du Parc"] },
+      { id: "inv-2026-109", invoice_number: "2026-109", amount: "2140.00", currency: "EUR", date: isoDaysAgo(now, 96), deadline: isoDaysAgo(now, 66), status: "paid", customer: customersByName["Syndic Lemaire & Associés"] },
     ];
     // Historique 12 mois pour la prévision des ventes (3.1) : électricien du
     // bâtiment — creux d'hiver, gros chantiers au printemps, légère croissance.
@@ -207,9 +215,29 @@ export class DemoPennylaneClient extends PennylaneClient {
         date: issued.toISOString(),
         deadline: new Date(issued.getTime() + 30 * 86_400_000).toISOString(),
         status: "paid",
+        // Alternance : SCCV (fidèle) / Syndic (montants croissants = upsell).
+        customer:
+          index % 2 === 0
+            ? customersByName["SCCV Les Terrasses du Parc"]
+            : customersByName["Syndic Lemaire & Associés"],
       };
     });
-    return { items: [...late, ...others, ...history], next_cursor: null };
+    // M. Bernard : 3 chantiers réguliers puis plus rien depuis 8 mois — le
+    // cas « à risque » (churn) que l'employé doit repérer (3.4).
+    const dormant = [14, 12, 10].map((monthsAgo, index) => {
+      const issued = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - monthsAgo, 20));
+      return {
+        id: `inv-bernard-${index + 1}`,
+        invoice_number: `B-${String(index + 1).padStart(3, "0")}`,
+        amount: euros(84_000 + index * 6_000),
+        currency: "EUR",
+        date: issued.toISOString(),
+        deadline: new Date(issued.getTime() + 30 * 86_400_000).toISOString(),
+        status: "paid",
+        customer: customersByName["M. Bernard"],
+      };
+    });
+    return { items: [...late, ...others, ...history, ...dormant], next_cursor: null };
   }
 
   override async listCustomers(_options = {}) {

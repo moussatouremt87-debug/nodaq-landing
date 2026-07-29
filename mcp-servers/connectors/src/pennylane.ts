@@ -23,6 +23,17 @@ const CustomerInvoice = z.object({
   date: z.string().nullish(),
   deadline: z.string().nullish(),
   status: z.string().nullish(),
+  /** Référence client (3.4) — alimente churn/upsell ; absente = non attribuée.
+   * `.catch(null)` : une forme inattendue côté fournisseur dégrade en « non
+   * attribuée » au lieu de faire échouer la page entière (et avec elle tous
+   * les outils qui listent les factures). */
+  customer: z
+    .object({
+      id: z.union([z.string(), z.number()]).transform(String),
+      name: z.string().nullish(),
+    })
+    .nullish()
+    .catch(null),
 });
 export type CustomerInvoice = z.infer<typeof CustomerInvoice>;
 

@@ -91,6 +91,9 @@ const fakeSaas = createServer((req, res) => {
             date: "2026-05-01",
             deadline: "2026-06-01",
             status: "late",
+            // Forme inattendue côté fournisseur : dégradée en « non
+            // attribuée » (.catch(null)), jamais un échec de page (3.4).
+            customer: "ACME SARL",
           },
         ],
         next_cursor: null,
@@ -364,5 +367,39 @@ describe("stocks (ticket 3.2) — lecture libre, ajustement HITL", () => {
     });
     expect(unknown.isError).toBe(true);
     expect(await withTenant(tenantId, (tx) => tx.pendingAction.count())).toBe(before);
+  });
+});
+
+describe("analyze_customer_signals — signaux clients (3.4)", () => {
+  it("lecture seule, tenant non injectable, comptes exacts et bornage signalé", async () => {
+    const client = await connectedClient();
+    const tools = await client.listTools();
+    const tool = tools.tools.find((t) => t.name === "analyze_customer_signals");
+    expect(tool).toBeDefined();
+    expect(tool?.annotations?.readOnlyHint).toBe(true);
+    expect(JSON.stringify(tool?.inputSchema)).not.toContain("tenantId");
+    expect(TOOL_POLICIES.analyze_customer_signals.requiresValidation).toBe(false);
+
+    const result = await client.callTool({ name: "analyze_customer_signals", arguments: {} });
+    expect(result.isError).toBeFalsy();
+    const parsed = JSON.parse((result.content as { text: string }[])[0]!.text) as {
+      customers: unknown[];
+      totalCustomers: number;
+      customersTruncated: boolean;
+      analyzedInvoices: number;
+      unattributedInvoices: number;
+      truncated: boolean;
+    };
+    // La facture du faux SaaS porte un `customer` MALFORMÉ (chaîne) : la page
+    // se parse quand même (.catch(null)) et la vente est comptée « non
+    // attribuée » — jamais écartée en silence, jamais un échec d'outil.
+    expect(parsed).toMatchObject({
+      customers: [],
+      totalCustomers: 0,
+      customersTruncated: false,
+      analyzedInvoices: 1,
+      unattributedInvoices: 1,
+      truncated: false,
+    });
   });
 });
