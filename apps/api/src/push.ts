@@ -266,15 +266,20 @@ export async function flushTenantPushWindows(
     }
     const payload = buildPushPayload(category, state.pendingCount);
     let delivered = false;
+    let attempted = 0;
     for (const subscription of subscriptions) {
       // Sender par canal : un canal inconnu ou non câblé (FCM/APNS avant
       // T.11) est sauté — jamais un crash, jamais un envoi hasardeux.
       const parsedChannel = PushChannelSchema.safeParse(subscription.channel);
       const sender = parsedChannel.success ? senders[parsedChannel.data] : undefined;
       if (!sender) continue;
+      attempted += 1;
       const result = await sender(
         { endpoint: subscription.endpoint, p256dh: subscription.p256dh, auth: subscription.auth },
-        payload,
+        // Chokepoint INDÉPENDANT du canal (audit) : quel que soit le sender
+        // (web-push aujourd'hui, FCM/APNS demain), seul un payload clos
+        // validé peut franchir cette ligne.
+        PushPayload.parse(payload),
       );
       if (result === "gone") {
         await withTenant(tenantId, (tx) =>
@@ -296,6 +301,16 @@ export async function flushTenantPushWindows(
         tx.pushDispatchState.updateMany({
           where: { id: state.id },
           data: { pendingCount: 0, windowStartedAt: null, lastSentAt: now },
+        }),
+      );
+    } else if (attempted === 0) {
+      // Tous les appareils sont sur un canal sans sender : même traitement
+      // que « aucun appareil » — on jette le lot au lieu de thésauriser un
+      // compteur qui exploserait au premier sender branché (audit).
+      await withTenant(tenantId, (tx) =>
+        tx.pushDispatchState.updateMany({
+          where: { id: state.id },
+          data: { pendingCount: 0, windowStartedAt: null },
         }),
       );
     }

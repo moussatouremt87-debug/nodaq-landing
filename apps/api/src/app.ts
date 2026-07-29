@@ -1627,6 +1627,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   const PUSH_DEVICE_SELECT = {
     id: true,
+    channel: true,
     userAgent: true,
     actionsEnabled: true,
     alertsEnabled: true,
@@ -1669,7 +1670,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     if (!parsed.success) {
       return reply.code(400).send({ error: "invalid payload" });
     }
-    const { endpoint, keys, userAgent, actionsEnabled, alertsEnabled } = parsed.data;
+    const { endpoint, keys, userAgent, channel, actionsEnabled, alertsEnabled } = parsed.data;
     const userId = request.authSession.user.id;
     try {
       const subscription = await withTenant(request.tenantId, async (tx) => {
@@ -1690,6 +1691,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             data: {
               p256dh: keys.p256dh,
               auth: keys.auth,
+              // Persisté EXPLICITEMENT (audit) : le refine reste la garde
+              // d'acceptation, la colonne dit toujours la vérité du canal.
+              channel: channel ?? "WEBPUSH",
               ...(userAgent !== undefined ? { userAgent } : {}),
               ...(actionsEnabled !== undefined ? { actionsEnabled } : {}),
               ...(alertsEnabled !== undefined ? { alertsEnabled } : {}),
@@ -1704,6 +1708,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             endpoint,
             p256dh: keys.p256dh,
             auth: keys.auth,
+            channel: channel ?? "WEBPUSH",
             userAgent: userAgent ?? null,
             ...(actionsEnabled !== undefined ? { actionsEnabled } : {}),
             ...(alertsEnabled !== undefined ? { alertsEnabled } : {}),

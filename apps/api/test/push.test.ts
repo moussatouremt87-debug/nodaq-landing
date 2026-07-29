@@ -399,16 +399,27 @@ describe("canaux de livraison (spec amendée)", () => {
         },
       }),
     );
+    // Coexistence prouvée : un appareil WEBPUSH délivré, le FCM sauté.
+    const webpushEndpoint = `https://fcm.googleapis.com/fcm/send/${RUN}-coexist`;
+    await subscribe(ownerCookie, webpushEndpoint);
     await markPushSeen(orgA, ownerId, "actions");
     const t0 = new Date(Date.now() - 40 * 60_000);
     await recordPushEvent(orgA, [ownerId], "actions", 1, { now: t0 });
     const { sends, sender } = fakeSender();
-    await flushTenantPushWindows(orgA, { WEBPUSH: sender }, new Date(t0.getTime() + WINDOW_MS + 60_000));
-    // Seuls les appareils WEBPUSH de l'owner reçoivent — jamais le canal sans sender.
-    expect(sends.every((send) => !send.endpoint.endsWith("-native"))).toBe(true);
-    await withTenant(orgA, (tx) =>
-      tx.pushSubscription.deleteMany({ where: { channel: "FCM" } }),
-    );
+    try {
+      await flushTenantPushWindows(
+        orgA,
+        { WEBPUSH: sender },
+        new Date(t0.getTime() + WINDOW_MS + 60_000),
+      );
+      expect(sends.map((send) => send.endpoint)).toEqual([webpushEndpoint]);
+    } finally {
+      await withTenant(orgA, (tx) =>
+        tx.pushSubscription.deleteMany({
+          where: { userId: ownerId, endpoint: { contains: RUN } },
+        }),
+      );
+    }
   });
 });
 
