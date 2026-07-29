@@ -492,8 +492,9 @@ model PushSubscription {
   id              String    @id @default(uuid()) @db.Uuid
   tenantId        String    @map("tenant_id") @db.Uuid
   userId          String    @map("user_id") @db.Uuid
-  /// URL du service push navigateur — clé d'unicité de l'appareil.
-  endpoint        String    @unique
+  /// URL du service push navigateur. Unicité PAR TENANT : un même appareil
+  /// peut servir plusieurs organisations (expert-comptable multi-tenants).
+  endpoint        String
   /// Clés Web Push de la subscription — sensibles, jamais loggées.
   p256dh          String
   auth            String
@@ -505,6 +506,7 @@ model PushSubscription {
   lastUsedAt      DateTime? @map("last_used_at")
   tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  @@unique([tenantId, endpoint])
   @@index([tenantId, userId])
   @@map("push_subscriptions")
 }

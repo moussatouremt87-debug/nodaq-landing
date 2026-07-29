@@ -26,7 +26,14 @@ import { DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.
 import type { DocExtraction } from "./classeur.js";
 import { defaultExecutors } from "./executors.js";
 import type { ExecutorRegistry } from "./executors.js";
-import { markPushSeen, PushCategorySchema, recordPushEvent, tenantOwnerIds } from "./push.js";
+import {
+  isAllowedPushEndpoint,
+  markPushSeen,
+  MAX_PUSH_DEVICES_PER_USER,
+  PushCategorySchema,
+  recordPushEvent,
+  tenantOwnerIds,
+} from "./push.js";
 
 export interface BuildAppOptions {
   /** Executors for approved pending actions (injectable in tests). */
@@ -1499,7 +1506,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   const PushSubscriptionBody = z
     .object({
-      endpoint: z.string().url().max(1_000),
+      // Anti-SSRF (audit 2.17) : le serveur émettra des requêtes vers cette
+      // URL — https + services push des navigateurs UNIQUEMENT.
+      endpoint: z.string().url().max(1_000).refine(isAllowedPushEndpoint, {
+        message: "endpoint must be a browser push service",
+      }),
       keys: z
         .object({ p256dh: z.string().min(1).max(300), auth: z.string().min(1).max(200) })
         .strict(),
@@ -1521,6 +1532,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const userId = request.authSession.user.id;
     try {
       const subscription = await withTenant(request.tenantId, async (tx) => {
+        // Plafond anti-amplification : chaque appareil = des envois réseau
+        // du serveur à chaque sweep.
+        const deviceCount = await tx.pushSubscription.count({ where: { userId } });
+        if (deviceCount >= MAX_PUSH_DEVICES_PER_USER) {
+          throw Object.assign(new Error("device limit"), { statusCode: 429 });
+        }
         const existing = await tx.pushSubscription.findFirst({ where: { endpoint } });
         if (existing) {
           // Même appareil re-souscrit (clés régénérées par le navigateur) :
@@ -1554,17 +1571,17 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         });
       });
       if (!subscription) {
-        return reply.code(409).send({ error: "appareil déjà enregistré par un autre utilisateur" });
+        // Message UNIQUE pour tous les conflits (audit 2.17) : ne confirme
+        // jamais où ni par qui l'endpoint est déjà enregistré.
+        return reply.code(409).send({ error: "appareil déjà enregistré" });
       }
       return reply.code(201).send(subscription);
     } catch (error) {
-      // Unicité GLOBALE de l'endpoint : le même appareil enregistré depuis une
-      // autre organisation est invisible ici (RLS) — refus net, jamais d'appui
-      // sur une donnée d'un autre tenant.
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-        return reply
-          .code(409)
-          .send({ error: "appareil déjà enregistré depuis une autre organisation" });
+        return reply.code(409).send({ error: "appareil déjà enregistré" });
+      }
+      if (error instanceof Error && "statusCode" in error && error.statusCode === 429) {
+        return reply.code(429).send({ error: "limite d'appareils atteinte pour ce compte" });
       }
       throw error;
     }

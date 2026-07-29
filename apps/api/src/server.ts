@@ -35,7 +35,11 @@ const app = buildApp();
 // regroupement — pas de Redis provisionné ; l'envoyeur est injectable).
 const pushSender = createWebPushSender();
 if (pushSender) {
-  const stopPushSweep = startPushSweep({ sender: pushSender });
+  const stopPushSweep = startPushSweep({
+    sender: pushSender,
+    // Nom de l'erreur SEULEMENT — jamais un contenu dans les logs.
+    onError: (name) => app.log.warn({ err: name }, "push sweep failed"),
+  });
   app.addHook("onClose", async () => stopPushSweep());
   app.log.info("push sweep started");
 } else {

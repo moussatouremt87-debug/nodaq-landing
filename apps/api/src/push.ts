@@ -56,8 +56,44 @@ const CATEGORY_PAYLOADS: Record<PushCategory, Pick<PushPayload, "type" | "deepLi
 
 export function buildPushPayload(category: PushCategory, count: number): PushPayload {
   const base = CATEGORY_PAYLOADS[category];
-  return PushPayload.parse({ type: base.type, deepLink: base.deepLink, count });
+  // Clamp : un compteur hors norme (rafale extrême) ne doit jamais faire
+  // échouer l'envoi — le schéma clos reste la garde, pas le plafond.
+  return PushPayload.parse({
+    type: base.type,
+    deepLink: base.deepLink,
+    count: Math.max(1, Math.min(count, 9_999)),
+  });
 }
+
+/**
+ * Anti-SSRF (audit 2.17) : l'endpoint de subscription est une URL fournie
+ * par le client vers laquelle le SERVEUR émettra des requêtes — elle est
+ * contrainte aux services push des navigateurs (https + allowlist d'hôtes),
+ * jamais un hôte arbitraire, jamais une IP interne.
+ */
+const PUSH_ENDPOINT_HOSTS = [
+  { exact: "fcm.googleapis.com" }, // Chrome / Edge (FCM)
+  { suffix: ".push.services.mozilla.com" }, // Firefox
+  { suffix: ".push.apple.com" }, // Safari
+  { suffix: ".notify.windows.com" }, // Edge legacy (WNS)
+];
+
+export function isAllowedPushEndpoint(endpoint: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  return PUSH_ENDPOINT_HOSTS.some((rule) =>
+    "exact" in rule && rule.exact ? host === rule.exact : host.endsWith(rule.suffix as string),
+  );
+}
+
+/** Plafond d'appareils par utilisateur (anti-amplification, audit 2.17). */
+export const MAX_PUSH_DEVICES_PER_USER = 10;
 
 export interface PushEndpoint {
   endpoint: string;
@@ -247,17 +283,40 @@ export async function flushTenantPushWindows(
 }
 
 /** Sweeps every tenant (tenant list = auth plane; per-tenant data under RLS). */
-export async function flushPushWindows(sender: PushSender, now = new Date()): Promise<number> {
+export async function flushPushWindows(
+  sender: PushSender,
+  now = new Date(),
+  onError: (name: string) => void = () => undefined,
+): Promise<number> {
   const tenants = await prisma.tenant.findMany({ select: { id: true } });
   let sent = 0;
   for (const tenant of tenants) {
     try {
       sent += await flushTenantPushWindows(tenant.id, sender, now);
-    } catch {
-      // One broken tenant must never stall the others' notifications.
+    } catch (error) {
+      // One broken tenant must never stall the others' notifications — but
+      // never silently: the error NAME (nothing else) reaches the logs.
+      onError(error instanceof Error ? error.name : "Error");
     }
   }
   return sent;
+}
+
+/**
+ * Hygiène de rétention (audit 2.17) : les appareils d'un utilisateur qui a
+ * perdu sa membership ne doivent pas rester rattachés au tenant — purge des
+ * subscriptions et états orphelins.
+ */
+export async function cleanTenantPushOrphans(tenantId: string): Promise<void> {
+  const members = await prisma.membership.findMany({
+    where: { tenantId },
+    select: { userId: true },
+  });
+  const memberIds = members.map((member) => member.userId);
+  await withTenant(tenantId, async (tx) => {
+    await tx.pushSubscription.deleteMany({ where: { userId: { notIn: memberIds } } });
+    await tx.pushDispatchState.deleteMany({ where: { userId: { notIn: memberIds } } });
+  });
 }
 
 /** Critical lateness threshold (days past deadline) for the urgent alert. */
@@ -275,8 +334,15 @@ export async function checkTenantUrgentAlerts(
   agentContext: Partial<Omit<ToolsetContext, "tenantId">>,
   now = new Date(),
 ): Promise<number> {
+  // Les alertes ne visent que les OWNERS : un appareil d'un simple membre ne
+  // doit pas déclencher des appels fournisseurs horaires pour personne.
+  const owners = await tenantOwnerIds(tenantId);
+  if (owners.length === 0) return 0;
   const hasAlertDevice = await withTenant(tenantId, (tx) =>
-    tx.pushSubscription.findFirst({ where: { alertsEnabled: true }, select: { id: true } }),
+    tx.pushSubscription.findFirst({
+      where: { alertsEnabled: true, userId: { in: owners } },
+      select: { id: true },
+    }),
   );
   if (!hasAlertDevice) return 0;
 
@@ -314,10 +380,7 @@ export async function checkTenantUrgentAlerts(
 
   if (alerts > 0) {
     // "set": a re-checked CONDITION must not inflate the counter hour after hour.
-    await recordPushEvent(tenantId, await tenantOwnerIds(tenantId), "alerts", alerts, {
-      now,
-      mode: "set",
-    });
+    await recordPushEvent(tenantId, owners, "alerts", alerts, { now, mode: "set" });
   }
   return alerts;
 }
@@ -329,15 +392,20 @@ export interface PushSweepOptions {
   intervalMs?: number;
   /** Condition-check cadence (default 60 min). */
   alertsEveryMs?: number;
+  /** Receives the error NAME only (never content) — plugged on the app log. */
+  onError?: (name: string) => void;
 }
 
 /**
  * In-process scheduler: flush due windows every minute, re-evaluate urgent
- * conditions hourly. Timers are unref'd — they never hold the process open.
+ * conditions (and purge orphaned devices) hourly. Timers are unref'd — they
+ * never hold the process open — and every rejection is CAUGHT: an optional
+ * feature must never take the API down via unhandledRejection.
  */
 export function startPushSweep(options: PushSweepOptions): () => void {
   const intervalMs = options.intervalMs ?? 60_000;
   const alertsEveryMs = options.alertsEveryMs ?? 60 * 60_000;
+  const onError = options.onError ?? (() => undefined);
   let running = false;
   let lastAlertsCheck = 0;
 
@@ -350,18 +418,25 @@ export function startPushSweep(options: PushSweepOptions): () => void {
         lastAlertsCheck = now.getTime();
         const tenants = await prisma.tenant.findMany({ select: { id: true } });
         for (const tenant of tenants) {
+          await cleanTenantPushOrphans(tenant.id).catch((error: unknown) =>
+            onError(error instanceof Error ? error.name : "Error"),
+          );
           await checkTenantUrgentAlerts(tenant.id, options.agentContext ?? {}, now).catch(
-            () => 0,
+            (error: unknown) => onError(error instanceof Error ? error.name : "Error"),
           );
         }
       }
-      await flushPushWindows(options.sender, now);
+      await flushPushWindows(options.sender, now, onError);
     } finally {
       running = false;
     }
   };
 
-  const timer = setInterval(() => void tick(), intervalMs);
+  const timer = setInterval(() => {
+    void tick().catch((error: unknown) =>
+      onError(error instanceof Error ? error.name : "Error"),
+    );
+  }, intervalMs);
   timer.unref();
   return () => clearInterval(timer);
 }

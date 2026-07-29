@@ -177,7 +177,7 @@ describe("opt-in, préférences, révocation", () => {
         headers: { cookie: ownerCookie },
       });
       expect(config.json()).toMatchObject({ configured: false });
-      const res = await subscribe(ownerCookie, `https://push.example/${RUN}/none`);
+      const res = await subscribe(ownerCookie, `https://fcm.googleapis.com/fcm/send/${RUN}/none`);
       expect(res.statusCode).toBe(503);
     } finally {
       process.env.PUSH_VAPID_PUBLIC_KEY = "test-public-key";
@@ -186,14 +186,14 @@ describe("opt-in, préférences, révocation", () => {
   });
 
   it("souscription : clés stockées mais JAMAIS renvoyées ; liste = ses appareils à soi", async () => {
-    const created = await subscribe(ownerCookie, `https://push.example/${RUN}/owner-1`);
+    const created = await subscribe(ownerCookie, `https://fcm.googleapis.com/fcm/send/${RUN}/owner-1`);
     expect(created.statusCode).toBe(201);
     expect(created.body).not.toHaveProperty("endpoint");
     expect(created.body).not.toHaveProperty("p256dh");
     expect(created.body).not.toHaveProperty("auth");
     expect(created.body).toMatchObject({ userAgent: "Test Browser", actionsEnabled: true });
 
-    await subscribe(memberCookie, `https://push.example/${RUN}/member-1`);
+    await subscribe(memberCookie, `https://fcm.googleapis.com/fcm/send/${RUN}/member-1`);
     const list = await app.inject({
       method: "GET",
       url: "/push/subscriptions",
@@ -205,13 +205,58 @@ describe("opt-in, préférences, révocation", () => {
     expect(devices[0]!.id).toBe(created.body.id);
   });
 
+  it("anti-SSRF : seuls les services push des navigateurs sont acceptés comme endpoint", async () => {
+    // Hôte arbitraire, IP interne, http : tous rejetés — le serveur émettra
+    // des requêtes vers cette URL, elle ne peut pas être libre.
+    for (const endpoint of [
+      "https://evil.example/collect",
+      "https://169.254.169.254/latest/meta-data",
+      "http://fcm.googleapis.com/fcm/send/x",
+      "https://fcm.googleapis.com.evil.example/x",
+    ]) {
+      const res = await subscribe(ownerCookie, endpoint);
+      expect(res.statusCode).toBe(400);
+    }
+    // Les vrais services passent.
+    const firefox = await subscribe(
+      ownerCookie,
+      `https://updates.push.services.mozilla.com/wpush/v2/${RUN}`,
+    );
+    expect(firefox.statusCode).toBe(201);
+    await app.inject({
+      method: "DELETE",
+      url: `/push/subscriptions/${firefox.body.id as string}`,
+      headers: { cookie: ownerCookie },
+    });
+  });
+
+  it("plafond d'appareils par utilisateur : 429 au-delà de la limite", async () => {
+    const created: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const res = await subscribe(memberCookie, `https://fcm.googleapis.com/fcm/send/${RUN}-cap-${i}`);
+      if (res.statusCode === 201) created.push(res.body.id as string);
+    }
+    const overflow = await subscribe(
+      memberCookie,
+      `https://fcm.googleapis.com/fcm/send/${RUN}-cap-over`,
+    );
+    expect(overflow.statusCode).toBe(429);
+    for (const id of created) {
+      await app.inject({
+        method: "DELETE",
+        url: `/push/subscriptions/${id}`,
+        headers: { cookie: memberCookie },
+      });
+    }
+  });
+
   it("re-souscription du même endpoint par un AUTRE utilisateur : 409, pas de transfert", async () => {
-    const stolen = await subscribe(memberCookie, `https://push.example/${RUN}/owner-1`);
+    const stolen = await subscribe(memberCookie, `https://fcm.googleapis.com/fcm/send/${RUN}/owner-1`);
     expect(stolen.statusCode).toBe(409);
   });
 
   it("préférences par type et révocation, scopées à l'utilisateur de session", async () => {
-    const created = await subscribe(ownerCookie, `https://push.example/${RUN}/owner-prefs`);
+    const created = await subscribe(ownerCookie, `https://fcm.googleapis.com/fcm/send/${RUN}/owner-prefs`);
     const id = created.body.id as string;
     // Le membre ne peut ni régler ni révoquer l'appareil de l'owner.
     const foreignPatch = await app.inject({
@@ -298,7 +343,7 @@ describe("regroupement anti-spam", () => {
     // L'appareil restant de l'owner a alertsEnabled=false ? Non — on crée un
     // appareil dédié avec alertes coupées et on retire les autres.
     await withTenant(orgA, (tx) => tx.pushSubscription.deleteMany({ where: { userId: ownerId } }));
-    await subscribe(ownerCookie, `https://push.example/${RUN}/owner-optout`, {
+    await subscribe(ownerCookie, `https://fcm.googleapis.com/fcm/send/${RUN}/owner-optout`, {
       alertsEnabled: false,
     });
     await markPushSeen(orgA, ownerId, "actions");
@@ -315,7 +360,7 @@ describe("regroupement anti-spam", () => {
 
   it("endpoint mort (410) : la subscription est nettoyée", async () => {
     await withTenant(orgA, (tx) => tx.pushSubscription.deleteMany({ where: { userId: ownerId } }));
-    const endpoint = `https://push.example/${RUN}/owner-dead`;
+    const endpoint = `https://fcm.googleapis.com/fcm/send/${RUN}/owner-dead`;
     await subscribe(ownerCookie, endpoint);
     await markPushSeen(orgA, ownerId, "actions");
     const t0 = new Date(Date.now() - 40 * 60_000);
@@ -331,7 +376,7 @@ describe("regroupement anti-spam", () => {
 
 describe("isolation tenant", () => {
   it("les événements d'un tenant ne déclenchent jamais les appareils d'un autre", async () => {
-    await subscribe(otherCookie, `https://push.example/${RUN}/other-1`);
+    await subscribe(otherCookie, `https://fcm.googleapis.com/fcm/send/${RUN}/other-1`);
     const t0 = new Date();
     // Événement pour le tenant A uniquement.
     await recordPushEvent(orgA, [ownerId], "actions", 1, { now: t0 });
@@ -342,5 +387,17 @@ describe("isolation tenant", () => {
     // Et l'état de dispatch du tenant B est vierge.
     const statesB = await withTenant(orgB, (tx) => tx.pushDispatchState.findMany());
     expect(statesB).toHaveLength(0);
+  });
+
+  it("un même appareil peut servir DEUX organisations (expert-comptable multi-tenants)", async () => {
+    // Le même endpoint que celui du tenant B, enregistré depuis le tenant A :
+    // accepté — l'unicité est par (tenant, endpoint), pas globale.
+    const res = await subscribe(ownerCookie, `https://fcm.googleapis.com/fcm/send/${RUN}/other-1`);
+    expect(res.statusCode).toBe(201);
+    await app.inject({
+      method: "DELETE",
+      url: `/push/subscriptions/${res.body.id as string}`,
+      headers: { cookie: ownerCookie },
+    });
   });
 });

@@ -57,6 +57,25 @@ transitoire → retenté au sweep suivant.
 sync n'est persisté aujourd'hui (pas de sync périodique dans le produit) ; à
 brancher quand cette infra existera.
 
+## Durcissements (audit RGPD/sécurité 2.17)
+
+- **Anti-SSRF** : l'endpoint de subscription est une URL fournie par le
+  client vers laquelle le SERVEUR émet des requêtes — contraint à `https` +
+  allowlist des services push navigateurs (FCM, Mozilla, Apple, WNS), et
+  **plafond de 10 appareils par utilisateur** (anti-amplification).
+- **Unicité `(tenant, endpoint)`** (pas globale) : un même appareil peut
+  servir plusieurs organisations (expert-comptable) ; tout conflit répond un
+  409 générique unique.
+- **Sweep incrasable** : toute rejection est capturée (nom d'erreur seul en
+  log) — la feature optionnelle ne peut pas tuer l'API ; compteur clampé à
+  9 999 à l'envoi.
+- **Rétention** : purge horaire des subscriptions/états d'un utilisateur qui
+  a perdu sa membership ; les clés de subscription restent en clair sous RLS
+  (jamais renvoyées, jamais loggées) — à couvrir par la politique de
+  chiffrement au repos/sauvegardes.
+- **Checks horaires** : uniquement si un OWNER a un appareil avec alertes
+  actives (jamais d'appels fournisseurs pour personne).
+
 ## Clés VAPID
 
 Au coffre (`@nodaq/secrets`) : `PUSH_VAPID_PUBLIC_KEY`,
