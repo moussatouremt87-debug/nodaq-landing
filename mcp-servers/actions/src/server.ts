@@ -11,7 +11,7 @@ import { scoreLatePayment } from "./dunning.js";
 import { extractInvoiceFields } from "./invoiceExtraction.js";
 import type { OcrClientOptions } from "./ocrClient.js";
 import { extractInvoiceText } from "./ocrClient.js";
-import { buildMonthlySeries, forecastSales } from "./salesForecast.js";
+import { buildMonthlySeries, fetchInvoiceWindow, forecastSales } from "./salesForecast.js";
 import { forecastTreasury } from "./treasury.js";
 import type { TreasuryTransaction } from "./treasury.js";
 
@@ -195,23 +195,13 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
     },
     async ({ horizonMonths }) => {
       const pennylane = await getPennylaneClient(tenantId, context);
-      // Fenêtre bornée : jusqu'à 5 pages de 100 factures (couvre largement
-      // 12 mois d'une PME sans jamais aspirer un historique entier).
-      const invoices = [];
-      let cursor: string | undefined;
-      for (let pageIndex = 0; pageIndex < 5; pageIndex++) {
-        const { items, next_cursor } = await pennylane.listCustomerInvoices({
-          limit: 100,
-          ...(cursor ? { cursor } : {}),
-        });
-        invoices.push(...items);
-        if (!next_cursor) break;
-        cursor = next_cursor;
-      }
+      // Fenêtre bornée par DATE et par pages, avec signal de troncature : un
+      // historique tronqué ne doit jamais se lire comme « mois sans ventes ».
+      const { invoices, truncated } = await fetchInvoiceWindow(pennylane, new Date());
       const series = buildMonthlySeries(invoices, new Date());
       const forecast = forecastSales(series, horizonMonths ?? 3);
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(forecast) }],
+        content: [{ type: "text" as const, text: JSON.stringify({ ...forecast, truncated }) }],
       };
     },
   );

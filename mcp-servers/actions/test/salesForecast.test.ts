@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildMonthlySeries, forecastSales } from "../src/salesForecast.js";
+import { buildMonthlySeries, fetchInvoiceWindow, forecastSales } from "../src/salesForecast.js";
+import type { ForecastInvoice } from "../src/salesForecast.js";
 
 /*
  * Prévision des ventes (ticket 3.1) — modèle PUR, déterministe, explicable :
@@ -56,6 +57,36 @@ describe("buildMonthlySeries", () => {
       revenueCents: 30_025,
       invoiceCount: 1,
     });
+  });
+
+  it("parse STRICT : un montant malformé est écarté, jamais tronqué en CA faux", () => {
+    const series = buildMonthlySeries(
+      [
+        invoice("2026-05-10", "12abc"), // parseFloat aurait donné 12 €
+        invoice("2026-05-10", "1,234.56"), // séparateur de milliers ambigu : rejeté
+        invoice("2026-05-10", "1 234,56"), // idem
+        invoice("2026-05-10", "200.00"),
+      ],
+      NOW,
+      4,
+    );
+    expect(series.find((p) => p.month === "2026-05")).toMatchObject({
+      revenueCents: 20_000,
+      invoiceCount: 1,
+    });
+  });
+
+  it("une facture en devise étrangère ne se somme pas avec des euros", () => {
+    const series = buildMonthlySeries(
+      [
+        { date: "2026-05-10", amount: "100.00", currency: "USD", status: "paid" },
+        { date: "2026-05-10", amount: "50.00", currency: "EUR", status: "paid" },
+        { date: "2026-05-10", amount: "25.00", currency: null, status: "paid" },
+      ],
+      NOW,
+      4,
+    );
+    expect(series.find((p) => p.month === "2026-05")?.revenueCents).toBe(7_500);
   });
 });
 
@@ -125,5 +156,50 @@ describe("forecastSales", () => {
     expect(forecast.method).toBe("aucune-donnee");
     expect(forecast.observedMonths).toBe(0);
     expect(forecast.points.every((p) => p.revenueCents === 0)).toBe(true);
+  });
+});
+
+describe("fetchInvoiceWindow", () => {
+  function pagedClient(pages: ForecastInvoice[][]) {
+    const calls: { cursor?: string }[] = [];
+    return {
+      calls,
+      listCustomerInvoices: ({ cursor }: { limit?: number; cursor?: string }) => {
+        calls.push(cursor ? { cursor } : {});
+        const index = cursor ? Number(cursor) : 0;
+        return Promise.resolve({
+          items: pages[index] ?? [],
+          next_cursor: index + 1 < pages.length ? String(index + 1) : null,
+        });
+      },
+    };
+  }
+
+  const recent = (n: number): ForecastInvoice[] =>
+    Array.from({ length: n }, () => invoice("2026-06-10", "100.00"));
+  const ancient = (n: number): ForecastInvoice[] =>
+    Array.from({ length: n }, () => invoice("2020-01-10", "100.00"));
+
+  it("s'arrête au cap de pages et SIGNALE la troncature (jamais « mois sans ventes »)", async () => {
+    const client = pagedClient([recent(2), recent(2), recent(2), recent(2), recent(2), recent(2)]);
+    const { invoices, truncated } = await fetchInvoiceWindow(client, NOW, { maxPages: 5 });
+    expect(client.calls).toHaveLength(5);
+    expect(invoices).toHaveLength(10);
+    expect(truncated).toBe(true);
+  });
+
+  it("s'arrête dès qu'une page entière est antérieure à la fenêtre — sans troncature", async () => {
+    const client = pagedClient([recent(3), ancient(3), ancient(3)]);
+    const { invoices, truncated } = await fetchInvoiceWindow(client, NOW);
+    expect(client.calls).toHaveLength(2);
+    expect(invoices).toHaveLength(6);
+    expect(truncated).toBe(false);
+  });
+
+  it("dernière page atteinte naturellement : pas de troncature", async () => {
+    const client = pagedClient([recent(3), recent(1)]);
+    const { invoices, truncated } = await fetchInvoiceWindow(client, NOW);
+    expect(invoices).toHaveLength(4);
+    expect(truncated).toBe(false);
   });
 });

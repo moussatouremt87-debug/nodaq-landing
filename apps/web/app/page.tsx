@@ -316,7 +316,7 @@ export default function CockpitPage() {
 
           {sales && sales.observedMonths > 0 && (
             <>
-              <hr className="divider" />
+              {treasury && <hr className="divider" />}
               <div className="card-header">
                 <div className="titles">
                   <div className="title">Prévision des ventes</div>

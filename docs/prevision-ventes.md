@@ -29,7 +29,15 @@ Le CA agrégé est une donnée financière globale du tenant : même règle
 tiers-délégué que la trésorerie.
 
 - **Outil agent** `forecast_sales` (lecture seule) — dans `OWNER_ONLY_TOOLS`,
-  invisible pour un membre ou un expert-comptable.
+  invisible pour un membre ou un expert-comptable. La liste couvre aussi les
+  **listes brutes** qui permettraient de reconstituer l'agrégat
+  (`pennylane_get_invoices`, `qonto_get_organization`,
+  `qonto_get_bank_transactions`) : un gate sur l'agrégat seul serait
+  contournable (audit RGPD 3.1) — le pilotage financier via le chat est donc
+  owner-only de bout en bout.
+- L'outil signale `truncated: true` quand la fenêtre de collecte (5 pages,
+  bornée par date et par délai) n'a pas couvert tout l'historique — un
+  historique tronqué ne se lit jamais comme des « mois sans ventes ».
 - **Cockpit** : la carte « Prévision des ventes » (barres 12 mois + prévision)
   n'apparaît que pour l'owner (`/cockpit/kpis.sales`, null sinon), dégradée
   indépendamment de la trésorerie.
