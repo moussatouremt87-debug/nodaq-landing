@@ -10,6 +10,10 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  // "ops" (2.18) : tables de support back-office — exception ASSUMÉE à la RLS
+  // métier (voir CLAUDE.md) : accès réservé aux routes OPERATOR, jamais aux
+  // routes tenant, et JAMAIS un corps d'e-mail brut en base (Object Storage).
+  schemas  = ["public", "ops"]
 }
 
 /// Tenant = better-auth "organization" (plugin organization, mapped via modelName).
@@ -40,6 +44,7 @@ model Tenant {
   pushDispatchStates  PushDispatchState[]
 
   @@map("tenants")
+  @@schema("public")
 }
 
 /// Tables d'authentification (better-auth) : users, sessions, accounts, verifications.
@@ -60,6 +65,7 @@ model User {
   invitations   Invitation[]
 
   @@map("users")
+  @@schema("public")
 }
 
 model Session {
@@ -79,6 +85,7 @@ model Session {
 
   @@index([userId])
   @@map("sessions")
+  @@schema("public")
 }
 
 model Account {
@@ -99,6 +106,7 @@ model Account {
 
   @@index([userId])
   @@map("accounts")
+  @@schema("public")
 }
 
 model Verification {
@@ -111,6 +119,7 @@ model Verification {
 
   @@index([identifier])
   @@map("verifications")
+  @@schema("public")
 }
 
 /// Membership = better-auth "member". Roles: owner | member | accountant
@@ -128,6 +137,7 @@ model Membership {
   @@unique([tenantId, userId])
   @@index([tenantId])
   @@map("memberships")
+  @@schema("public")
 }
 
 /// Invitation = better-auth "invitation" (organization plugin). Auth-plane table
@@ -148,6 +158,7 @@ model Invitation {
   @@index([tenantId])
   @@index([email])
   @@map("invitations")
+  @@schema("public")
 }
 
 /// Table métier de démonstration : scellée par RLS (voir la migration `rls_notes`).
@@ -162,6 +173,7 @@ model Note {
 
   @@index([tenantId])
   @@map("notes")
+  @@schema("public")
 }
 
 /// RGPD audit trail of model routing decisions: which sensitivity category and
@@ -189,6 +201,7 @@ model Classification {
 
   @@index([tenantId])
   @@map("classifications")
+  @@schema("public")
 }
 
 /// Registry of connected SaaS connectors per tenant (blueprint §5.6, e.g. Pennylane,
@@ -212,6 +225,7 @@ model Connector {
   @@unique([tenantId, type])
   @@index([tenantId])
   @@map("connectors")
+  @@schema("public")
 }
 
 /// Per-tenant model routing policy. Sealed by RLS (see the migration
@@ -227,6 +241,7 @@ model TenantPolicy {
   tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("tenant_policies")
+  @@schema("public")
 }
 
 /// RAG ingestion tracking: one row per source document ingested for a tenant.
@@ -254,6 +269,7 @@ model Document {
   @@unique([tenantId, hash])
   @@index([tenantId])
   @@map("documents")
+  @@schema("public")
 }
 
 /// RAG vector store: one row per chunk of a `Document`, with its embedding.
@@ -286,6 +302,7 @@ model DocumentChunk {
   // as an externally-managed table in `prisma.config.ts` (`tables.external`) so
   // `prisma migrate dev` doesn't perpetually try to reconcile/drop it as drift.
   @@map("document_chunks")
+  @@schema("public")
 }
 
 /// Human-in-the-loop validation queue (blueprint §5.4/§6, CLAUDE.md rule 4): every
@@ -322,6 +339,7 @@ model PendingAction {
   @@index([tenantId])
   @@index([tenantId, status])
   @@map("pending_actions")
+  @@schema("public")
 }
 
 /// Persisted conversation transcripts of virtual employees (blueprint agentic
@@ -341,6 +359,7 @@ model AgentConversation {
 
   @@index([tenantId])
   @@map("agent_conversations")
+  @@schema("public")
 }
 
 /// Ticket 2.14 — import FEC (données CONFIDENTIELLES : dérivées du journal
@@ -367,6 +386,7 @@ model FecImport {
   @@unique([tenantId, fileHash])
   @@index([tenantId])
   @@map("fec_imports")
+  @@schema("public")
 }
 
 /// Ticket 2.14 — import FEC (données CONFIDENTIELLES : dérivées du journal
@@ -392,6 +412,7 @@ model FecInvoice {
   @@index([tenantId])
   @@index([tenantId, settled])
   @@map("fec_invoices")
+  @@schema("public")
 }
 
 /// Ticket 2.16 — classeur documentaire photo (justificatifs pris en photo par
@@ -432,6 +453,7 @@ model ClasseurDocument {
   @@unique([tenantId, sha256])
   @@index([tenantId, status])
   @@map("classeur_documents")
+  @@schema("public")
 }
 
 /// Ticket 3.2 — suivi des stocks + alertes. Un article de stock par tenant
@@ -456,6 +478,7 @@ model StockItem {
   @@unique([tenantId, name])
   @@index([tenantId])
   @@map("stock_items")
+  @@schema("public")
 }
 
 /// Ticket 3.2 — journal APPEND-ONLY des mouvements de stock (entrées/sorties).
@@ -478,6 +501,7 @@ model StockMovement {
 
   @@index([tenantId, itemId])
   @@map("stock_movements")
+  @@schema("public")
 }
 
 /// Ticket 2.17 — notifications push Web/PWA. Un abonnement Web Push par
@@ -509,6 +533,7 @@ model PushSubscription {
   @@unique([tenantId, endpoint])
   @@index([tenantId, userId])
   @@map("push_subscriptions")
+  @@schema("public")
 }
 
 /// Ticket 2.17 — état de regroupement anti-spam des notifications push, une
@@ -530,4 +555,70 @@ model PushDispatchState {
 
   @@unique([tenantId, userId, category])
   @@map("push_dispatch_states")
+  @@schema("public")
+}
+
+/// ─────────────────────────────────────────────────────────────────────────────
+/// Schéma OPS (ticket 2.18) — support back-office. Exception ASSUMÉE à la RLS
+/// métier : ces tables ne sont PAS tenant-scopées (un ticket peut n'avoir aucun
+/// tenant, le recueil sert tous les tenants). Accès réservé aux routes
+/// OPERATOR (allowlist plateforme) — jamais exposées aux routes tenant.
+/// INTERDIT d'y stocker un corps d'e-mail brut : Object Storage uniquement,
+/// référencé par clé (`objectKeys`).
+/// ─────────────────────────────────────────────────────────────────────────────
+
+model SupportTicket {
+  id         String    @id @default(uuid()) @db.Uuid
+  /// Idempotence d'ingestion : re-poller la boîte ne crée jamais un doublon.
+  messageId  String    @unique @map("message_id")
+  fromEmail  String    @map("from_email")
+  subject    String    @default("")
+  /// Tenant identifié via From -> user -> memberships ; null = file générique.
+  tenantId   String?   @map("tenant_id") @db.Uuid
+  userId     String?   @map("user_id") @db.Uuid
+  /// USAGE | DONNEES_CONNECTEURS | BUG_PRODUIT (triage), null avant triage.
+  origin     String?
+  /// P1 | P2 | P3, null avant triage.
+  level      String?
+  /// NOUVEAU | TRIE | BROUILLON_PRET | REPONDU | RESOLU | SPAM.
+  status     String    @default("NOUVEAU")
+  /// Clés Object Storage du corps + pièces jointes (jamais le contenu ici).
+  objectKeys Json      @default("[]") @map("object_keys")
+  /// SPF/DKIM = signal (jamais une preuve d'identité).
+  authSignal String?   @map("auth_signal")
+  /// Brouillon de réponse GÉNÉRÉ (pas le corps entrant) — validé avant envoi.
+  draftReply String?   @map("draft_reply")
+  /// Diagnostic / rapport ANONYMISÉ produit par l'agent (jamais de donnée client).
+  agentReport Json?    @map("agent_report")
+  /// Fil e-mail (In-Reply-To à poser sur la réponse).
+  inReplyTo  String?   @map("in_reply_to")
+  repliedAt  DateTime? @map("replied_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("support_tickets")
+  @@schema("ops")
+}
+
+/// Recueil des problèmes : entrées CANONIQUES et ANONYMISÉES (aucune donnée
+/// client — elles servent tous les tenants). Proposées par l'agent à la
+/// résolution, validées par l'opérateur avant de devenir canoniques.
+model SupportIssue {
+  id          String   @id @default(uuid()) @db.Uuid
+  title       String
+  symptoms    String
+  cause       String   @default("")
+  resolution  String   @default("")
+  /// USAGE | DONNEES_CONNECTEURS | BUG_PRODUIT.
+  origin      String
+  occurrences Int      @default(1)
+  validated   Boolean  @default(false)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([validated])
+  @@map("support_issues")
+  @@schema("ops")
 }

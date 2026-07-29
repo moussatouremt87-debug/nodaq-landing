@@ -487,6 +487,101 @@ export const revokePushDevice = (id: string): Promise<{ revoked: boolean }> =>
     method: "DELETE",
   });
 
+/*
+ * Back-office support (2.18) — réservé au rôle plateforme OPERATOR (un
+ * non-opérateur reçoit 404). Le corps original est servi en texte brut par
+ * une route dédiée, jamais dans les objets JSON.
+ */
+
+export const SupportTicket = z.object({
+  id: z.string(),
+  fromEmail: z.string(),
+  subject: z.string(),
+  tenantId: z.string().nullable(),
+  origin: z.string().nullable(),
+  level: z.string().nullable(),
+  status: z.string(),
+  authSignal: z.string().nullable(),
+  repliedAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type SupportTicket = z.infer<typeof SupportTicket>;
+
+export const SupportTicketDetail = SupportTicket.extend({
+  draftReply: z.string().nullable(),
+  agentReport: z.unknown().nullable(),
+});
+export type SupportTicketDetail = z.infer<typeof SupportTicketDetail>;
+
+export const SupportIssue = z.object({
+  id: z.string(),
+  title: z.string(),
+  symptoms: z.string(),
+  cause: z.string(),
+  resolution: z.string(),
+  origin: z.string(),
+  occurrences: z.number(),
+  validated: z.boolean(),
+  updatedAt: z.string(),
+});
+export type SupportIssue = z.infer<typeof SupportIssue>;
+
+export const listSupportTickets = (status?: string): Promise<SupportTicket[]> =>
+  call(
+    z.array(SupportTicket),
+    `/ops/support/tickets${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+  );
+
+export const getSupportTicket = (id: string): Promise<SupportTicketDetail> =>
+  call(
+    SupportTicketDetail,
+    `/ops/support/tickets/${encodeURIComponent(id)}`,
+  );
+
+export const getSupportTicketBody = async (id: string): Promise<string> => {
+  const response = await fetch(`/backend/ops/support/tickets/${encodeURIComponent(id)}/body`);
+  if (!response.ok) throw new ApiError(response.status, `HTTP ${response.status}`);
+  return response.text();
+};
+
+export const updateSupportDraft = (id: string, draftReply: string): Promise<{ updated: boolean }> =>
+  call(z.object({ updated: z.boolean() }), `/ops/support/tickets/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ draftReply }),
+  });
+
+export const sendSupportReply = (id: string): Promise<{ sent: boolean }> =>
+  call(z.object({ sent: z.boolean() }), `/ops/support/tickets/${encodeURIComponent(id)}/send`, {
+    method: "POST",
+    body: "{}",
+  });
+
+export const resolveSupportTicket = (
+  id: string,
+  payload: {
+    issueId?: string;
+    issue?: { title: string; symptoms: string; cause?: string; resolution?: string; origin: string };
+  },
+): Promise<{ resolved: boolean; issueId: string | null }> =>
+  call(
+    z.object({ resolved: z.boolean(), issueId: z.string().nullable() }),
+    `/ops/support/tickets/${encodeURIComponent(id)}/resolve`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+
+export const listSupportIssues = (): Promise<SupportIssue[]> =>
+  call(
+    z.array(SupportIssue),
+    "/ops/support/issues",
+  );
+
+export const validateSupportIssue = (id: string): Promise<{ validated: boolean }> =>
+  call(z.object({ validated: z.boolean() }), `/ops/support/issues/${encodeURIComponent(id)}/validate`, {
+    method: "POST",
+    body: "{}",
+  });
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {

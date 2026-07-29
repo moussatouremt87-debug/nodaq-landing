@@ -25,14 +25,16 @@ import type { ToolsetContext } from "@nodaq/agent-runtime";
  * BullMQ delayed jobs later will not touch callers.
  */
 
-export const PUSH_CATEGORIES = ["actions", "alerts"] as const;
+export const PUSH_CATEGORIES = ["actions", "alerts", "support"] as const;
 export type PushCategory = (typeof PUSH_CATEGORIES)[number];
 export const PushCategorySchema = z.enum(PUSH_CATEGORIES);
 
-/** Grouping window per category — urgent alerts go out on the next sweep. */
+/** Grouping window per category — urgent/support alerts go out on the next sweep. */
 export const PUSH_WINDOW_MS: Record<PushCategory, number> = {
   actions: 15 * 60_000,
   alerts: 0,
+  // Ticket support P1 (2.18) : immédiat, même canal d'opt-in que les alertes.
+  support: 0,
 };
 
 /**
@@ -42,9 +44,9 @@ export const PUSH_WINDOW_MS: Record<PushCategory, number> = {
  */
 export const PushPayload = z
   .object({
-    type: z.enum(["actions_en_attente", "alerte_urgente"]),
+    type: z.enum(["actions_en_attente", "alerte_urgente", "support_p1"]),
     count: z.number().int().min(1).max(9_999),
-    deepLink: z.enum(["/validation", "/", "/connecteurs"]),
+    deepLink: z.enum(["/validation", "/", "/connecteurs", "/ops/support"]),
   })
   .strict();
 export type PushPayload = z.infer<typeof PushPayload>;
@@ -52,6 +54,7 @@ export type PushPayload = z.infer<typeof PushPayload>;
 const CATEGORY_PAYLOADS: Record<PushCategory, Pick<PushPayload, "type" | "deepLink">> = {
   actions: { type: "actions_en_attente", deepLink: "/validation" },
   alerts: { type: "alerte_urgente", deepLink: "/" },
+  support: { type: "support_p1", deepLink: "/ops/support" },
 };
 
 export function buildPushPayload(category: PushCategory, count: number): PushPayload {
@@ -233,6 +236,7 @@ export async function flushTenantPushWindows(
       tx.pushSubscription.findMany({
         where: {
           userId: state.userId,
+          // "support" (P1 opérateur) suit l'opt-in « alertes urgentes ».
           ...(category === "actions" ? { actionsEnabled: true } : { alertsEnabled: true }),
         },
       }),

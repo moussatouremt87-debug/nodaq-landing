@@ -90,6 +90,7 @@ const TITLES: Record<string, string> = {
   "/connecteurs": "Connecteurs",
   "/validation": "File de validation",
   "/reglages/notifications": "Notifications",
+  "/ops/support": "Support (back-office)",
 };
 
 export function Shell({ children }: { children: ReactNode }) {
