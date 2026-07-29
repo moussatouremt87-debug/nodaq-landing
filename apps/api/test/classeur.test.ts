@@ -96,8 +96,9 @@ beforeAll(async () => {
   process.env.LITELLM_BASE_URL = `http://127.0.0.1:${(fakeLiteLLM.address() as AddressInfo).port}`;
   process.env.LITELLM_MASTER_KEY = "sk-test-master";
 
+  // Pas de purge globale : les tenants du test sont créés à chaque exécution
+  // (une purge cross-tenant ferait la course avec les suites parallèles).
   admin = createAdminClient();
-  await admin.classeurDocument.deleteMany();
   app = buildApp();
   await app.ready();
 
@@ -290,6 +291,19 @@ describe("capture et extraction", () => {
     });
     expect(match.statusCode).toBe(200);
     expect(match.json().document).toMatchObject({
+      status: "rapproche",
+      matchedTransactionId: first.transactionId,
+    });
+
+    // Corriger un champ APRÈS rapprochement ne défait pas le rapprochement.
+    const correctAfter = await app.inject({
+      method: "PATCH",
+      url: `/classeur/documents/${docId}`,
+      headers: { cookie: memberCookie, "content-type": "application/json" },
+      payload: { supplierName: "Comptoir Élec SAS" },
+    });
+    expect(correctAfter.statusCode).toBe(200);
+    expect(correctAfter.json().document).toMatchObject({
       status: "rapproche",
       matchedTransactionId: first.transactionId,
     });

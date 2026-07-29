@@ -216,8 +216,8 @@ export default function ClasseurPage() {
       <div className="card" style={{ maxWidth: 430, marginBottom: 18 }}>
         <span className="overline">Ajouter un document</span>
         <p className="hint" style={{ margin: "4px 0 10px" }}>
-          Photo JPEG, PNG ou WebP — 8 Mo max. Le fichier part chiffré vers votre espace, jamais
-          ailleurs.
+          Photo JPEG, PNG ou WebP — 8 Mo max. Le fichier transite en TLS et reste dans votre
+          espace souverain (France) — jamais ailleurs.
         </p>
         <label>
           <input

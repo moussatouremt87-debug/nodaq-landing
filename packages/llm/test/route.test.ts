@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
-import { SovereigntyViolationError, embed, route } from "../src/index.js";
+import { SovereigntyViolationError, embed, route, routeChat } from "../src/index.js";
 
 /**
  * Routing tests — real Postgres (RLS) + FAKE OpenAI-compatible server standing
@@ -303,6 +303,54 @@ describe("route — images (documents photographiés, ticket 2.16)", () => {
       .digest("hex");
     expect(audits[0]?.contentHash).not.toBe(textOnlyHash);
     expect(JSON.stringify(audits[0])).not.toContain(JPEG_B64);
+  });
+
+  it("routeChat : une conversation multimodale est durcie à confidentiel (jamais frontier)", async () => {
+    // Symétrique du durcissement de route() : le type ChatMessage accepte des
+    // content-parts, donc routeChat doit appliquer LE MÊME invariant.
+    const { category, group } = await routeChat(
+      {
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Que contient ce document ?" },
+              { type: "image_url", image_url: { url: `data:image/jpeg;base64,${JPEG_B64}` } },
+            ],
+          },
+        ],
+        tenantId: tenantOn, // frontier activé pour ce tenant !
+        requestId: "req-chat-image",
+      },
+      { preferFrontier: true },
+    );
+    expect(category).toBe("confidentiel");
+    expect(group).toBe("sovereign-fast");
+    expect(recorded.every((req) => req.model !== "frontier")).toBe(true);
+
+    // Le hash d'audit couvre les parts (dont l'image) — pas « conversation vide ».
+    const audits = await withTenant(tenantOn, (tx) =>
+      tx.classification.findMany({ where: { requestId: "req-chat-image" } }),
+    );
+    expect(audits).toHaveLength(1);
+    const emptyHash = createHash("sha256").update("(conversation vide)", "utf8").digest("hex");
+    expect(audits[0]?.contentHash).not.toBe(emptyHash);
+  });
+
+  it("le plafond agrégé d'images est appliqué (rejet Zod, zéro réseau)", async () => {
+    const big = "a".repeat(8_000_000);
+    await expect(
+      route({
+        text: "doc",
+        tenantId: tenantOff,
+        requestId: "req-image-aggregate",
+        images: [
+          { mimeType: "image/jpeg", base64: big },
+          { mimeType: "image/jpeg", base64: big },
+        ],
+      }),
+    ).rejects.toThrow();
+    expect(recorded).toHaveLength(0);
   });
 
   it("type MIME hors liste (jamais de SVG/GIF) => rejet Zod, zéro appel réseau", async () => {

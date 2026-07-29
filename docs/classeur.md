@@ -37,10 +37,20 @@ trésorerie : données bancaires = tiers délégué exclu).
 
 La photo vit dans PostgreSQL (`classeur_documents.photo`, colonne `Bytes`),
 région fr-par, sous **RLS + test d'isolation** — servie par une route binaire
-authentifiée (`GET /classeur/documents/:id/photo`), jamais dans une réponse
-JSON. La bascule vers l'Object Storage arrivera avec l'infra bucket (même
-suivi que l'archivage FEC). **Effacement (art. 17)** : suppression owner par
-document, photo comprise.
+authentifiée (`GET /classeur/documents/:id/photo`, `nosniff`, jamais dans une
+réponse JSON). La bascule vers l'Object Storage arrivera avec l'infra bucket
+(même suivi que l'archivage FEC).
+
+- **Quota** : 500 documents par tenant (8 Mo max chacun) — borne le stockage
+  et les appels vision. L'auth est vérifiée **avant** la lecture du corps.
+- **Conservation / effacement (art. 17)** : les documents vivent tant que le
+  compte est actif ; suppression owner par document (photo comprise), à tout
+  moment. Purge automatique par ancienneté : à définir avec la politique de
+  conservation produit (suivi).
+- **DPIA / registre** : 2.16 est le premier flux qui envoie des documents
+  bruts confidentiels à un modèle (endpoint mutualisé Scaleway Generative
+  APIs, souverain). À refléter au registre des traitements ; le tier Managed
+  Inference dédié (`confidential`) reste la cible.
 
 ## Rapprochement bancaire
 

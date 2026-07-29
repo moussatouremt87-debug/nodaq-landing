@@ -810,11 +810,23 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
     classeur.post(
       "/classeur/documents",
-      { preHandler: businessRoute, bodyLimit: 8 * 1024 * 1024 },
+      // onRequest (pas preHandler) : l'auth est vérifiée AVANT que Fastify ne
+      // bufferise le corps — un anonyme ne coûte jamais 8 Mo d'allocation.
+      { onRequest: businessRoute, bodyLimit: 8 * 1024 * 1024 },
       async (request, reply) => {
         const body = request.body;
         if (!Buffer.isBuffer(body) || body.length === 0) {
           return reply.code(400).send({ error: "photo attendue (corps application/octet-stream)" });
+        }
+        // Quota par tenant : borne le stockage (≤ ~4 Go) ET les appels vision
+        // facturés — un membre ne peut pas boucler indéfiniment.
+        const documentCount = await withTenant(request.tenantId, (tx) =>
+          tx.classeurDocument.count(),
+        );
+        if (documentCount >= 500) {
+          return reply
+            .code(409)
+            .send({ error: "quota du classeur atteint (500 documents) — supprimez d'abord" });
         }
         const mimeType = sniffImageMime(body);
         if (!mimeType) {
@@ -911,6 +923,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       return reply
         .header("content-type", document.mimeType)
         .header("cache-control", "private, no-store")
+        .header("x-content-type-options", "nosniff")
+        .header("content-disposition", "inline")
         .send(Buffer.from(document.photo));
     },
   );
@@ -943,34 +957,56 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     }
     const fields = parsed.data;
 
-    const updated = await withTenant(request.tenantId, async (tx) => {
-      const document = await tx.classeurDocument.findUnique({
-        where: { id },
-        select: { extraction: true, corrections: true, docType: true },
+    let updated: unknown;
+    try {
+      updated = await withTenant(request.tenantId, async (tx) => {
+        const document = await tx.classeurDocument.findUnique({
+          where: { id },
+          select: { extraction: true, corrections: true, docType: true, status: true },
+        });
+        if (!document) return null;
+        // Append-only FAIL-CLOSED : un historique corrompu (pas un tableau)
+        // ne doit JAMAIS être remplacé silencieusement — on refuse d'écrire.
+        if (!Array.isArray(document.corrections)) {
+          throw new Error("corrections history is not an array");
+        }
+        if (document.corrections.length >= 200) return "cap" as const;
+        const extraction = {
+          ...(typeof document.extraction === "object" && document.extraction !== null
+            ? document.extraction
+            : {}),
+          ...fields,
+        };
+        const corrections = [
+          ...document.corrections,
+          { by: request.authSession.user.id, at: new Date().toISOString(), fields },
+        ] as Prisma.InputJsonValue;
+        return tx.classeurDocument.update({
+          where: { id },
+          data: {
+            extraction,
+            corrections,
+            docType: fields.docType ?? document.docType,
+            // Un document rapproché RESTE rapproché : corriger un champ ne
+            // défait pas silencieusement le rapprochement fait par l'owner.
+            status: document.status === "rapproche" ? "rapproche" : "verifie",
+          },
+          select: DOC_SELECT,
+        });
       });
-      if (!document) return null;
-      const extraction = {
-        ...(typeof document.extraction === "object" && document.extraction !== null
-          ? document.extraction
-          : {}),
-        ...fields,
-      };
-      const corrections = [
-        ...z.array(z.unknown()).catch([]).parse(document.corrections),
-        { by: request.authSession.user.id, at: new Date().toISOString(), fields },
-      ] as Prisma.InputJsonValue;
-      return tx.classeurDocument.update({
-        where: { id },
-        data: {
-          extraction,
-          corrections,
-          docType: fields.docType ?? document.docType,
-          status: "verifie",
-        },
-        select: DOC_SELECT,
-      });
-    });
-    if (!updated) return reply.code(404).send({ error: "not found" });
+    } catch (error) {
+      // Une erreur Prisma peut citer ses arguments (champs du justificatif) :
+      // nom d'erreur uniquement, jamais l'objet complet.
+      request.log.error(
+        { err: error instanceof Error ? error.name : "Error" },
+        "classeur correction failed",
+      );
+      return reply.code(500).send({ error: "correction failed" });
+    }
+    if (updated === null) return reply.code(404).send({ error: "not found" });
+    if (updated === "cap") {
+      return reply.code(409).send({ error: "trop de corrections sur ce document" });
+    }
     return { document: updated };
   });
 
@@ -1028,17 +1064,29 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       if (!parsed.success) return reply.code(400).send({ error: "invalid match" });
       const { transactionId } = parsed.data;
 
-      const updated = await withTenant(request.tenantId, async (tx) => {
-        const exists = await tx.classeurDocument.findUnique({ where: { id }, select: { id: true } });
-        if (!exists) return null;
-        return tx.classeurDocument.update({
-          where: { id },
-          data: transactionId
-            ? { matchedTransactionId: transactionId, matchedAt: new Date(), status: "rapproche" }
-            : { matchedTransactionId: null, matchedAt: null, status: "verifie" },
-          select: DOC_SELECT,
+      let updated: unknown;
+      try {
+        updated = await withTenant(request.tenantId, async (tx) => {
+          const exists = await tx.classeurDocument.findUnique({
+            where: { id },
+            select: { id: true },
+          });
+          if (!exists) return null;
+          return tx.classeurDocument.update({
+            where: { id },
+            data: transactionId
+              ? { matchedTransactionId: transactionId, matchedAt: new Date(), status: "rapproche" }
+              : { matchedTransactionId: null, matchedAt: null, status: "verifie" },
+            select: DOC_SELECT,
+          });
         });
-      });
+      } catch (error) {
+        request.log.error(
+          { err: error instanceof Error ? error.name : "Error" },
+          "classeur match failed",
+        );
+        return reply.code(500).send({ error: "match failed" });
+      }
       if (!updated) return reply.code(404).send({ error: "not found" });
       return { document: updated };
     },
