@@ -11,6 +11,14 @@ name: Deploy staging
 
 on:
   workflow_dispatch:
+    inputs:
+      replace_web_domain:
+        description: >-
+          Recrée le domaine custom web (delete/re-add) pour forcer une nouvelle
+          émission du certificat Let's Encrypt — à utiliser quand la 1re
+          validation a eu lieu AVANT la propagation DNS et reste en erreur.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -147,7 +155,13 @@ jobs:
       - name: Apply 2 — web + AUTH_BASE_URL
         run: |
           API_URL="$(terraform output -raw api_url)"
-          terraform apply -auto-approve \
+          # Recréation forcée du domaine custom (émission de certificat bloquée
+          # en erreur après une validation tentée avant la propagation DNS).
+          EXTRA=""
+          if [ "${{ inputs.replace_web_domain }}" = "true" ]; then
+            EXTRA='-replace=scaleway_container_domain.web[0]'
+          fi
+          terraform apply -auto-approve $EXTRA \
             -var "project_id=$SCW_DEFAULT_PROJECT_ID" -var "image_tag=${GITHUB_SHA::12}" \
             -var "api_base_url=$API_URL"
 
