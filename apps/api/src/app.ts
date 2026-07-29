@@ -1205,10 +1205,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
               ...(alertThreshold !== undefined ? { alertThreshold } : {}),
               ...(unitCostCents !== undefined ? { unitCostCents } : {}),
             },
-            select: STOCK_SELECT,
+            select: { ...STOCK_SELECT, unitCostCents: true },
           }),
         );
-        return reply.code(201).send({ item: stockView(item) });
+        // Route owner : le coût et la valorisation peuvent sortir.
+        return reply
+          .code(201)
+          .send({ item: { ...stockView(item), valueCents: item.quantity * item.unitCostCents } });
       } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
           return reply.code(409).send({ error: "an item with this name already exists" });
@@ -1238,10 +1241,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         const item = await withTenant(request.tenantId, async (tx) => {
           const exists = await tx.stockItem.findUnique({ where: { id }, select: { id: true } });
           if (!exists) return null;
-          return tx.stockItem.update({ where: { id }, data, select: STOCK_SELECT });
+          return tx.stockItem.update({
+            where: { id },
+            data,
+            select: { ...STOCK_SELECT, unitCostCents: true },
+          });
         });
         if (!item) return reply.code(404).send({ error: "not found" });
-        return { item: stockView(item) };
+        // Route owner : le coût et la valorisation peuvent sortir.
+        return { item: { ...stockView(item), valueCents: item.quantity * item.unitCostCents } };
       } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
           return reply.code(409).send({ error: "an item with this name already exists" });
