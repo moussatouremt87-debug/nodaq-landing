@@ -11,6 +11,7 @@ import { scoreLatePayment } from "./dunning.js";
 import { extractInvoiceFields } from "./invoiceExtraction.js";
 import type { OcrClientOptions } from "./ocrClient.js";
 import { extractInvoiceText } from "./ocrClient.js";
+import { buildMonthlySeries, fetchInvoiceWindow, forecastSales } from "./salesForecast.js";
 import { forecastTreasury } from "./treasury.js";
 import type { TreasuryTransaction } from "./treasury.js";
 
@@ -46,6 +47,7 @@ export const TOOL_POLICIES = {
   ocr_and_book_invoice: { requiresValidation: true },
   draft_dunning: { requiresValidation: true },
   compute_treasury_forecast: { requiresValidation: false },
+  forecast_sales: { requiresValidation: false },
 } as const satisfies Record<string, { requiresValidation: boolean }>;
 
 const DUNNING_PROMPT =
@@ -168,6 +170,38 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
             text: JSON.stringify({ account: account.slug, ...forecast }),
           },
         ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "forecast_sales",
+    {
+      description:
+        "Prévision des ventes (lecture seule, ticket 3.1) : chiffre d'affaires mensuel " +
+        "observé sur les factures clients (12 derniers mois) projeté sur 3 mois par " +
+        "régression linéaire explicable. Fonctionne avec Pennylane, la démo ou un " +
+        "import FEC.",
+      inputSchema: {
+        horizonMonths: z
+          .number()
+          .int()
+          .min(1)
+          .max(6)
+          .optional()
+          .describe("Horizon de prévision en mois (défaut 3)"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ horizonMonths }) => {
+      const pennylane = await getPennylaneClient(tenantId, context);
+      // Fenêtre bornée par DATE et par pages, avec signal de troncature : un
+      // historique tronqué ne doit jamais se lire comme « mois sans ventes ».
+      const { invoices, truncated } = await fetchInvoiceWindow(pennylane, new Date());
+      const series = buildMonthlySeries(invoices, new Date());
+      const forecast = forecastSales(series, horizonMonths ?? 3);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ ...forecast, truncated }) }],
       };
     },
   );

@@ -1143,6 +1143,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     // Any failure (no Qonto connector, service down) yields null — the cockpit
     // degrades; only the error NAME reaches the logs, nothing reaches the client.
     let treasury: unknown = null;
+    let sales: unknown = null;
     if (request.membershipRole === "owner") {
       let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
       try {
@@ -1151,18 +1152,34 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           tenantId: request.tenantId,
           role: request.membershipRole,
         });
-        treasury = JSON.parse(await toolset.execute("compute_treasury_forecast", {}));
+        // Chaque prévision dégrade indépendamment : pas de banque n'empêche
+        // pas la prévision des ventes (factures), et réciproquement.
+        try {
+          treasury = JSON.parse(await toolset.execute("compute_treasury_forecast", {}));
+        } catch (error) {
+          request.log.warn(
+            { err: error instanceof Error ? error.name : "Error" },
+            "cockpit treasury unavailable",
+          );
+        }
+        try {
+          sales = JSON.parse(await toolset.execute("forecast_sales", {}));
+        } catch (error) {
+          request.log.warn(
+            { err: error instanceof Error ? error.name : "Error" },
+            "cockpit sales forecast unavailable",
+          );
+        }
       } catch (error) {
         request.log.warn(
           { err: error instanceof Error ? error.name : "Error" },
-          "cockpit treasury unavailable",
+          "cockpit toolset unavailable",
         );
-        treasury = null;
       } finally {
         await toolset?.close().catch(() => undefined);
       }
     }
-    return { pendingActions, conversations, treasury };
+    return { pendingActions, conversations, treasury, sales };
   });
 
   app.get("/notes", { preHandler: businessRoute }, async (request) => {

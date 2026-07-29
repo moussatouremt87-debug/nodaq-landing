@@ -29,7 +29,18 @@ export interface ToolsetContext extends Omit<ActionsServerContext, "tenantId"> {
  * (delegated third party) must not obtain it through the agent either.
  * Fail-closed: no role provided = not owner.
  */
-const OWNER_ONLY_TOOLS = new Set(["compute_treasury_forecast"]);
+// Le tableau financier du tenant est OWNER-ONLY de bout en bout (même
+// raisonnement tiers-délégué que la trésorerie du cockpit) : les agrégats
+// (prévisions) ET les listes brutes qui permettraient de les reconstituer
+// (factures avec montants, soldes, transactions). Audit RGPD 3.1 : un gate
+// sur l'agrégat seul serait contournable par l'outil de liste.
+export const OWNER_ONLY_TOOLS = new Set([
+  "compute_treasury_forecast",
+  "forecast_sales",
+  "pennylane_get_invoices",
+  "qonto_get_organization",
+  "qonto_get_bank_transactions",
+]);
 
 export interface Toolset {
   definitions: ToolDefinition[];

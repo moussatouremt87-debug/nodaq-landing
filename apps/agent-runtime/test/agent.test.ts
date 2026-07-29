@@ -6,7 +6,7 @@ import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
 import { ComptaAgent } from "../src/agent.js";
 import type { AgentEvent } from "../src/agent.js";
-import { buildToolset } from "../src/tools.js";
+import { buildToolset, OWNER_ONLY_TOOLS } from "../src/tools.js";
 import { createLangfuseTracer } from "../src/tracing.js";
 import type { AgentRunTrace, AgentTracer } from "../src/tracing.js";
 
@@ -277,11 +277,13 @@ describe("ComptaAgent — the full loop", () => {
         ...(role ? { role } : {}),
       });
       const names = toolset.definitions.map((d) => d.name);
-      expect(names.includes("compute_treasury_forecast")).toBe(expected);
-      if (!expected) {
-        await expect(toolset.execute("compute_treasury_forecast", {})).rejects.toThrow(
-          /unknown tool/,
-        );
+      // Paramétré sur l'ENSEMBLE OWNER_ONLY_TOOLS : tout futur ajout à la
+      // liste est couvert automatiquement (audit RGPD 3.1).
+      for (const tool of OWNER_ONLY_TOOLS) {
+        expect(names.includes(tool)).toBe(expected);
+        if (!expected) {
+          await expect(toolset.execute(tool, {})).rejects.toThrow(/unknown tool/);
+        }
       }
       await toolset.close();
     }

@@ -35,6 +35,9 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > un client direct ; identifiants Bridge (clientId/clientSecret/userUuid) testés
 > contre le fournisseur avant coffre ; flux Bridge Connect hébergé = ticket futur
 > (`docs/bridge.md`).
+> **Prévision ventes (3.1)** : modèle pur explicable (`salesForecast.ts`, régression
+> clampée) sur les factures de l'interface Pennylane (réel/démo/FEC) — outil
+> `forecast_sales` et carte cockpit OWNER-ONLY (`docs/prevision-ventes.md`).
 
 ---
 
