@@ -6,7 +6,8 @@ import { withTenant } from "@nodaq/db";
 import { route } from "@nodaq/llm";
 import { getBankClient, getPennylaneClient } from "@nodaq/mcp-connectors";
 import type { RegistryOptions } from "@nodaq/mcp-connectors";
-import { TenantId } from "@nodaq/shared";
+import { matchRegulatoryItems, TenantId, VERTICALS } from "@nodaq/shared";
+import type { Vertical } from "@nodaq/shared";
 import { scoreLatePayment } from "./dunning.js";
 import { extractInvoiceFields } from "./invoiceExtraction.js";
 import type { OcrClientOptions } from "./ocrClient.js";
@@ -62,6 +63,7 @@ export const TOOL_POLICIES = {
   analyze_customer_signals: { requiresValidation: false },
   plan_staffing: { requiresValidation: false },
   analyze_hourly_performance: { requiresValidation: false },
+  check_regulatory_watch: { requiresValidation: false },
   check_stock_alerts: { requiresValidation: false },
   adjust_stock: { requiresValidation: true },
   simulate_material_prices: { requiresValidation: false },
@@ -447,6 +449,55 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
               revenueTruncated,
               truncated: staffTruncated || revenueTruncated,
               revenueUnavailable,
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "check_regulatory_watch",
+    {
+      description:
+        "Veille réglementaire (lecture seule, ticket 3.7) : obligations françaises " +
+        "applicables au profil de l'entreprise (vertical métier + effectif) depuis un " +
+        "catalogue versionné daté et sourcé. Chaque inclusion est justifiée ; " +
+        "information générale, PAS un conseil juridique (le label le dit).",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const stored = await withTenant(tenantId, (tx) =>
+        tx.tenantProfile.findFirst({
+          select: { vertical: true, headcountOverride: true },
+        }),
+      );
+      // Effectif : déclaré (override) sinon dérivé de l'équipe (3.5) si elle
+      // est renseignée — un inconnu reste inconnu, jamais lu comme 0.
+      const activeStaff = await withTenant(tenantId, (tx) =>
+        tx.staffMember.count({ where: { active: true } }),
+      );
+      const vertical: Vertical = (VERTICALS as readonly string[]).includes(
+        stored?.vertical ?? "",
+      )
+        ? (stored?.vertical as Vertical)
+        : "autre";
+      const headcount = stored?.headcountOverride ?? (activeStaff > 0 ? activeStaff : null);
+      const headcountSource =
+        stored?.headcountOverride != null
+          ? "declare"
+          : activeStaff > 0
+            ? "equipe"
+            : "inconnu";
+      const result = matchRegulatoryItems({ vertical, headcount }, new Date());
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              ...result,
+              profile: { vertical, headcount, headcountSource },
             }),
           },
         ],

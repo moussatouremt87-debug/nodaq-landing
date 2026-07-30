@@ -43,6 +43,8 @@ export const OWNER_ONLY_TOOLS = new Set([
   "plan_staffing",
   // CA réalisé + heures RH : même statut que le plan de charge (3.6).
   "analyze_hourly_performance",
+  // Profil stratégique (vertical, effectif RH) : owner-only (3.7).
+  "check_regulatory_watch",
   "pennylane_get_invoices",
   "qonto_get_organization",
   "qonto_get_bank_transactions",

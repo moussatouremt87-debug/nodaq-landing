@@ -781,6 +781,54 @@ export const getHourlyPerformance = (targetRateEur?: number): Promise<HourlyPerf
     `/rh/performance${targetRateEur ? `?targetRateEur=${encodeURIComponent(targetRateEur)}` : ""}`,
   );
 
+export const ComplianceProfile = z.object({
+  vertical: z.string(),
+  headcountOverride: z.number().nullable(),
+  derivedHeadcount: z.number().nullable(),
+});
+export type ComplianceProfile = z.infer<typeof ComplianceProfile>;
+
+export const RegulatoryWatch = z.object({
+  version: z.string(),
+  label: z.string().min(1),
+  profile: z.object({
+    vertical: z.string(),
+    headcount: z.number().nullable(),
+    headcountSource: z.string(),
+  }),
+  matches: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      category: z.string(),
+      obligation: z.string(),
+      source: z.object({ label: z.string(), url: z.string() }),
+      applies: z.string(),
+      status: z.string(),
+      nextDeadline: z.string().nullable(),
+      daysUntil: z.number().nullable(),
+      reason: z.string(),
+    }),
+  ),
+});
+export type RegulatoryWatch = z.infer<typeof RegulatoryWatch>;
+
+export const getComplianceProfile = (): Promise<ComplianceProfile> =>
+  call(ComplianceProfile, "/reglementaire/profil");
+
+export const putComplianceProfile = (profile: {
+  vertical: string;
+  headcountOverride?: number | null;
+}): Promise<{ vertical: string; headcountOverride: number | null }> =>
+  call(
+    z.object({ vertical: z.string(), headcountOverride: z.number().nullable() }),
+    "/reglementaire/profil",
+    { method: "PUT", body: JSON.stringify(profile) },
+  );
+
+export const getRegulatoryWatch = (): Promise<RegulatoryWatch> =>
+  call(RegulatoryWatch, "/reglementaire");
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {
