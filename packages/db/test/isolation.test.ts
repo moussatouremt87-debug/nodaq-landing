@@ -49,6 +49,8 @@ let staffAbsenceAId: string;
 let staffAbsenceBId: string;
 let tenantProfileAId: string;
 let tenantProfileBId: string;
+let customerReviewAId: string;
+let customerReviewBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -72,6 +74,7 @@ beforeAll(async () => {
   await admin.staffAbsence.deleteMany();
   await admin.staffMember.deleteMany();
   await admin.tenantProfile.deleteMany();
+  await admin.customerReview.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -485,6 +488,33 @@ beforeAll(async () => {
   );
   tenantProfileAId = tenantProfileA.id;
   tenantProfileBId = tenantProfileB.id;
+
+  const customerReviewA = await withTenant(tenantA, (tx) =>
+    tx.customerReview.create({
+      data: {
+        tenantId: tenantA,
+        source: "manuel",
+        authorName: "Client A",
+        rating: 5,
+        text: "avis de A",
+        reviewedAt: new Date("2025-09-01"),
+      },
+    }),
+  );
+  const customerReviewB = await withTenant(tenantB, (tx) =>
+    tx.customerReview.create({
+      data: {
+        tenantId: tenantB,
+        source: "manuel",
+        authorName: "Client B",
+        rating: 2,
+        text: "avis de B",
+        reviewedAt: new Date("2025-09-02"),
+      },
+    }),
+  );
+  customerReviewAId = customerReviewA.id;
+  customerReviewBId = customerReviewB.id;
 });
 
 afterAll(async () => {
@@ -640,6 +670,14 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur staff_absences", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'staff_absences'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur customer_reviews", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'customer_reviews'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -1266,6 +1304,41 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (customer_reviews) — withTenant(A) ne voit QUE l'avis de A", async () => {
+    const reviews = await withTenant(tenantA, (tx) => tx.customerReview.findMany());
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]?.id).toBe(customerReviewAId);
+    expect(reviews.some((r) => r.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (customer_reviews) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const reviews = await prisma.customerReview.findMany();
+    expect(reviews).toHaveLength(0);
+  });
+
+  it("test 3 (customer_reviews) — lire l'avis de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.customerReview.findUnique({ where: { id: customerReviewBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (customer_reviews) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.customerReview.create({
+          data: {
+            tenantId: tenantB,
+            source: "manuel",
+            rating: 3,
+            text: "avis volé",
+            reviewedAt: new Date("2025-09-03"),
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -1645,5 +1718,25 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const profiles = await withTenant(tenantA, (tx) => tx.tenantProfile.findMany());
     expect(profiles).toHaveLength(1);
+  });
+
+  it("policy désactivée sur customer_reviews => la fuite se produit aussi (avis des deux tenants deviennent visibles)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "customer_reviews" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.customerReview.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((r) => r.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.customerReview.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "customer_reviews" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "customer_reviews" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const reviews = await withTenant(tenantA, (tx) => tx.customerReview.findMany());
+    expect(reviews).toHaveLength(1);
   });
 });

@@ -33,6 +33,14 @@ const AdjustStockPayload = z.object({
 
 const MAX_STOCK_QUANTITY = 1_000_000_000;
 
+/** Réponse à un avis client (3.8) — le brouillon validé est ENREGISTRÉ sur
+ * l'avis ; la publication sur la plateforme reste manuelle en V1 (aucune API
+ * d'écriture). Strip : le payload transporte aussi rating/source pour la file. */
+const RecordReviewReplyPayload = z.object({
+  review: z.object({ id: z.string().uuid() }),
+  draft: z.string().min(1).max(4_000),
+});
+
 /** Proposition d'immobilisation (2.19) — FEC, classeur ou saisie assistée.
  * Bornes larges mais réelles : base <= 100 M€, durée 1 mois..50 ans. */
 const CreateFixedAssetPayload = z
@@ -94,6 +102,30 @@ export const defaultExecutors: ExecutorRegistry = {
     });
   },
   create_quote: () => Promise.resolve({ created: true, simulated: true }),
+  // EXÉCUTEUR RÉEL (3.8) : enregistre la réponse validée sur l'avis. Jamais
+  // d'écrasement (idempotent) : un avis déjà répondu reste tel quel.
+  record_review_reply: async (payload, { tenantId }) => {
+    const parsed = RecordReviewReplyPayload.safeParse(payload);
+    // Message générique : une ZodError citerait le brouillon dans `result`.
+    if (!parsed.success) throw new Error("invalid record_review_reply payload");
+    const { review, draft } = parsed.data;
+    return withTenant(tenantId, async (tx) => {
+      const { count } = await tx.customerReview.updateMany({
+        where: { id: review.id, replyText: null },
+        data: { replyText: draft, repliedAt: new Date() },
+      });
+      if (count === 0) {
+        const exists = await tx.customerReview.findUnique({
+          where: { id: review.id },
+          select: { id: true },
+        });
+        if (!exists) throw new Error("review not found");
+        return { recorded: false, alreadyReplied: true };
+      }
+      // La réponse est stockée : l'owner la copie sur la plateforme (V1).
+      return { recorded: true, publishManually: true };
+    });
+  },
   submit_reconciliation: () => Promise.resolve({ submitted: true, simulated: true }),
   adjust_stock: async (payload, { tenantId, userId }) => {
     const parsed = AdjustStockPayload.safeParse(payload);

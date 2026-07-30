@@ -23,6 +23,7 @@ const BUSINESS_PREFIXES = [
   "immobilisations",
   "rh",
   "reglementaire",
+  "avis",
 ];
 
 const nextConfig: NextConfig = {

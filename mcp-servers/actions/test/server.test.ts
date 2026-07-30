@@ -435,6 +435,81 @@ describe("analyze_hourly_performance — performance horaire (3.6)", () => {
   });
 });
 
+describe("avis clients — analyze_reputation & draft_review_reply (3.8)", () => {
+  it("synthèse en agrégats (jamais un nom), brouillon HITL sans PII vers le modèle", async () => {
+    const review = await withTenant(tenantId, (tx) =>
+      tx.customerReview.create({
+        data: {
+          tenantId,
+          rating: 1,
+          authorName: "Paul Martin",
+          text: "Chantier livré en retard.",
+          reviewedAt: new Date(Date.now() - 3 * 86_400_000),
+        },
+        select: { id: true },
+      }),
+    );
+    try {
+      const client = await connectedClient();
+      const tools = await client.listTools();
+      expect(tools.tools.find((t) => t.name === "analyze_reputation")?.annotations?.readOnlyHint).toBe(true);
+      expect(TOOL_POLICIES.analyze_reputation.requiresValidation).toBe(false);
+      expect(TOOL_POLICIES.draft_review_reply.requiresValidation).toBe(true);
+
+      const summary = await client.callTool({ name: "analyze_reputation", arguments: {} });
+      const report = JSON.parse((summary.content as { text: string }[])[0]!.text) as {
+        totalReviews: number;
+        unansweredNegative: { id: string }[];
+      };
+      expect(report.totalReviews).toBe(1);
+      expect(report.unansweredNegative[0]?.id).toBe(review.id);
+      // Agrégats seulement : ni nom d'auteur ni texte d'avis dans la sortie.
+      expect(JSON.stringify(report)).not.toContain("Paul");
+      expect(JSON.stringify(report)).not.toContain("retard");
+
+      const drafted = await client.callTool({
+        name: "draft_review_reply",
+        arguments: { reviewId: review.id },
+      });
+      expect(drafted.isError).toBeFalsy();
+      const result = JSON.parse((drafted.content as { text: string }[])[0]!.text) as {
+        pendingActionId: string;
+        status: string;
+      };
+      expect(result.status).toBe("pending_validation");
+      const action = await withTenant(tenantId, (tx) =>
+        tx.pendingAction.findUnique({ where: { id: result.pendingActionId } }),
+      );
+      expect(action?.type).toBe("record_review_reply");
+      const payload = action?.payload as { review: { id: string }; draft: string };
+      expect(payload.review.id).toBe(review.id);
+      expect(payload.draft.length).toBeGreaterThan(0);
+      // Minimisation : le nom de l'auteur ne va NI au modèle NI dans la file.
+      expect(JSON.stringify(payload)).not.toContain("Paul");
+      // Le prompt envoyé au faux LiteLLM ne contient pas le nom non plus —
+      // garanti par construction (seuls note + texte sont transmis).
+
+      // Avis déjà répondu : refus net, jamais un second brouillon en file.
+      await withTenant(tenantId, (tx) =>
+        tx.customerReview.update({
+          where: { id: review.id },
+          data: { replyText: "Réponse validée", repliedAt: new Date() },
+        }),
+      );
+      const replayed = await client.callTool({
+        name: "draft_review_reply",
+        arguments: { reviewId: review.id },
+      });
+      expect(replayed.isError).toBe(true);
+    } finally {
+      await withTenant(tenantId, async (tx) => {
+        await tx.pendingAction.deleteMany({ where: { type: "record_review_reply" } });
+        await tx.customerReview.delete({ where: { id: review.id } });
+      });
+    }
+  });
+});
+
 describe("check_regulatory_watch — veille réglementaire (3.7)", () => {
   it("lecture seule, profil honnête (effectif inconnu jamais lu comme 0), label permanent", async () => {
     const client = await connectedClient();

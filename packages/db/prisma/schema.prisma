@@ -46,6 +46,7 @@ model Tenant {
   staffMembers        StaffMember[]
   staffAbsences       StaffAbsence[]
   profile             TenantProfile?
+  reviews             CustomerReview[]
 
   @@map("tenants")
   @@schema("public")
@@ -661,6 +662,42 @@ model TenantProfile {
   tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("tenant_profiles")
+  @@schema("public")
+}
+
+/// Ticket 3.8 — avis clients / e-réputation. `source` distingue un avis saisi
+/// manuellement d'un avis importé d'une plateforme (google | autre, futur —
+/// V1 = saisie manuelle uniquement) ; `externalId` est l'identifiant chez la
+/// plateforme d'origine, utilisé pour la déduplication à l'import (voir
+/// @@unique ci-dessous — les NULL multiples passent en Postgres, donc l'unicité
+/// ne joue que pour les avis importés). `authorName` est une PII (nom public de
+/// l'auteur) — jamais loggé. `replyText`/`repliedAt` portent la réponse
+/// VALIDÉE par un humain (HITL) : l'agent ne publie jamais directement (voir
+/// CLAUDE.md règle 4). Sealed by RLS (see the migration
+/// `rls_customer_reviews`).
+model CustomerReview {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  /// 'manuel' | 'google' | 'autre' — validé côté app par Zod.
+  source     String    @default("manuel")
+  /// Identifiant chez la plateforme d'origine — clé de déduplication à l'import.
+  externalId String?   @map("external_id")
+  /// Nom public de l'auteur de l'avis — PII, jamais loggé.
+  authorName String?   @map("author_name")
+  /// Note 1..5 — défense en profondeur via CHECK en base.
+  rating     Int
+  text       String
+  reviewedAt DateTime  @map("reviewed_at")
+  /// Réponse VALIDÉE par un humain (HITL) — jamais publiée directement par l'agent.
+  replyText  String?   @map("reply_text")
+  repliedAt  DateTime? @map("replied_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, source, externalId])
+  @@index([tenantId, reviewedAt])
+  @@map("customer_reviews")
   @@schema("public")
 }
 

@@ -31,6 +31,7 @@ const TABS = [
   { key: "dunning", label: "Relances", types: ["send_dunning"] },
   { key: "quote", label: "Devis", types: ["create_quote"] },
   { key: "entries", label: "Écritures", types: ["submit_reconciliation", "book_invoice"] },
+  { key: "reviews", label: "Avis", types: ["record_review_reply"] },
 ] as const;
 
 /** Titre + méta d'une action pour la liste (payload owner-gated si chargé). */
@@ -76,6 +77,19 @@ function actionLine(action: PendingActionSummary, detail: PendingActionDetail | 
       meta: [
         entries !== null ? `${entries} écritures à rapprocher` : null,
         total !== null ? formatEuroCents(total) : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
+  if (action.type === "record_review_reply" && payload) {
+    const review = asDict(payload.review);
+    return {
+      title: "Réponse à un avis client",
+      meta: [
+        review && asNumber(review.rating) !== null ? `note ${asNumber(review.rating)}/5` : null,
+        review ? asString(review.source) : null,
+        "publication manuelle après validation",
       ]
         .filter(Boolean)
         .join(" · "),
