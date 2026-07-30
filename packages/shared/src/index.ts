@@ -52,3 +52,4 @@ export * from "./frenchTax.js";
 export * from "./depreciation.js";
 export * from "./capex.js";
 export * from "./regulatoryWatch.js";
+export * from "./rgpdRegister.js";

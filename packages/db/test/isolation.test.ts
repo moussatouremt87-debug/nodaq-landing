@@ -51,6 +51,8 @@ let tenantProfileAId: string;
 let tenantProfileBId: string;
 let customerReviewAId: string;
 let customerReviewBId: string;
+let processingActivityAId: string;
+let processingActivityBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -75,6 +77,7 @@ beforeAll(async () => {
   await admin.staffMember.deleteMany();
   await admin.tenantProfile.deleteMany();
   await admin.customerReview.deleteMany();
+  await admin.processingActivity.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -515,6 +518,35 @@ beforeAll(async () => {
   );
   customerReviewAId = customerReviewA.id;
   customerReviewBId = customerReviewB.id;
+
+  const processingActivityA = await withTenant(tenantA, (tx) =>
+    tx.processingActivity.create({
+      data: {
+        tenantId: tenantA,
+        name: "Paie",
+        purpose: "Gestion de la paie des salariés de A",
+        legalBasis: "obligation_legale",
+        dataCategories: ["identite", "remuneration"],
+        dataSubjects: ["salaries"],
+        retention: "5 ans après la fin du contrat",
+      },
+    }),
+  );
+  const processingActivityB = await withTenant(tenantB, (tx) =>
+    tx.processingActivity.create({
+      data: {
+        tenantId: tenantB,
+        name: "Paie",
+        purpose: "Gestion de la paie des salariés de B",
+        legalBasis: "obligation_legale",
+        dataCategories: ["identite", "remuneration"],
+        dataSubjects: ["salaries"],
+        retention: "5 ans après la fin du contrat",
+      },
+    }),
+  );
+  processingActivityAId = processingActivityA.id;
+  processingActivityBId = processingActivityB.id;
 });
 
 afterAll(async () => {
@@ -1339,6 +1371,43 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (processing_activities) — withTenant(A) ne voit QUE le traitement de A", async () => {
+    const activities = await withTenant(tenantA, (tx) => tx.processingActivity.findMany());
+    expect(activities).toHaveLength(1);
+    expect(activities[0]?.id).toBe(processingActivityAId);
+    expect(activities.some((a) => a.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (processing_activities) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const activities = await prisma.processingActivity.findMany();
+    expect(activities).toHaveLength(0);
+  });
+
+  it("test 3 (processing_activities) — lire le traitement de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.processingActivity.findUnique({ where: { id: processingActivityBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (processing_activities) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.processingActivity.create({
+          data: {
+            tenantId: tenantB,
+            name: "Traitement volé",
+            purpose: "vol",
+            legalBasis: "consentement",
+            dataCategories: ["identite"],
+            dataSubjects: ["clients"],
+            retention: "1 an",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -1738,5 +1807,25 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const reviews = await withTenant(tenantA, (tx) => tx.customerReview.findMany());
     expect(reviews).toHaveLength(1);
+  });
+
+  it("policy désactivée sur processing_activities => la fuite se produit aussi (traitements des deux tenants deviennent visibles)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "processing_activities" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.processingActivity.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((a) => a.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.processingActivity.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "processing_activities" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "processing_activities" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const activities = await withTenant(tenantA, (tx) => tx.processingActivity.findMany());
+    expect(activities).toHaveLength(1);
   });
 });

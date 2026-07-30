@@ -90,6 +90,14 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > HITL (route() souverain, minimisation : note+texte sans nom d'auteur) →
 > exécuteur `record_review_reply` (enregistre, n'écrase JAMAIS) — publication
 > plateforme MANUELLE en V1, connecteur Google = futur (`docs/e-reputation.md`).
+> **Assistant RGPD (3.9)** : registre des traitements art. 30 — modèles PME =
+> CONFIG VERSIONNÉE DATÉE sourcée CNIL (`rgpdRegister.ts`, doctrine 2.19/3.7) ;
+> moteur pur `auditRgpdRegister` (registre vide, durée manquante, base invalide,
+> art. 9 sur intérêt légitime — chaque signalement justifié) ; table
+> `processing_activities` (RLS, unique (tenantId,name), AUCUNE PII par
+> construction) ; outil `check_rgpd_register` + routes `/rgpd*` + page
+> OWNER-ONLY ; label « ni conseil juridique ni DPO » PERMANENT ; AIPD/droits/
+> violations + RAG CNIL = V2 (`docs/assistant-rgpd.md`).
 > **Support (2.18)** : schéma Postgres `ops` (tables `support_tickets`/`support_issues`)
 > hors RLS métier MAIS sous RLS gated `app.ops_operator` — accès UNIQUEMENT via
 > `withOps()` + routes OPERATOR (allowlist `OPS_OPERATOR_USER_IDS`, 404 sinon) ;

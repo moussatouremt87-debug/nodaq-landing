@@ -6,7 +6,7 @@ import { withTenant } from "@nodaq/db";
 import { route } from "@nodaq/llm";
 import { getBankClient, getPennylaneClient } from "@nodaq/mcp-connectors";
 import type { RegistryOptions } from "@nodaq/mcp-connectors";
-import { matchRegulatoryItems, TenantId, VERTICALS } from "@nodaq/shared";
+import { auditRgpdRegister, matchRegulatoryItems, TenantId, VERTICALS } from "@nodaq/shared";
 import type { Vertical } from "@nodaq/shared";
 import { scoreLatePayment } from "./dunning.js";
 import { extractInvoiceFields } from "./invoiceExtraction.js";
@@ -65,6 +65,7 @@ export const TOOL_POLICIES = {
   plan_staffing: { requiresValidation: false },
   analyze_hourly_performance: { requiresValidation: false },
   check_regulatory_watch: { requiresValidation: false },
+  check_rgpd_register: { requiresValidation: false },
   analyze_reputation: { requiresValidation: false },
   draft_review_reply: { requiresValidation: true },
   check_stock_alerts: { requiresValidation: false },
@@ -524,6 +525,56 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
               ...result,
               profile: { vertical, headcount, headcountSource },
             }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "check_rgpd_register",
+    {
+      description:
+        "Assistant RGPD (lecture seule, ticket 3.9) : état du registre des traitements " +
+        "(art. 30) et audit de complétude/cohérence depuis un moteur déterministe " +
+        "(durées manquantes, bases légales invalides, données sensibles). Information " +
+        "générale, PAS un conseil juridique ni un DPO (le label le dit).",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      // Borne signalée ; le registre décrit des TRAITEMENTS, pas des données
+      // de personnes — aucune PII dans ces lignes par construction.
+      const activities = await withTenant(tenantId, (tx) =>
+        tx.processingActivity.findMany({
+          select: {
+            name: true,
+            legalBasis: true,
+            dataCategories: true,
+            retention: true,
+            sensitiveData: true,
+          },
+          orderBy: { name: "asc" },
+          take: 501,
+        }),
+      );
+      const truncated = activities.length > 500;
+      const audit = auditRgpdRegister(
+        activities.slice(0, 500).map((activity) => ({
+          name: activity.name,
+          legalBasis: activity.legalBasis,
+          dataCategories: Array.isArray(activity.dataCategories)
+            ? activity.dataCategories.filter((c): c is string => typeof c === "string")
+            : [],
+          retention: activity.retention,
+          sensitiveData: activity.sensitiveData,
+        })),
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ ...audit, truncated }),
           },
         ],
       };

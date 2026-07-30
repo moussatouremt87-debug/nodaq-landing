@@ -47,6 +47,7 @@ model Tenant {
   staffAbsences       StaffAbsence[]
   profile             TenantProfile?
   reviews             CustomerReview[]
+  processingActivities ProcessingActivity[]
 
   @@map("tenants")
   @@schema("public")
@@ -698,6 +699,46 @@ model CustomerReview {
   @@unique([tenantId, source, externalId])
   @@index([tenantId, reviewedAt])
   @@map("customer_reviews")
+  @@schema("public")
+}
+
+/// Ticket 3.9 — assistant RGPD : registre des activités de traitement (art. 30
+/// RGPD). Un traitement par tenant (nom unique par tenant). `legalBasis` est la
+/// base légale — validée côté app par Zod (consentement | contrat |
+/// obligation_legale | interet_legitime | mission_publique | interets_vitaux),
+/// défense en profondeur via CHECK en base. `dataCategories`/`dataSubjects` sont
+/// des tableaux de chaînes (Json) — catégories de données et personnes
+/// concernées. `sensitiveData` signale un traitement de données art. 9 (santé,
+/// origine, etc.) — jamais déduit automatiquement, déclaré côté app.
+/// `sourceTemplate` référence l'id du modèle CNIL d'origine si le traitement a
+/// été créé depuis un modèle pré-rempli (traçabilité, pas de contenu dupliqué).
+/// Sealed by RLS (see the migration `rls_processing_activities`).
+model ProcessingActivity {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  name           String
+  purpose        String
+  /// 'consentement' | 'contrat' | 'obligation_legale' | 'interet_legitime' |
+  /// 'mission_publique' | 'interets_vitaux' — validé côté app par Zod.
+  legalBasis     String   @map("legal_basis")
+  /// Tableau de chaînes (catégories de données traitées).
+  dataCategories Json     @map("data_categories")
+  /// Tableau de chaînes (personnes concernées : clients, salariés, prospects…).
+  dataSubjects   Json     @map("data_subjects")
+  recipients     String?
+  /// Durée de conservation — texte libre sourcé (ex. « 5 ans après la fin du contrat »).
+  retention      String
+  /// Traitement de données art. 9 (santé, origine, opinions…) — déclaré côté app,
+  /// jamais déduit automatiquement.
+  sensitiveData  Boolean  @default(false) @map("sensitive_data")
+  /// Id du modèle CNIL d'origine, si créé depuis un modèle pré-rempli.
+  sourceTemplate String?  @map("source_template")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@map("processing_activities")
   @@schema("public")
 }
 

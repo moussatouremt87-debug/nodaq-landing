@@ -510,6 +510,33 @@ describe("avis clients — analyze_reputation & draft_review_reply (3.8)", () =>
   });
 });
 
+describe("check_rgpd_register — assistant RGPD (3.9)", () => {
+  it("lecture seule, registre vide = alerte art. 30, label permanent", async () => {
+    const client = await connectedClient();
+    const tools = await client.listTools();
+    const tool = tools.tools.find((t) => t.name === "check_rgpd_register");
+    expect(tool).toBeDefined();
+    expect(tool?.annotations?.readOnlyHint).toBe(true);
+    expect(JSON.stringify(tool?.inputSchema ?? {})).not.toContain("tenantId");
+    expect(TOOL_POLICIES.check_rgpd_register.requiresValidation).toBe(false);
+
+    const result = await client.callTool({ name: "check_rgpd_register", arguments: {} });
+    expect(result.isError).toBeFalsy();
+    const parsed = JSON.parse((result.content as { text: string }[])[0]!.text) as {
+      version: string;
+      activityCount: number;
+      issues: { code: string; severity: string }[];
+      label: string;
+      truncated: boolean;
+    };
+    expect(parsed.version).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(parsed.activityCount).toBe(0);
+    expect(parsed.issues.some((i) => i.code === "registre_vide" && i.severity === "alerte")).toBe(true);
+    expect(parsed.label).toContain("DPO");
+    expect(parsed.truncated).toBe(false);
+  });
+});
+
 describe("check_regulatory_watch — veille réglementaire (3.7)", () => {
   it("lecture seule, profil honnête (effectif inconnu jamais lu comme 0), label permanent", async () => {
     const client = await connectedClient();
