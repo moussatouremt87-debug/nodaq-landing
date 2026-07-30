@@ -7,11 +7,13 @@ import {
   createAbsence,
   createStaff,
   deleteAbsence,
+  formatEuroCents,
+  getHourlyPerformance,
   getRh,
   getStaffingPlan,
   updateStaff,
 } from "../../lib/api";
-import type { StaffAbsence, StaffMember, StaffingPlan } from "../../lib/api";
+import type { HourlyPerformance, StaffAbsence, StaffMember, StaffingPlan } from "../../lib/api";
 
 /*
  * Équipe & plannings (3.5) — owner only (données RH = PII). Capacité vs
@@ -31,6 +33,7 @@ export default function RhPage() {
   const [staff, setStaff] = useState<StaffMember[]>([]);
   const [absences, setAbsences] = useState<StaffAbsence[]>([]);
   const [plan, setPlan] = useState<StaffingPlan | null>(null);
+  const [perf, setPerf] = useState<HourlyPerformance | null>(null);
   const [rate, setRate] = useState("60");
   const [staffForm, setStaffForm] = useState({ name: "", role: "", weeklyHours: "35" });
   const [absenceForm, setAbsenceForm] = useState({ staffId: "", type: "conges", startDate: "", endDate: "" });
@@ -44,6 +47,8 @@ export default function RhPage() {
       const nextPlan = await getStaffingPlan(hourlyRate).catch(() => null);
       setPlan(nextPlan);
       if (nextPlan) setRate(String(Math.round(nextPlan.hourlyRateCents / 100)));
+      // Même taux pour l'objectif de performance : un seul réglage cohérent.
+      setPerf(await getHourlyPerformance(hourlyRate).catch(() => null));
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) setForbidden(true);
       else setError("données RH indisponibles — réessayez");
@@ -161,6 +166,74 @@ export default function RhPage() {
                 Recalculer
               </button>
             </label>
+          </>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Performance horaire réalisée</h2>
+        {perf === null ? (
+          <p className="muted">Performance indisponible.</p>
+        ) : perf.months.length === 0 ? (
+          <p className="muted">
+            {perf.revenueUnavailable
+              ? "CA indisponible — connectez un facturier (Pennylane, démo ou FEC) pour mesurer le taux réalisé."
+              : perf.truncated
+                ? "Lecture partielle (historique tronqué) — aucun mois lisible sur la fenêtre."
+                : "Aucun mois avec du chiffre d'affaires observé sur la fenêtre."}
+          </p>
+        ) : (
+          <>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Mois</th>
+                  <th>Heures estimées</th>
+                  <th>CA réalisé</th>
+                  <th>€/h réalisé</th>
+                  <th>Verdict</th>
+                </tr>
+              </thead>
+              <tbody>
+                {perf.months.map((month) => (
+                  <tr key={month.month} title={month.reason}>
+                    <td>{month.month}</td>
+                    <td>{month.workedHours} h</td>
+                    <td>{formatEuroCents(month.revenueCents)}</td>
+                    <td>
+                      {month.revenuePerHourCents === null
+                        ? "—"
+                        : `${Math.round(month.revenuePerHourCents / 100)} €/h`}
+                    </td>
+                    <td>
+                      {month.verdict === "en-dessous" ? (
+                        <strong style={{ color: "#dc2626" }}>en-dessous</strong>
+                      ) : (
+                        month.verdict.replace("-", " ")
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {perf.averageRateCents !== null && (
+              <p className="muted">
+                Moyenne pondérée : {Math.round(perf.averageRateCents / 100)} €/h vs objectif{" "}
+                {Math.round(perf.targetRateCents / 100)} €/h
+                {perf.trendCentsPerMonth !== 0 &&
+                  ` · tendance ${perf.trendCentsPerMonth > 0 ? "+" : "−"}${Math.abs(
+                    Math.round(perf.trendCentsPerMonth / 100),
+                  )} €/h par mois`}
+              </p>
+            )}
+            {perf.truncated && (
+              <p className="warn">
+                Lecture partielle (
+                {perf.revenueTruncated ? "historique de factures tronqué" : "équipe/absences tronquées"}
+                ) — verdicts à considérer avec prudence.
+              </p>
+            )}
+            <p className="warn">{perf.label}</p>
           </>
         )}
       </section>

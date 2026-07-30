@@ -2409,5 +2409,40 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     }
   });
 
+  // Performance horaire réalisée (3.6) : même chemin que l'agent (outil
+  // owner-gated du toolset lié au tenant) — une seule implémentation.
+  app.get("/rh/performance", { preHandler: ownerRoute }, async (request, reply) => {
+    const query = z
+      .object({
+        targetRateEur: z.coerce.number().min(10).max(500).optional(),
+        monthsBack: z.coerce.number().int().min(3).max(12).optional(),
+      })
+      .safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send({ error: "invalid query" });
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+      });
+      const result = await toolset.execute("analyze_hourly_performance", {
+        ...(query.data.targetRateEur !== undefined
+          ? { targetRateEur: query.data.targetRateEur }
+          : {}),
+        ...(query.data.monthsBack !== undefined ? { monthsBack: query.data.monthsBack } : {}),
+      });
+      return JSON.parse(result) as unknown;
+    } catch (error) {
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "hourly performance unavailable",
+      );
+      return reply.code(503).send({ error: "performance indisponible" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
+
   return app;
 }

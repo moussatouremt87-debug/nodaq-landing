@@ -13,7 +13,9 @@ import type { OcrClientOptions } from "./ocrClient.js";
 import { extractInvoiceText } from "./ocrClient.js";
 import { analyzeCustomerSignals } from "./customerSignals.js";
 import { simulateMaterialPrices } from "./materialScenario.js";
+import { analyzeHourlyPerformance } from "./hourlyPerformance.js";
 import { buildMonthlySeries, fetchInvoiceWindow, forecastSales } from "./salesForecast.js";
+import type { MonthlyRevenuePoint } from "./salesForecast.js";
 import { buildStaffingPlan } from "./staffingPlan.js";
 import { forecastTreasury } from "./treasury.js";
 import type { TreasuryTransaction } from "./treasury.js";
@@ -59,6 +61,7 @@ export const TOOL_POLICIES = {
   forecast_sales: { requiresValidation: false },
   analyze_customer_signals: { requiresValidation: false },
   plan_staffing: { requiresValidation: false },
+  analyze_hourly_performance: { requiresValidation: false },
   check_stock_alerts: { requiresValidation: false },
   adjust_stock: { requiresValidation: true },
   simulate_material_prices: { requiresValidation: false },
@@ -347,6 +350,103 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
               ...plan,
               truncated: truncated || inputTruncated,
               forecastUnavailable,
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "analyze_hourly_performance",
+    {
+      description:
+        "Performance horaire réalisée (lecture seule, ticket 3.6) : CA mensuel observé " +
+        "sur les factures ÷ heures travaillées ESTIMÉES depuis les contrats de l'équipe " +
+        "(absences déduites), comparé à un objectif de taux horaire configurable. " +
+        "Verdicts chiffrés, TOUJOURS labellisés estimation (pas de pointage en V1).",
+      inputSchema: {
+        targetRateEur: z
+          .number()
+          .min(10)
+          .max(500)
+          .optional()
+          .describe("Objectif de taux horaire facturé en euros (défaut 60)"),
+        monthsBack: z
+          .number()
+          .int()
+          .min(3)
+          .max(12)
+          .optional()
+          .describe("Fenêtre d'observation en mois révolus (défaut 6)"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ targetRateEur, monthsBack }) => {
+      // Mêmes bornes de lecture que plan_staffing (audit 3.5) : dépassement
+      // SIGNALÉ, jamais silencieux ; le nom (PII) n'est pas sélectionné ;
+      // orderBy = sous-ensemble DÉTERMINISTE quand la borne coupe.
+      const staff = await withTenant(tenantId, (tx) =>
+        tx.staffMember.findMany({
+          select: { id: true, weeklyHours: true, active: true },
+          orderBy: { id: "asc" },
+          take: 501,
+        }),
+      );
+      const absences = await withTenant(tenantId, (tx) =>
+        tx.staffAbsence.findMany({
+          select: { staffId: true, startDate: true, endDate: true },
+          orderBy: { id: "asc" },
+          take: 5001,
+        }),
+      );
+      // Deux causes de troncature aux effets OPPOSÉS sur le €/h : elles sont
+      // exposées séparément (audit 3.6), `truncated` reste l'OR de synthèse.
+      const staffTruncated = staff.length > 500 || absences.length > 5000;
+      const windowMonths = monthsBack ?? 6;
+      // CA observé (3.1) : facturier absent ou en erreur = AUCUN mois calculé
+      // et le drapeau le DIT — jamais un taux fabriqué sur un CA inconnu. Le
+      // try ne couvre QUE l'appel réseau : un bug du modèle pur doit remonter
+      // en erreur d'outil, pas se déguiser en « CA indisponible ».
+      let window: Awaited<ReturnType<typeof fetchInvoiceWindow>> | null = null;
+      let revenueUnavailable = false;
+      try {
+        const pennylane = await getPennylaneClient(tenantId, context);
+        window = await fetchInvoiceWindow(pennylane, new Date(), {
+          monthsBack: windowMonths,
+        });
+      } catch {
+        revenueUnavailable = true;
+      }
+      const revenueTruncated = window?.truncated ?? false;
+      const series: MonthlyRevenuePoint[] = window
+        ? buildMonthlySeries(window.invoices, new Date(), windowMonths)
+        : [];
+      const report = analyzeHourlyPerformance(
+        staff.slice(0, 500),
+        absences.slice(0, 5000).map((absence) => ({
+          staffId: absence.staffId,
+          startDate: absence.startDate.toISOString().slice(0, 10),
+          endDate: absence.endDate.toISOString().slice(0, 10),
+        })),
+        series,
+        {
+          ...(targetRateEur !== undefined
+            ? { targetRateCents: Math.round(targetRateEur * 100) }
+            : {}),
+          ...(revenueTruncated ? { revenueTruncated: true } : {}),
+        },
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              ...report,
+              staffTruncated,
+              revenueTruncated,
+              truncated: staffTruncated || revenueTruncated,
+              revenueUnavailable,
             }),
           },
         ],

@@ -41,6 +41,8 @@ export const OWNER_ONLY_TOOLS = new Set([
   "analyze_customer_signals",
   // Noms des salariés (PII RH) + charge dérivée du CA : owner-only (3.5).
   "plan_staffing",
+  // CA réalisé + heures RH : même statut que le plan de charge (3.6).
+  "analyze_hourly_performance",
   "pennylane_get_invoices",
   "qonto_get_organization",
   "qonto_get_bank_transactions",

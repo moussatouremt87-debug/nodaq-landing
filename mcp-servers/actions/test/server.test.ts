@@ -384,6 +384,57 @@ describe("sonnette push (2.17)", () => {
   });
 });
 
+describe("analyze_hourly_performance — performance horaire (3.6)", () => {
+  it("lecture seule, CA observé ÷ heures contractuelles, labellisé estimation", async () => {
+    const created = await withTenant(tenantId, (tx) =>
+      tx.staffMember.create({
+        data: { tenantId, name: "Karim T", role: "technicien", weeklyHours: 35 },
+      }),
+    );
+    try {
+      const client = await connectedClient();
+      const tools = await client.listTools();
+      const tool = tools.tools.find((t) => t.name === "analyze_hourly_performance");
+      expect(tool).toBeDefined();
+      expect(tool?.annotations?.readOnlyHint).toBe(true);
+      expect(JSON.stringify(tool?.inputSchema)).not.toContain("tenantId");
+      expect(TOOL_POLICIES.analyze_hourly_performance.requiresValidation).toBe(false);
+
+      const result = await client.callTool({
+        name: "analyze_hourly_performance",
+        arguments: { monthsBack: 12 },
+      });
+      expect(result.isError).toBeFalsy();
+      const parsed = JSON.parse((result.content as { text: string }[])[0]!.text) as {
+        months: { month: string; workedHours: number; revenuePerHourCents: number | null }[];
+        activeStaff: number;
+        label: string;
+        revenueUnavailable: boolean;
+        staffTruncated: boolean;
+        revenueTruncated: boolean;
+        truncated: boolean;
+      };
+      // La facture du faux SaaS (1 200 € en 2026-05) ouvre la fenêtre observée ;
+      // 35 h hebdo x 4,348 = 152 h estimées par mois.
+      expect(parsed.activeStaff).toBe(1);
+      expect(parsed.revenueUnavailable).toBe(false);
+      expect(parsed.staffTruncated).toBe(false);
+      expect(parsed.revenueTruncated).toBe(false);
+      expect(parsed.truncated).toBe(false);
+      const may = parsed.months.find((m) => m.month === "2026-05");
+      expect(may).toMatchObject({
+        workedHours: 152,
+        revenuePerHourCents: Math.round(120_000 / 152),
+      });
+      expect(parsed.label).toContain("estimation");
+      // Le nom du salarié (PII) ne sort JAMAIS de l'outil.
+      expect(JSON.stringify(parsed)).not.toContain("Karim");
+    } finally {
+      await withTenant(tenantId, (tx) => tx.staffMember.delete({ where: { id: created.id } }));
+    }
+  });
+});
+
 describe("analyze_customer_signals — signaux clients (3.4)", () => {
   it("lecture seule, tenant non injectable, comptes exacts et bornage signalé", async () => {
     const client = await connectedClient();

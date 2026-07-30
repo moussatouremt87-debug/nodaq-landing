@@ -52,10 +52,10 @@ export interface StaffingPlan {
 
 /** Default average billed hourly rate (configurable per call): 60 €/h. */
 export const DEFAULT_HOURLY_RATE_CENTS = 6_000;
-/** Weeks per month (365.25 / 7 / 12). */
-const WEEKS_PER_MONTH = 4.348;
+/** Weeks per month (365.25 / 7 / 12) — shared with hourlyPerformance (3.6). */
+export const WEEKS_PER_MONTH = 4.348;
 /** Working days per week used to convert absence days into hours. */
-const WORK_DAYS_PER_WEEK = 5;
+export const WORK_DAYS_PER_WEEK = 5;
 /** Tolerance band around equilibrium (fraction of capacity). */
 const BALANCE_TOLERANCE = 0.1;
 
@@ -65,7 +65,7 @@ function monthKey(year: number, monthIndex: number): string {
 }
 
 /** Overlap in WORKING days (5/7 approximation) between an absence and a month. */
-function absenceDaysInMonth(absence: AbsenceInput, year: number, monthIndex: number): number {
+export function absenceDaysInMonth(absence: AbsenceInput, year: number, monthIndex: number): number {
   const monthStart = Date.UTC(year, monthIndex, 1);
   const monthEnd = Date.UTC(year, monthIndex + 1, 0);
   const from = Date.parse(`${absence.startDate}T00:00:00Z`);
