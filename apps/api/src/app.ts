@@ -26,6 +26,9 @@ import {
   CreateNoteInput,
   estimateIsImpact,
   buildDepreciationPlan,
+  DATA_CATEGORIES,
+  LEGAL_BASES,
+  PROCESSING_TEMPLATES,
   renewalWall,
   TenantId,
   Uuid,
@@ -2513,6 +2516,180 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     } finally {
       await toolset?.close().catch(() => undefined);
     }
+  });
+
+  // --- Assistant RGPD (3.9) — owner-only : registre des traitements -------
+  // (art. 30, document de conformité stratégique). Modèles CNIL versionnés
+  // sourcés ; audit déterministe ; jamais un conseil juridique.
+
+  const ACTIVITY_SELECT = {
+    id: true,
+    name: true,
+    purpose: true,
+    legalBasis: true,
+    dataCategories: true,
+    dataSubjects: true,
+    recipients: true,
+    retention: true,
+    sensitiveData: true,
+    sourceTemplate: true,
+    updatedAt: true,
+  } as const;
+
+  app.get("/rgpd", { preHandler: ownerRoute }, async (request) => {
+    const rows = await withTenant(request.tenantId, (tx) =>
+      tx.processingActivity.findMany({
+        select: ACTIVITY_SELECT,
+        orderBy: { name: "asc" },
+        take: 501,
+      }),
+    );
+    const activitiesTruncated = rows.length > 500;
+    const activities = rows.slice(0, 500);
+    // Audit via le MÊME outil que l'agent ; s'il échoue, le registre reste
+    // servi avec `audit: null` — jamais un 503 qui masque des données saines.
+    let audit: unknown = null;
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+      });
+      audit = JSON.parse(await toolset.execute("check_rgpd_register", {}));
+    } catch (error) {
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "rgpd audit unavailable",
+      );
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+    return { activities, activitiesTruncated, audit, templates: PROCESSING_TEMPLATES };
+  });
+
+  const ActivityBody = z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      purpose: z.string().trim().min(1).max(1_000),
+      legalBasis: z.enum(LEGAL_BASES),
+      // Catégories fermées (DATA_CATEGORIES) : « santé » ou « Santé » ne
+      // peuvent pas contourner la règle d'audit sur le littéral `sante`.
+      dataCategories: z.array(z.enum(DATA_CATEGORIES)).min(1).max(20),
+      dataSubjects: z.array(z.string().trim().min(1).max(50)).min(1).max(20),
+      recipients: z.string().max(500).optional(),
+      retention: z.string().trim().min(1).max(500),
+      sensitiveData: z.boolean().default(false),
+    })
+    .strict();
+
+  app.post("/rgpd", { preHandler: ownerRoute }, async (request, reply) => {
+    const parsed = ActivityBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    try {
+      const created = await withTenant(request.tenantId, (tx) =>
+        tx.processingActivity.create({
+          data: {
+            tenantId: request.tenantId,
+            name: parsed.data.name,
+            purpose: parsed.data.purpose,
+            legalBasis: parsed.data.legalBasis,
+            dataCategories: parsed.data.dataCategories,
+            dataSubjects: parsed.data.dataSubjects,
+            recipients: parsed.data.recipients ?? null,
+            retention: parsed.data.retention,
+            sensitiveData: parsed.data.sensitiveData,
+          },
+          select: { id: true },
+        }),
+      );
+      return reply.code(201).send(created);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return reply.code(409).send({ error: "traitement déjà enregistré" });
+      }
+      throw error;
+    }
+  });
+
+  // Ajout 1-clic depuis un modèle CNIL du catalogue versionné.
+  app.post("/rgpd/modele/:templateId", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z
+      .object({ templateId: z.string().min(1).max(50) })
+      .safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    const template = PROCESSING_TEMPLATES.find((t) => t.id === params.data.templateId);
+    if (!template) return reply.code(404).send({ error: "unknown template" });
+    try {
+      const created = await withTenant(request.tenantId, (tx) =>
+        tx.processingActivity.create({
+          data: {
+            tenantId: request.tenantId,
+            name: template.name,
+            purpose: template.purpose,
+            legalBasis: template.legalBasis,
+            dataCategories: [...template.dataCategories],
+            dataSubjects: [...template.dataSubjects],
+            recipients: template.recipients,
+            retention: template.retention,
+            sensitiveData: template.sensitiveData,
+            sourceTemplate: template.id,
+          },
+          select: { id: true },
+        }),
+      );
+      return reply.code(201).send(created);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return reply.code(409).send({ error: "traitement déjà enregistré" });
+      }
+      throw error;
+    }
+  });
+
+  app.patch("/rgpd/:id", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    const parsed = ActivityBody.partial().strict().safeParse(request.body);
+    if (!parsed.success || Object.keys(parsed.data).length === 0) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    const data = parsed.data;
+    try {
+      const updated = await withTenant(request.tenantId, (tx) =>
+        tx.processingActivity.updateMany({
+          where: { id: params.data.id },
+          data: {
+            ...(data.name !== undefined ? { name: data.name } : {}),
+            ...(data.purpose !== undefined ? { purpose: data.purpose } : {}),
+            ...(data.legalBasis !== undefined ? { legalBasis: data.legalBasis } : {}),
+            ...(data.dataCategories !== undefined ? { dataCategories: data.dataCategories } : {}),
+            ...(data.dataSubjects !== undefined ? { dataSubjects: data.dataSubjects } : {}),
+            ...(data.recipients !== undefined ? { recipients: data.recipients } : {}),
+            ...(data.retention !== undefined ? { retention: data.retention } : {}),
+            ...(data.sensitiveData !== undefined ? { sensitiveData: data.sensitiveData } : {}),
+          },
+        }),
+      );
+      if (updated.count === 0) return reply.code(404).send({ error: "unknown activity" });
+      return { updated: true };
+    } catch (error) {
+      // Renommage vers un nom déjà pris : même 409 que POST, jamais un 500 ORM.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return reply.code(409).send({ error: "traitement déjà enregistré" });
+      }
+      throw error;
+    }
+  });
+
+  app.delete("/rgpd/:id", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    const deleted = await withTenant(request.tenantId, (tx) =>
+      tx.processingActivity.deleteMany({ where: { id: params.data.id } }),
+    );
+    if (deleted.count === 0) return reply.code(404).send({ error: "unknown activity" });
+    return { deleted: true };
   });
 
   // --- Avis clients / e-réputation (3.8) ----------------------------------

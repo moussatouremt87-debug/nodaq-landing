@@ -45,6 +45,8 @@ export const OWNER_ONLY_TOOLS = new Set([
   "analyze_hourly_performance",
   // Profil stratégique (vertical, effectif RH) : owner-only (3.7).
   "check_regulatory_watch",
+  // Registre des traitements = document de conformité stratégique (3.9).
+  "check_rgpd_register",
   "pennylane_get_invoices",
   "qonto_get_organization",
   "qonto_get_bank_transactions",

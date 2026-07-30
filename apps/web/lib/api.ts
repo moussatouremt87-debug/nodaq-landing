@@ -899,6 +899,66 @@ export const draftReviewReply = (reviewId: string): Promise<{ pendingActionId: s
     { method: "POST" },
   );
 
+export const ProcessingActivity = z.object({
+  id: z.string(),
+  name: z.string(),
+  purpose: z.string(),
+  legalBasis: z.string(),
+  dataCategories: z.array(z.string()),
+  dataSubjects: z.array(z.string()),
+  recipients: z.string().nullable(),
+  retention: z.string(),
+  sensitiveData: z.boolean(),
+  sourceTemplate: z.string().nullable(),
+});
+export type ProcessingActivity = z.infer<typeof ProcessingActivity>;
+
+export const RgpdRegister = z.object({
+  activities: z.array(ProcessingActivity),
+  activitiesTruncated: z.boolean().optional(),
+  // L'audit peut être indisponible (503 outil) : le registre reste servi.
+  audit: z
+    .object({
+      version: z.string(),
+      activityCount: z.number(),
+      issues: z.array(
+        z.object({
+          code: z.string(),
+          severity: z.string(),
+          activityName: z.string().optional(),
+          reason: z.string(),
+        }),
+      ),
+      label: z.string().min(1),
+      truncated: z.boolean().optional(),
+    })
+    .nullable(),
+  templates: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      purpose: z.string(),
+      legalBasis: z.string(),
+      retention: z.string(),
+      source: z.object({ label: z.string(), url: z.string().url() }),
+    }),
+  ),
+});
+export type RgpdRegister = z.infer<typeof RgpdRegister>;
+
+export const getRgpdRegister = (): Promise<RgpdRegister> => call(RgpdRegister, "/rgpd");
+
+export const addActivityFromTemplate = (templateId: string): Promise<{ id: string }> =>
+  call(z.object({ id: z.string() }), `/rgpd/modele/${encodeURIComponent(templateId)}`, {
+    method: "POST",
+    body: "{}",
+  });
+
+export const deleteActivity = (id: string): Promise<{ deleted: boolean }> =>
+  call(z.object({ deleted: z.boolean() }), `/rgpd/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {
