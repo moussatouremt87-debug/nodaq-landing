@@ -5,6 +5,7 @@ import type { FormEvent } from "react";
 import {
   ApiError,
   createReview,
+  deleteReview,
   draftReviewReply,
   getReputation,
   getReviews,
@@ -84,6 +85,20 @@ export default function AvisPage() {
     }
   }
 
+  async function removeReview(reviewId: string): Promise<void> {
+    setError(null);
+    try {
+      await deleteReview(reviewId);
+      await refresh();
+    } catch (err) {
+      setError(
+        err instanceof ApiError && err.status === 403
+          ? "suppression réservée au dirigeant"
+          : "suppression impossible",
+      );
+    }
+  }
+
   async function prepareReply(reviewId: string): Promise<void> {
     setError(null);
     setNotice(null);
@@ -119,6 +134,12 @@ export default function AvisPage() {
                 répondez-y en priorité.
               </p>
             )}
+            {reputation.truncated && (
+              <p className="warn">
+                Lecture partielle (plus de 5 000 avis) — synthèse calculée sur les 5 000 plus
+                récents.
+              </p>
+            )}
             <p className="muted">{reputation.label}</p>
           </>
         )}
@@ -152,6 +173,10 @@ export default function AvisPage() {
                     </button>
                   </>
                 )}
+              </div>
+              <div>
+                {/* Effacement (droit RGPD de l'auteur) — owner-only côté API. */}
+                <button onClick={() => void removeReview(review.id)}>Supprimer</button>
               </div>
             </li>
           ))}

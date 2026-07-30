@@ -884,6 +884,11 @@ export const importReviews = (
     body: JSON.stringify({ reviews }),
   });
 
+export const deleteReview = (reviewId: string): Promise<{ deleted: boolean }> =>
+  call(z.object({ deleted: z.boolean() }), `/avis/${encodeURIComponent(reviewId)}`, {
+    method: "DELETE",
+  });
+
 export const getReputation = (): Promise<ReputationReport> =>
   call(ReputationReport, "/avis/reputation");
 

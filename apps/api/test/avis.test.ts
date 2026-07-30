@@ -215,4 +215,59 @@ describe("avis clients — registre et synthèse", () => {
     const unchanged = await admin.customerReview.findUnique({ where: { id: review.id } });
     expect(unchanged?.replyText).toContain("navrés");
   });
+
+  it("saisie en doublon (source, externalId) : 409 net, jamais un 500 ORM", async () => {
+    const payload = {
+      source: "google",
+      externalId: `dup-${RUN}`,
+      rating: 4,
+      text: "Très bien.",
+      reviewedAt: "2026-07-10",
+    };
+    const first = await app.inject({
+      method: "POST",
+      url: "/avis",
+      headers: { cookie: ownerCookie },
+      payload,
+    });
+    expect(first.statusCode).toBe(201);
+    const dup = await app.inject({
+      method: "POST",
+      url: "/avis",
+      headers: { cookie: ownerCookie },
+      payload,
+    });
+    expect(dup.statusCode).toBe(409);
+    expect(JSON.stringify(dup.json())).not.toContain("Prisma");
+  });
+
+  it("payload forgé cross-tenant : l'avis d'un AUTRE tenant est invisible => failed, rien ne bouge", async () => {
+    const other = await admin.tenant.create({ data: { name: `Avis Autre ${RUN}` } });
+    const foreign = await admin.customerReview.create({
+      data: {
+        tenantId: other.id,
+        rating: 1,
+        text: "Avis d'un autre tenant.",
+        reviewedAt: new Date("2026-07-01T00:00:00Z"),
+      },
+      select: { id: true },
+    });
+    const forged = await admin.pendingAction.create({
+      data: {
+        tenantId: orgA,
+        type: "record_review_reply",
+        payload: { review: { id: foreign.id }, draft: "Tentative cross-tenant" },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: `/pending-actions/${forged.id}/approve`,
+      headers: { cookie: ownerCookie, "content-type": "application/json" },
+      payload: {},
+    });
+    const row = await admin.pendingAction.findUnique({ where: { id: forged.id } });
+    expect(row?.status).toBe("failed");
+    const untouched = await admin.customerReview.findUnique({ where: { id: foreign.id } });
+    expect(untouched?.replyText).toBeNull();
+  });
 });

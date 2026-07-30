@@ -2560,21 +2560,30 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     if (Number.isNaN(reviewedAt.getTime()) || reviewedAt.toISOString().slice(0, 10) !== parsed.data.reviewedAt) {
       return reply.code(400).send({ error: "invalid payload" });
     }
-    const created = await withTenant(request.tenantId, (tx) =>
-      tx.customerReview.create({
-        data: {
-          tenantId: request.tenantId,
-          source: parsed.data.source,
-          externalId: parsed.data.externalId ?? null,
-          authorName: parsed.data.authorName ?? null,
-          rating: parsed.data.rating,
-          text: parsed.data.text,
-          reviewedAt,
-        },
-        select: { id: true },
-      }),
-    );
-    return reply.code(201).send(created);
+    try {
+      const created = await withTenant(request.tenantId, (tx) =>
+        tx.customerReview.create({
+          data: {
+            tenantId: request.tenantId,
+            source: parsed.data.source,
+            externalId: parsed.data.externalId ?? null,
+            authorName: parsed.data.authorName ?? null,
+            rating: parsed.data.rating,
+            text: parsed.data.text,
+            reviewedAt,
+          },
+          select: { id: true },
+        }),
+      );
+      return reply.code(201).send(created);
+    } catch (error) {
+      // Doublon (tenant, source, externalId) : 409 net, jamais un 500 qui
+      // nomme l'ORM.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return reply.code(409).send({ error: "review already exists" });
+      }
+      throw error;
+    }
   });
 
   const ImportReviewsBody = z

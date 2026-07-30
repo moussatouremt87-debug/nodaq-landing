@@ -15,8 +15,14 @@ réponse validée (`replyText`/`repliedAt`). Unicité
 `(tenantId, source, externalId)` : re-importer le même export ne duplique
 jamais. Policy `tenant_isolation` + test d'isolation avec preuve.
 
-- **Lecture** : tous les membres (avis déjà publics en ligne).
+- **Lecture** : tous les membres — **y compris `accountant`** : choix ASSUMÉ
+  (les avis sont déjà publics en ligne, nom d'auteur compris) ; si un tenant
+  veut restreindre, c'est un ticket, pas un défaut d'implémentation.
 - **Écriture du registre** (saisie, import ≤ 500, suppression) : owner-only.
+- **Conservation / effacement (RGPD)** : les avis sont conservés tant qu'ils
+  existent sur la plateforme d'origine ; une demande d'effacement de l'auteur
+  s'honore via le bouton « Supprimer » de la page (owner) — la suppression
+  est définitive (pas de corbeille).
 - **API Google Business Profile** (lecture + publication) = connecteur futur ;
   aucun scraping.
 
