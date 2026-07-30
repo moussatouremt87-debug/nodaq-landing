@@ -178,7 +178,9 @@ export default function RhPage() {
           <p className="muted">
             {perf.revenueUnavailable
               ? "CA indisponible — connectez un facturier (Pennylane, démo ou FEC) pour mesurer le taux réalisé."
-              : "Aucun mois avec du chiffre d'affaires observé sur la fenêtre."}
+              : perf.truncated
+                ? "Lecture partielle (historique tronqué) — aucun mois lisible sur la fenêtre."
+                : "Aucun mois avec du chiffre d'affaires observé sur la fenêtre."}
           </p>
         ) : (
           <>
@@ -222,6 +224,13 @@ export default function RhPage() {
                   ` · tendance ${perf.trendCentsPerMonth > 0 ? "+" : "−"}${Math.abs(
                     Math.round(perf.trendCentsPerMonth / 100),
                   )} €/h par mois`}
+              </p>
+            )}
+            {perf.truncated && (
+              <p className="warn">
+                Lecture partielle (
+                {perf.revenueTruncated ? "historique de factures tronqué" : "équipe/absences tronquées"}
+                ) — verdicts à considérer avec prudence.
               </p>
             )}
             <p className="warn">{perf.label}</p>

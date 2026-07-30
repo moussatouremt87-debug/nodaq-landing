@@ -57,10 +57,11 @@ export function analyzeHourlyPerformance(
   staff: StaffInput[],
   absences: AbsenceInput[],
   series: MonthlyRevenuePoint[],
-  options: { targetRateCents?: number } = {},
+  options: { targetRateCents?: number; revenueTruncated?: boolean } = {},
 ): HourlyPerformanceReport {
   const targetRateCents = options.targetRateCents ?? DEFAULT_HOURLY_RATE_CENTS;
   const active = staff.filter((member) => StaffInput.safeParse(member).success && member.active);
+  const memberById = new Map(active.map((member) => [member.id, member]));
   const weeklyTotal = active.reduce((sum, member) => sum + member.weeklyHours, 0);
 
   const firstActive = series.findIndex((point) => point.revenueCents > 0);
@@ -76,16 +77,47 @@ export function analyzeHourlyPerformance(
     if (!yearRaw || !monthRaw || monthRaw < 1 || monthRaw > 12) continue;
     const monthIndex = monthRaw - 1;
 
-    let absenceHours = 0;
+    // Absences agrégées PAR salarié et bornées à ses heures contractuelles du
+    // mois : des absences superposées ne peuvent pas creuser le dénominateur
+    // au-delà du contrat (ce qui flatterait indûment le €/h).
+    const absenceByMember = new Map<string, number>();
     for (const absence of absences) {
-      const member = active.find((candidate) => candidate.id === absence.staffId);
+      const member = memberById.get(absence.staffId);
       if (!member) continue;
       const days = absenceDaysInMonth(absence, yearRaw, monthIndex);
-      absenceHours += days * (member.weeklyHours / WORK_DAYS_PER_WEEK);
+      if (days <= 0) continue;
+      absenceByMember.set(
+        absence.staffId,
+        (absenceByMember.get(absence.staffId) ?? 0) + days * (member.weeklyHours / WORK_DAYS_PER_WEEK),
+      );
     }
-    absenceHours = Math.round(absenceHours);
+    let absenceTotal = 0;
+    for (const [memberId, hours] of absenceByMember) {
+      const member = memberById.get(memberId);
+      if (!member) continue;
+      absenceTotal += Math.min(hours, member.weeklyHours * WEEKS_PER_MONTH);
+    }
+    const absenceHours = Math.round(absenceTotal);
     const workedHours = Math.max(0, Math.round(weeklyTotal * WEEKS_PER_MONTH) - absenceHours);
     const revenueEur = (point.revenueCents / 100).toFixed(0);
+
+    // Historique de factures TRONQUÉ : un mois à 0 € peut être un trou de
+    // chargement, pas un mois sans ventes — jamais un « en-dessous » fabriqué
+    // (même règle que forecast_sales sur les fenêtres tronquées).
+    if (point.revenueCents === 0 && options.revenueTruncated) {
+      months.push({
+        month: point.month,
+        workedHours,
+        absenceHours,
+        revenueCents: 0,
+        revenuePerHourCents: null,
+        verdict: "inconnu",
+        reason:
+          "CA à 0 € sur un historique de factures tronqué — mois illisible (ventes " +
+          "peut-être non chargées), jamais lu comme « sans ventes »",
+      });
+      continue;
+    }
 
     if (workedHours <= 0) {
       months.push({

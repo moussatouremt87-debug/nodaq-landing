@@ -384,36 +384,44 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
     },
     async ({ targetRateEur, monthsBack }) => {
       // Mêmes bornes de lecture que plan_staffing (audit 3.5) : dépassement
-      // SIGNALÉ, jamais silencieux ; le nom (PII) n'est pas sélectionné.
+      // SIGNALÉ, jamais silencieux ; le nom (PII) n'est pas sélectionné ;
+      // orderBy = sous-ensemble DÉTERMINISTE quand la borne coupe.
       const staff = await withTenant(tenantId, (tx) =>
         tx.staffMember.findMany({
           select: { id: true, weeklyHours: true, active: true },
+          orderBy: { id: "asc" },
           take: 501,
         }),
       );
       const absences = await withTenant(tenantId, (tx) =>
         tx.staffAbsence.findMany({
           select: { staffId: true, startDate: true, endDate: true },
+          orderBy: { id: "asc" },
           take: 5001,
         }),
       );
-      const inputTruncated = staff.length > 500 || absences.length > 5000;
+      // Deux causes de troncature aux effets OPPOSÉS sur le €/h : elles sont
+      // exposées séparément (audit 3.6), `truncated` reste l'OR de synthèse.
+      const staffTruncated = staff.length > 500 || absences.length > 5000;
       const windowMonths = monthsBack ?? 6;
       // CA observé (3.1) : facturier absent ou en erreur = AUCUN mois calculé
-      // et le drapeau le DIT — jamais un taux fabriqué sur un CA inconnu.
-      let series: MonthlyRevenuePoint[] = [];
-      let truncated = false;
+      // et le drapeau le DIT — jamais un taux fabriqué sur un CA inconnu. Le
+      // try ne couvre QUE l'appel réseau : un bug du modèle pur doit remonter
+      // en erreur d'outil, pas se déguiser en « CA indisponible ».
+      let window: Awaited<ReturnType<typeof fetchInvoiceWindow>> | null = null;
       let revenueUnavailable = false;
       try {
         const pennylane = await getPennylaneClient(tenantId, context);
-        const window = await fetchInvoiceWindow(pennylane, new Date(), {
+        window = await fetchInvoiceWindow(pennylane, new Date(), {
           monthsBack: windowMonths,
         });
-        truncated = window.truncated;
-        series = buildMonthlySeries(window.invoices, new Date(), windowMonths);
       } catch {
         revenueUnavailable = true;
       }
+      const revenueTruncated = window?.truncated ?? false;
+      const series: MonthlyRevenuePoint[] = window
+        ? buildMonthlySeries(window.invoices, new Date(), windowMonths)
+        : [];
       const report = analyzeHourlyPerformance(
         staff.slice(0, 500),
         absences.slice(0, 5000).map((absence) => ({
@@ -422,9 +430,12 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
           endDate: absence.endDate.toISOString().slice(0, 10),
         })),
         series,
-        targetRateEur !== undefined
-          ? { targetRateCents: Math.round(targetRateEur * 100) }
-          : {},
+        {
+          ...(targetRateEur !== undefined
+            ? { targetRateCents: Math.round(targetRateEur * 100) }
+            : {}),
+          ...(revenueTruncated ? { revenueTruncated: true } : {}),
+        },
       );
       return {
         content: [
@@ -432,7 +443,9 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
             type: "text" as const,
             text: JSON.stringify({
               ...report,
-              truncated: truncated || inputTruncated,
+              staffTruncated,
+              revenueTruncated,
+              truncated: staffTruncated || revenueTruncated,
               revenueUnavailable,
             }),
           },

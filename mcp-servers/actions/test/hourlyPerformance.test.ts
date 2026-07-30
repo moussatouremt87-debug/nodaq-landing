@@ -117,6 +117,46 @@ describe("analyzeHourlyPerformance", () => {
     expect(report.trendCentsPerMonth).toBeGreaterThan(0);
   });
 
+  it("historique tronqué : un mois à 0 € devient « inconnu », jamais « en-dessous »", () => {
+    const report = analyzeHourlyPerformance(
+      TEAM,
+      [],
+      [
+        { month: "2026-05", revenueCents: 1_824_000, invoiceCount: 3 },
+        { month: "2026-06", revenueCents: 0, invoiceCount: 0 }, // trou OU ventes non chargées ?
+      ],
+      { revenueTruncated: true },
+    );
+    const june = report.months[1]!;
+    expect(june.verdict).toBe("inconnu");
+    expect(june.revenuePerHourCents).toBeNull();
+    expect(june.reason).toContain("tronqué");
+    // Le mois avec CA réel reste jugé normalement.
+    expect(report.months[0]?.verdict).toBe("conforme");
+    // Et sans troncature, le même zéro est un signal réel (« en-dessous »).
+    const honest = analyzeHourlyPerformance(TEAM, [], [
+      { month: "2026-05", revenueCents: 1_824_000, invoiceCount: 3 },
+      { month: "2026-06", revenueCents: 0, invoiceCount: 0 },
+    ]);
+    expect(honest.months[1]?.verdict).toBe("en-dessous");
+  });
+
+  it("absences superposées bornées aux heures contractuelles du salarié", () => {
+    const report = analyzeHourlyPerformance(
+      TEAM,
+      // Deux absences de s1 couvrant TOUT juin (superposées) : 2 x 150 h,
+      // bornées à son contrat (35 h x 4,348 ~ 152 h) — jamais au-delà.
+      [
+        { staffId: "s1", startDate: "2026-06-01", endDate: "2026-06-30" },
+        { staffId: "s1", startDate: "2026-06-01", endDate: "2026-06-30" },
+      ],
+      [{ month: "2026-06", revenueCents: 1_824_000, invoiceCount: 3 }],
+    );
+    const june = report.months[0]!;
+    expect(june.absenceHours).toBe(152);
+    expect(june.workedHours).toBe(MONTH_HOURS - 152);
+  });
+
   it("lignes invalides filtrées, jamais une exception", () => {
     const report = analyzeHourlyPerformance(
       ["garbage" as never, { id: "x", weeklyHours: -5, active: true } as never],

@@ -769,6 +769,8 @@ export const HourlyPerformance = z.object({
   trendCentsPerMonth: z.number(),
   label: z.string().min(1),
   revenueUnavailable: z.boolean().optional(),
+  staffTruncated: z.boolean().optional(),
+  revenueTruncated: z.boolean().optional(),
   truncated: z.boolean().optional(),
 });
 export type HourlyPerformance = z.infer<typeof HourlyPerformance>;

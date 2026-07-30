@@ -410,12 +410,16 @@ describe("analyze_hourly_performance — performance horaire (3.6)", () => {
         activeStaff: number;
         label: string;
         revenueUnavailable: boolean;
+        staffTruncated: boolean;
+        revenueTruncated: boolean;
         truncated: boolean;
       };
       // La facture du faux SaaS (1 200 € en 2026-05) ouvre la fenêtre observée ;
       // 35 h hebdo x 4,348 = 152 h estimées par mois.
       expect(parsed.activeStaff).toBe(1);
       expect(parsed.revenueUnavailable).toBe(false);
+      expect(parsed.staffTruncated).toBe(false);
+      expect(parsed.revenueTruncated).toBe(false);
       expect(parsed.truncated).toBe(false);
       const may = parsed.months.find((m) => m.month === "2026-05");
       expect(may).toMatchObject({

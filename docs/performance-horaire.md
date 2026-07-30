@@ -30,9 +30,15 @@ que 3.5 :
 CA réalisé + données RH agrégées = mêmes restrictions que `plan_staffing` :
 l'outil n'existe pas dans le toolset d'un non-owner (fail-closed, test
 paramétré). Lecture seule (`requiresValidation: false`), bornes de lecture
-signalées (501/5001 → `truncated`), le **nom des salariés (PII) n'est jamais
-sélectionné**. Facturier absent ou en erreur → `revenueUnavailable: true` et
-**aucun mois calculé** — jamais un taux fabriqué sur un CA inconnu.
+déterministes (`orderBy id`) et signalées **séparément** — `staffTruncated`
+(dénominateur partiel) vs `revenueTruncated` (numérateur partiel), effets
+opposés sur le €/h ; `truncated` = l'OR de synthèse. Le **nom des salariés
+(PII) n'est jamais sélectionné**. Facturier absent ou en erreur →
+`revenueUnavailable: true` et **aucun mois calculé** ; historique **tronqué**
+→ tout mois à 0 € devient `inconnu` (« ventes peut-être non chargées ») —
+jamais un taux fabriqué ni un « en-dessous » fabriqué. Les absences sont
+agrégées par salarié et **bornées à ses heures contractuelles** du mois
+(des saisies superposées ne flattent pas le €/h).
 
 Paramètres : `targetRateEur` (10–500, défaut 60), `monthsBack` (3–12, défaut 6).
 
