@@ -181,8 +181,11 @@ export const SilaeSyncResult = z.object({
   employeesCreated: z.number(),
   employeesUpdated: z.number(),
   employeesSkipped: z.number(),
+  employeesDeactivated: z.number().optional(),
   absencesCreated: z.number(),
+  absencesUpdated: z.number().optional(),
   absencesSkipped: z.number(),
+  absencesRemoved: z.number().optional(),
   truncated: z.boolean(),
 });
 export type SilaeSyncResult = z.infer<typeof SilaeSyncResult>;

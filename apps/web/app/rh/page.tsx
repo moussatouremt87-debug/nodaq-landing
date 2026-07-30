@@ -72,6 +72,15 @@ export default function RhPage() {
         `Silae : ${result.employeesCreated} créé(s), ${result.employeesUpdated} mis à jour, ` +
           `${result.absencesCreated} absence(s) importée(s)` +
           (result.employeesSkipped > 0 ? ` · ${result.employeesSkipped} ignoré(s) (conflit)` : "") +
+          ((result.employeesDeactivated ?? 0) > 0
+            ? ` · ${result.employeesDeactivated} fiche(s) désactivée(s) (sorties de Silae)`
+            : "") +
+          ((result.absencesUpdated ?? 0) > 0
+            ? ` · ${result.absencesUpdated} absence(s) mise(s) à jour`
+            : "") +
+          ((result.absencesRemoved ?? 0) > 0
+            ? ` · ${result.absencesRemoved} absence(s) retirée(s) (annulées à la source)`
+            : "") +
           (result.truncated ? " · lecture partielle (bornes atteintes)" : ""),
       );
       await refresh();

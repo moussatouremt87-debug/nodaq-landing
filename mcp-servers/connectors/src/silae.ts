@@ -31,22 +31,24 @@ export const SilaeCredentials = z
   .strict();
 export type SilaeCredentials = z.infer<typeof SilaeCredentials>;
 
+// Bornes de longueur sur TOUTE donnée fournisseur (audit 3.10) : un id
+// surdimensionné entrerait sinon dans un index unique btree côté sync.
 const SilaeEmployee = z.object({
-  id: z.string(),
-  first_name: z.string().nullish(),
-  last_name: z.string().nullish(),
+  id: z.string().min(1).max(100),
+  first_name: z.string().max(200).nullish(),
+  last_name: z.string().max(200).nullish(),
   weekly_hours: z.number().nullish(),
   active: z.boolean().nullish(),
 });
 export type SilaeEmployee = z.infer<typeof SilaeEmployee>;
 
 const SilaeAbsence = z.object({
-  id: z.string(),
-  employee_id: z.string(),
-  type: z.string().nullish(),
+  id: z.string().min(1).max(100),
+  employee_id: z.string().min(1).max(100),
+  type: z.string().max(100).nullish(),
   /** Format YYYY-MM-DD (pas de composante horaire côté Silae). */
-  start_date: z.string(),
-  end_date: z.string(),
+  start_date: z.string().max(30),
+  end_date: z.string().max(30),
 });
 export type SilaeAbsence = z.infer<typeof SilaeAbsence>;
 
@@ -85,6 +87,13 @@ export class SilaeClient {
     baseUrl?: string,
   ) {
     this.baseUrl = resolveBaseUrl("https://api.silae.example", baseUrl, "SILAE_BASE_URL");
+    // Le défaut est un PLACEHOLDER (TLD réservé) tant que le middleware
+    // partenaire n'est pas contracté : en production, on refuse d'émettre la
+    // moindre requête porteuse d'identifiants vers cette destination — échec
+    // explicite plutôt qu'un connecteur silencieusement mort (audit 3.10).
+    if (process.env.NODE_ENV === "production" && this.baseUrl === "https://api.silae.example") {
+      throw new Error("silae partner base URL not configured");
+    }
   }
 
   private headers(): Record<string, string> {

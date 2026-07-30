@@ -241,5 +241,29 @@ describe("connecteur Silae — onboarding et sync", () => {
     });
     expect(await admin.staffMember.count({ where: { tenantId: orgId } })).toBe(2);
     expect(await admin.staffAbsence.count({ where: { tenantId: orgId } })).toBe(1);
+
+    // L'absence importée porte son id source (réconciliation).
+    const [imported] = await admin.staffAbsence.findMany({ where: { tenantId: orgId } });
+    expect(imported?.externalRef).toBe("abs-1");
+  });
+
+  it("unicité par TENANT : le même externalRef peut exister chez un autre tenant", async () => {
+    const other = await admin.tenant.create({ data: { name: `Org Silae B ${RUN}` } });
+    // Même id Silae ET même nom que chez le tenant A : l'index composite
+    // (tenant_id, external_ref) doit l'accepter — jamais un oracle inter-tenant.
+    const created = await admin.staffMember.create({
+      data: {
+        tenantId: other.id,
+        name: "Karim Benali",
+        weeklyHours: 20,
+        externalRef: "emp-1",
+      },
+      select: { id: true },
+    });
+    expect(created.id).toBeTruthy();
+    const twins = await admin.staffMember.findMany({
+      where: { externalRef: "emp-1", tenantId: { in: [orgId, other.id] } },
+    });
+    expect(twins).toHaveLength(2);
   });
 });

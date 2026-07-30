@@ -2543,7 +2543,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const value = (raw ?? "").toLowerCase();
     if (/malad/.test(value)) return "maladie";
     if (/form/.test(value)) return "formation";
-    if (/cong|cp|rtt|vacan/.test(value)) return "conges";
+    // `cp` ancré sur le mot : « arrêt CPAM » ou « CPF » ne sont pas des congés.
+    if (/cong|rtt|vacan/.test(value) || /\bcp\b/.test(value)) return "conges";
     return "autre";
   }
 
@@ -2557,7 +2558,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     let cursor: string | undefined;
     for (let page = 0; page < 12; page++) {
       const { items: pageItems, next_cursor } = await fetchPage(cursor);
-      items.push(...pageItems);
+      // Pas de spread (pile bornée) et plafond appliqué EN accumulant : une
+      // page fournisseur surdimensionnée ne gonfle jamais la mémoire au-delà
+      // de la borne annoncée.
+      for (const item of pageItems) {
+        if (items.length >= max + 1) break;
+        items.push(item);
+      }
       if (items.length > max) return { items: items.slice(0, max), truncated: true };
       if (!next_cursor) return { items, truncated: false };
       cursor = next_cursor;
@@ -2594,115 +2601,252 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         SILAE_ABSENCE_MAX,
       );
 
-      const result = await withTenant(request.tenantId, async (tx) => {
-        const counts = {
-          employeesCreated: 0,
-          employeesUpdated: 0,
-          employeesSkipped: 0,
-          absencesCreated: 0,
-          absencesSkipped: 0,
-        };
-        const staffIdByRef = new Map<string, string>();
-        for (const employee of employees.items) {
-          const name = `${employee.first_name ?? ""} ${employee.last_name ?? ""}`
-            .trim()
-            .slice(0, 200);
-          if (!name || !employee.id) {
-            counts.employeesSkipped += 1;
-            continue;
-          }
-          const weeklyHours = Math.min(
-            80,
-            Math.max(0, Math.round(employee.weekly_hours ?? 35)),
-          );
-          const active = employee.active ?? true;
-          const byRef = await tx.staffMember.findFirst({
-            where: { externalRef: employee.id },
-            select: { id: true, name: true },
+      // Pré-nettoyage HORS transaction : lignes exploitables uniquement.
+      // Borne de nom alignée sur la saisie manuelle (StaffBody, 120).
+      const employeeRows: { ref: string; name: string; weeklyHours: number; active: boolean }[] =
+        [];
+      let precheckSkipped = 0;
+      for (const employee of employees.items) {
+        const name = `${employee.first_name ?? ""} ${employee.last_name ?? ""}`
+          .trim()
+          .slice(0, 120);
+        if (!name || !employee.id) {
+          precheckSkipped += 1;
+          continue;
+        }
+        employeeRows.push({
+          ref: employee.id,
+          name,
+          weeklyHours: Math.min(80, Math.max(0, Math.round(employee.weekly_hours ?? 35))),
+          active: employee.active ?? true,
+        });
+      }
+      const fromDate = new Date(`${from}T00:00:00Z`);
+      const toDate = new Date(`${to}T00:00:00Z`);
+
+      const result = await withTenant(
+        request.tenantId,
+        async (tx) => {
+          const counts = {
+            employeesCreated: 0,
+            employeesUpdated: 0,
+            employeesSkipped: precheckSkipped,
+            employeesDeactivated: 0,
+            absencesCreated: 0,
+            absencesUpdated: 0,
+            absencesSkipped: 0,
+            absencesRemoved: 0,
+          };
+          // Lectures PAR LOT (audit 3.10) : deux findMany indexés remplacent
+          // les findFirst par salarié — la transaction reste courte.
+          const refs = employeeRows.map((row) => row.ref);
+          const names = employeeRows.map((row) => row.name);
+          const byRefRows = await tx.staffMember.findMany({
+            where: { externalRef: { in: refs } },
+            select: { id: true, name: true, externalRef: true },
           });
-          if (byRef) {
-            // Renommage seulement si le nouveau nom est libre — jamais un
-            // conflit d'unicité silencieux au milieu de la transaction.
-            const nameFree =
-              byRef.name === name ||
-              (await tx.staffMember.findFirst({
-                where: { name, id: { not: byRef.id } },
+          const byNameRows = await tx.staffMember.findMany({
+            where: { name: { in: names } },
+            select: { id: true, name: true, externalRef: true },
+          });
+          const refMap = new Map(byRefRows.map((row) => [row.externalRef as string, row]));
+          const nameMap = new Map(byNameRows.map((row) => [row.name, row]));
+          const takenNames = new Set([...byNameRows, ...byRefRows].map((row) => row.name));
+          const staffIdByRef = new Map<string, string>();
+
+          for (const row of employeeRows) {
+            const existing = refMap.get(row.ref);
+            if (existing) {
+              // Renommage seulement si le nouveau nom est libre — jamais un
+              // conflit d'unicité au milieu de la transaction.
+              const rename = existing.name !== row.name && !takenNames.has(row.name);
+              await tx.staffMember.update({
+                where: { id: existing.id },
+                data: {
+                  weeklyHours: row.weeklyHours,
+                  active: row.active,
+                  ...(rename ? { name: row.name } : {}),
+                },
+              });
+              if (rename) {
+                takenNames.delete(existing.name);
+                takenNames.add(row.name);
+              }
+              counts.employeesUpdated += 1;
+              staffIdByRef.set(row.ref, existing.id);
+              continue;
+            }
+            const homonym = nameMap.get(row.name);
+            if (homonym && homonym.externalRef === null) {
+              // Fiche saisie à la main : adoptée par la sync (externalRef posé).
+              await tx.staffMember.update({
+                where: { id: homonym.id },
+                data: { externalRef: row.ref, weeklyHours: row.weeklyHours, active: row.active },
+              });
+              homonym.externalRef = row.ref;
+              counts.employeesUpdated += 1;
+              staffIdByRef.set(row.ref, homonym.id);
+            } else if (homonym || takenNames.has(row.name)) {
+              // Même nom, autre id Silae : conflit compté, jamais écrasé.
+              counts.employeesSkipped += 1;
+            } else {
+              const created = await tx.staffMember.create({
+                data: {
+                  tenantId: request.tenantId,
+                  name: row.name,
+                  weeklyHours: row.weeklyHours,
+                  active: row.active,
+                  externalRef: row.ref,
+                },
                 select: { id: true },
-              })) === null;
-            await tx.staffMember.update({
-              where: { id: byRef.id },
-              data: { weeklyHours, active, ...(nameFree ? { name } : {}) },
-            });
-            counts.employeesUpdated += 1;
-            staffIdByRef.set(employee.id, byRef.id);
-            continue;
+              });
+              takenNames.add(row.name);
+              counts.employeesCreated += 1;
+              staffIdByRef.set(row.ref, created.id);
+            }
           }
-          const byName = await tx.staffMember.findFirst({
-            where: { name },
-            select: { id: true, externalRef: true },
-          });
-          if (byName && byName.externalRef === null) {
-            // Fiche saisie à la main : adoptée par la sync (externalRef posé).
-            await tx.staffMember.update({
-              where: { id: byName.id },
-              data: { externalRef: employee.id, weeklyHours, active },
+
+          // Rétention (art. 5.1.e, audit 3.10) : sur une liste NON tronquée et
+          // non vide, les fiches synchronisées absentes de la source sont
+          // DÉSACTIVÉES — jamais supprimées en silence, jamais sur une liste
+          // vide (un raté fournisseur ne doit pas éteindre toute l'équipe).
+          if (!employees.truncated && refs.length > 0) {
+            const gone = await tx.staffMember.updateMany({
+              where: { externalRef: { not: null, notIn: refs }, active: true },
+              data: { active: false },
             });
-            counts.employeesUpdated += 1;
-            staffIdByRef.set(employee.id, byName.id);
-          } else if (byName) {
-            // Même nom, autre id Silae : conflit compté, jamais écrasé.
-            counts.employeesSkipped += 1;
-          } else {
-            const created = await tx.staffMember.create({
+            counts.employeesDeactivated = gone.count;
+          }
+
+          // Absences : réconciliation par ID SOURCE (audit 3.10) — une absence
+          // modifiée côté paie met à jour SA ligne, jamais un doublon.
+          const validAbsences: {
+            ref: string;
+            staffId: string;
+            type: string;
+            startDate: Date;
+            endDate: Date;
+          }[] = [];
+          for (const absence of absences.items) {
+            const staffId = staffIdByRef.get(absence.employee_id);
+            if (!staffId || !ISO_DAY.test(absence.start_date) || !ISO_DAY.test(absence.end_date)) {
+              counts.absencesSkipped += 1;
+              continue;
+            }
+            const startDate = new Date(`${absence.start_date}T00:00:00Z`);
+            const endDate = new Date(`${absence.end_date}T00:00:00Z`);
+            if (
+              Number.isNaN(startDate.getTime()) ||
+              Number.isNaN(endDate.getTime()) ||
+              endDate < startDate ||
+              endDate.getTime() - startDate.getTime() > 366 * 86_400_000
+            ) {
+              counts.absencesSkipped += 1;
+              continue;
+            }
+            validAbsences.push({
+              ref: absence.id,
+              staffId,
+              type: mapAbsenceType(absence.type),
+              startDate,
+              endDate,
+            });
+          }
+          const absenceRefs = validAbsences.map((absence) => absence.ref);
+          const existingAbsences = await tx.staffAbsence.findMany({
+            where: {
+              OR: [
+                { externalRef: { in: absenceRefs } },
+                { staffId: { in: [...new Set(validAbsences.map((a) => a.staffId))] } },
+              ],
+            },
+            select: {
+              id: true,
+              staffId: true,
+              type: true,
+              startDate: true,
+              endDate: true,
+              externalRef: true,
+            },
+          });
+          const absenceByRef = new Map(
+            existingAbsences
+              .filter((absence) => absence.externalRef !== null)
+              .map((absence) => [absence.externalRef as string, absence]),
+          );
+          const keyOf = (a: { staffId: string; type: string; startDate: Date; endDate: Date }) =>
+            `${a.staffId}|${a.type}|${a.startDate.toISOString()}|${a.endDate.toISOString()}`;
+          const absenceByKey = new Map(existingAbsences.map((a) => [keyOf(a), a]));
+
+          for (const absence of validAbsences) {
+            const byRef = absenceByRef.get(absence.ref);
+            if (byRef) {
+              const changed =
+                byRef.staffId !== absence.staffId ||
+                byRef.type !== absence.type ||
+                byRef.startDate.getTime() !== absence.startDate.getTime() ||
+                byRef.endDate.getTime() !== absence.endDate.getTime();
+              if (changed) {
+                await tx.staffAbsence.update({
+                  where: { id: byRef.id },
+                  data: {
+                    staffId: absence.staffId,
+                    type: absence.type,
+                    startDate: absence.startDate,
+                    endDate: absence.endDate,
+                  },
+                });
+                counts.absencesUpdated += 1;
+              } else {
+                counts.absencesSkipped += 1;
+              }
+              continue;
+            }
+            const twin = absenceByKey.get(keyOf(absence));
+            if (twin) {
+              // Ligne identique déjà présente (saisie manuelle ou sync
+              // antérieure sans id) : adoptée, jamais dupliquée.
+              if (twin.externalRef === null) {
+                await tx.staffAbsence.update({
+                  where: { id: twin.id },
+                  data: { externalRef: absence.ref },
+                });
+              }
+              counts.absencesSkipped += 1;
+              continue;
+            }
+            const created = await tx.staffAbsence.create({
               data: {
                 tenantId: request.tenantId,
-                name,
-                weeklyHours,
-                active,
-                externalRef: employee.id,
+                staffId: absence.staffId,
+                type: absence.type,
+                startDate: absence.startDate,
+                endDate: absence.endDate,
+                externalRef: absence.ref,
               },
-              select: { id: true },
+              select: { id: true, staffId: true, type: true, startDate: true, endDate: true },
             });
-            counts.employeesCreated += 1;
-            staffIdByRef.set(employee.id, created.id);
+            absenceByKey.set(keyOf(created), { ...created, externalRef: absence.ref });
+            counts.absencesCreated += 1;
           }
-        }
 
-        for (const absence of absences.items) {
-          const staffId = staffIdByRef.get(absence.employee_id);
-          const startOk = ISO_DAY.test(absence.start_date);
-          const endOk = ISO_DAY.test(absence.end_date);
-          if (!staffId || !startOk || !endOk) {
-            counts.absencesSkipped += 1;
-            continue;
+          // Fenêtre NON tronquée et non vide : une absence synchronisée
+          // disparue de la source (congé annulé) est retirée — uniquement les
+          // lignes ENTIÈREMENT dans la fenêtre interrogée.
+          if (!absences.truncated && absenceRefs.length > 0) {
+            const removed = await tx.staffAbsence.deleteMany({
+              where: {
+                externalRef: { not: null, notIn: absenceRefs },
+                startDate: { gte: fromDate },
+                endDate: { lte: toDate },
+              },
+            });
+            counts.absencesRemoved = removed.count;
           }
-          const startDate = new Date(`${absence.start_date}T00:00:00Z`);
-          const endDate = new Date(`${absence.end_date}T00:00:00Z`);
-          if (
-            Number.isNaN(startDate.getTime()) ||
-            Number.isNaN(endDate.getTime()) ||
-            endDate < startDate ||
-            endDate.getTime() - startDate.getTime() > 366 * 86_400_000
-          ) {
-            counts.absencesSkipped += 1;
-            continue;
-          }
-          const type = mapAbsenceType(absence.type);
-          const existing = await tx.staffAbsence.findFirst({
-            where: { staffId, type, startDate, endDate },
-            select: { id: true },
-          });
-          if (existing) {
-            counts.absencesSkipped += 1;
-            continue;
-          }
-          await tx.staffAbsence.create({
-            data: { tenantId: request.tenantId, staffId, type, startDate, endDate },
-          });
-          counts.absencesCreated += 1;
-        }
-        return counts;
-      });
+          return counts;
+        },
+        { timeoutMs: 30_000 },
+      );
 
       return {
         ...result,

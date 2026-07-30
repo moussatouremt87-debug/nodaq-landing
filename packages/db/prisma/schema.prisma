@@ -639,10 +639,13 @@ model StaffAbsence {
   type      String      @default("conges")
   startDate DateTime    @map("start_date")
   endDate   DateTime    @map("end_date")
+  /// Id de l'absence chez le SIRH source (Silae) — réconciliation sync 3.10.
+  externalRef String?   @map("external_ref")
   createdAt DateTime    @default(now()) @map("created_at")
   tenant    Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   staff     StaffMember @relation(fields: [staffId], references: [id], onDelete: Cascade)
 
+  @@unique([tenantId, externalRef])
   @@index([tenantId, staffId])
   @@map("staff_absences")
   @@schema("public")
