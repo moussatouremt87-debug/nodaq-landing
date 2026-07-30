@@ -829,6 +829,71 @@ export const putComplianceProfile = (profile: {
 export const getRegulatoryWatch = (): Promise<RegulatoryWatch> =>
   call(RegulatoryWatch, "/reglementaire");
 
+export const CustomerReview = z.object({
+  id: z.string(),
+  source: z.string(),
+  authorName: z.string().nullable(),
+  rating: z.number(),
+  text: z.string(),
+  reviewedAt: z.string(),
+  replyText: z.string().nullable(),
+  repliedAt: z.string().nullable(),
+});
+export type CustomerReview = z.infer<typeof CustomerReview>;
+
+export const ReputationReport = z.object({
+  totalReviews: z.number(),
+  averageRating: z.number().nullable(),
+  distribution: z.record(z.string(), z.number()),
+  replyRatePct: z.number().nullable(),
+  trend: z
+    .object({
+      recentAverage: z.number(),
+      previousAverage: z.number(),
+      verdict: z.string(),
+    })
+    .nullable(),
+  unansweredNegative: z.array(
+    z.object({ id: z.string(), rating: z.number(), daysAgo: z.number() }),
+  ),
+  label: z.string().min(1),
+  truncated: z.boolean().optional(),
+});
+export type ReputationReport = z.infer<typeof ReputationReport>;
+
+export const getReviews = (): Promise<{ reviews: CustomerReview[] }> =>
+  call(z.object({ reviews: z.array(CustomerReview) }), "/avis");
+
+export const createReview = (review: {
+  source: string;
+  authorName?: string;
+  rating: number;
+  text: string;
+  reviewedAt: string;
+}): Promise<{ id: string }> =>
+  call(z.object({ id: z.string() }), "/avis", {
+    method: "POST",
+    body: JSON.stringify(review),
+  });
+
+export const importReviews = (
+  reviews: unknown[],
+): Promise<{ imported: number; skipped: number }> =>
+  call(z.object({ imported: z.number(), skipped: z.number() }), "/avis/import", {
+    method: "POST",
+    body: JSON.stringify({ reviews }),
+  });
+
+export const getReputation = (): Promise<ReputationReport> =>
+  call(ReputationReport, "/avis/reputation");
+
+export const draftReviewReply = (reviewId: string): Promise<{ pendingActionId: string }> =>
+  call(
+    z.object({ pendingActionId: z.string() }),
+    `/avis/${encodeURIComponent(reviewId)}/reponse`,
+    { method: "POST" },
+  );
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {

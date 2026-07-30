@@ -83,6 +83,13 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > 1 ligne/tenant) ; outil `check_regulatory_watch` + routes `/reglementaire*` +
 > page OWNER-ONLY ; label « pas un conseil juridique » PERMANENT
 > (`docs/veille-reglementaire.md`).
+> **Avis clients (3.8)** : registre `customer_reviews` (RLS, dédup import par
+> `(source, externalId)`, lecture membres / écriture owner) ; modèle pur
+> `reputation.ts` (moyenne, tendance 6 mois vs 6, alertes ≤ 2/5 sans réponse —
+> agrégats et ids SEULEMENT, jamais nom/texte) ; réponse = `draft_review_reply`
+> HITL (route() souverain, minimisation : note+texte sans nom d'auteur) →
+> exécuteur `record_review_reply` (enregistre, n'écrase JAMAIS) — publication
+> plateforme MANUELLE en V1, connecteur Google = futur (`docs/e-reputation.md`).
 > **Support (2.18)** : schéma Postgres `ops` (tables `support_tickets`/`support_issues`)
 > hors RLS métier MAIS sous RLS gated `app.ops_operator` — accès UNIQUEMENT via
 > `withOps()` + routes OPERATOR (allowlist `OPS_OPERATOR_USER_IDS`, 404 sinon) ;

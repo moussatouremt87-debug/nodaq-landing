@@ -2515,5 +2515,167 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     }
   });
 
+  // --- Avis clients / e-réputation (3.8) ----------------------------------
+  // Lecture pour tous les membres (avis publics déjà en ligne) ; écriture du
+  // registre owner-only ; la RÉPONSE passe par la file de validation (HITL) —
+  // en V1 la publication plateforme reste manuelle (copier-coller).
+
+  const REVIEW_SELECT = {
+    id: true,
+    source: true,
+    authorName: true,
+    rating: true,
+    text: true,
+    reviewedAt: true,
+    replyText: true,
+    repliedAt: true,
+  } as const;
+
+  app.get("/avis", { preHandler: businessRoute }, async (request) => {
+    const reviews = await withTenant(request.tenantId, (tx) =>
+      tx.customerReview.findMany({
+        select: REVIEW_SELECT,
+        orderBy: { reviewedAt: "desc" },
+        take: 200,
+      }),
+    );
+    return { reviews };
+  });
+
+  const ReviewBody = z
+    .object({
+      source: z.enum(["manuel", "google", "autre"]).default("manuel"),
+      externalId: z.string().min(1).max(200).optional(),
+      authorName: z.string().min(1).max(200).optional(),
+      rating: z.number().int().min(1).max(5),
+      text: z.string().min(1).max(4_000),
+      reviewedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    })
+    .strict();
+
+  app.post("/avis", { preHandler: ownerRoute }, async (request, reply) => {
+    const parsed = ReviewBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    const reviewedAt = new Date(`${parsed.data.reviewedAt}T00:00:00Z`);
+    if (Number.isNaN(reviewedAt.getTime()) || reviewedAt.toISOString().slice(0, 10) !== parsed.data.reviewedAt) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    const created = await withTenant(request.tenantId, (tx) =>
+      tx.customerReview.create({
+        data: {
+          tenantId: request.tenantId,
+          source: parsed.data.source,
+          externalId: parsed.data.externalId ?? null,
+          authorName: parsed.data.authorName ?? null,
+          rating: parsed.data.rating,
+          text: parsed.data.text,
+          reviewedAt,
+        },
+        select: { id: true },
+      }),
+    );
+    return reply.code(201).send(created);
+  });
+
+  const ImportReviewsBody = z
+    .object({ reviews: z.array(ReviewBody).min(1).max(500) })
+    .strict();
+
+  app.post("/avis/import", { preHandler: ownerRoute }, async (request, reply) => {
+    const parsed = ImportReviewsBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    const rows: Prisma.CustomerReviewCreateManyInput[] = [];
+    for (const review of parsed.data.reviews) {
+      const reviewedAt = new Date(`${review.reviewedAt}T00:00:00Z`);
+      if (
+        Number.isNaN(reviewedAt.getTime()) ||
+        reviewedAt.toISOString().slice(0, 10) !== review.reviewedAt
+      ) {
+        return reply.code(400).send({ error: "invalid payload" });
+      }
+      rows.push({
+        tenantId: request.tenantId,
+        source: review.source,
+        externalId: review.externalId ?? null,
+        authorName: review.authorName ?? null,
+        rating: review.rating,
+        text: review.text,
+        reviewedAt,
+      });
+    }
+    // Dédup par (tenant, source, externalId) : re-importer le même export ne
+    // duplique jamais ; sans externalId, la ligne est toujours insérée.
+    const result = await withTenant(request.tenantId, (tx) =>
+      tx.customerReview.createMany({ data: rows, skipDuplicates: true }),
+    );
+    return { imported: result.count, skipped: rows.length - result.count };
+  });
+
+  app.delete("/avis/:id", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    const deleted = await withTenant(request.tenantId, (tx) =>
+      tx.customerReview.deleteMany({ where: { id: params.data.id } }),
+    );
+    if (deleted.count === 0) return reply.code(404).send({ error: "unknown review" });
+    return { deleted: true };
+  });
+
+  // Synthèse e-réputation : MÊME chemin que l'agent (outil du toolset).
+  app.get("/avis/reputation", { preHandler: businessRoute }, async (request, reply) => {
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+      });
+      const result = await toolset.execute("analyze_reputation", {});
+      return JSON.parse(result) as unknown;
+    } catch (error) {
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "reputation unavailable",
+      );
+      return reply.code(503).send({ error: "réputation indisponible" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
+
+  // Brouillon de réponse : outil d'ÉCRITURE -> pending_action (HITL), jamais
+  // une publication directe. Accessible aux membres : la file gate l'exécution.
+  app.post("/avis/:id/reponse", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+        requestedBy: request.authSession.user.id,
+        onPendingAction: () => {
+          void notifyPendingAction(request.tenantId).catch((error: unknown) => {
+            request.log.warn(
+              { err: error instanceof Error ? error.name : "Error" },
+              "push record failed",
+            );
+          });
+        },
+      });
+      const result = await toolset.execute("draft_review_reply", { reviewId: params.data.id });
+      return JSON.parse(result) as unknown;
+    } catch (error) {
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "review reply draft failed",
+      );
+      return reply.code(503).send({ error: "brouillon indisponible" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
+
   return app;
 }
