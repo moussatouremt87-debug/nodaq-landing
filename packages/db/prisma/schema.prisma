@@ -43,6 +43,8 @@ model Tenant {
   pushSubscriptions   PushSubscription[]
   pushDispatchStates  PushDispatchState[]
   fixedAssets         FixedAsset[]
+  staffMembers        StaffMember[]
+  staffAbsences       StaffAbsence[]
 
   @@map("tenants")
   @@schema("public")
@@ -596,6 +598,47 @@ model FixedAsset {
 
   @@index([tenantId, status])
   @@map("fixed_assets")
+  @@schema("public")
+}
+
+/// Ticket 3.5 — plannings RH : registre des salariés (référentiel). Sealed by
+/// RLS (see the migration `rls_staff_planning`).
+model StaffMember {
+  id          String         @id @default(uuid()) @db.Uuid
+  tenantId    String         @map("tenant_id") @db.Uuid
+  /// Nom du salarié — PII : owner-only côté API, jamais loggé.
+  name        String
+  role        String         @default("")
+  /// Heures contractuelles hebdomadaires (ex. 35).
+  weeklyHours Int            @default(35) @map("weekly_hours")
+  active      Boolean        @default(true)
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @default(now()) @updatedAt @map("updated_at")
+  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  absences    StaffAbsence[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, active])
+  @@map("staff_members")
+  @@schema("public")
+}
+
+/// Ticket 3.5 — plannings RH : absences déclarées par salarié. Sealed by RLS
+/// (see the migration `rls_staff_planning`).
+model StaffAbsence {
+  id        String      @id @default(uuid()) @db.Uuid
+  tenantId  String      @map("tenant_id") @db.Uuid
+  staffId   String      @map("staff_id") @db.Uuid
+  /// 'conges' | 'maladie' | 'formation' | 'autre' — validé côté app par Zod.
+  type      String      @default("conges")
+  startDate DateTime    @map("start_date")
+  endDate   DateTime    @map("end_date")
+  createdAt DateTime    @default(now()) @map("created_at")
+  tenant    Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  staff     StaffMember @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, staffId])
+  @@map("staff_absences")
   @@schema("public")
 }
 

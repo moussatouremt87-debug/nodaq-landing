@@ -668,6 +668,89 @@ export const updateFixedAsset = (
     body: JSON.stringify(patch),
   });
 
+/*
+ * Plannings RH (3.5) — owner-only côté API (PII). Le plan est TOUJOURS
+ * labellisé estimation ; verdict « inconnu » sans facturier.
+ */
+
+export const StaffMember = z.object({
+  id: z.string(),
+  name: z.string(),
+  role: z.string(),
+  weeklyHours: z.number(),
+  active: z.boolean(),
+});
+export type StaffMember = z.infer<typeof StaffMember>;
+
+export const StaffAbsence = z.object({
+  id: z.string(),
+  staffId: z.string(),
+  type: z.string(),
+  startDate: z.string(),
+  endDate: z.string(),
+});
+export type StaffAbsence = z.infer<typeof StaffAbsence>;
+
+export const StaffingPlan = z.object({
+  months: z.array(
+    z.object({
+      month: z.string(),
+      capacityHours: z.number(),
+      absenceHours: z.number(),
+      estimatedWorkloadHours: z.number().nullable(),
+      gapHours: z.number().nullable(),
+      verdict: z.string(),
+      reason: z.string(),
+    }),
+  ),
+  activeStaff: z.number(),
+  hourlyRateCents: z.number(),
+  label: z.string().min(1),
+  truncated: z.boolean().optional(),
+});
+export type StaffingPlan = z.infer<typeof StaffingPlan>;
+
+export const getRh = (): Promise<{ staff: StaffMember[]; absences: StaffAbsence[] }> =>
+  call(z.object({ staff: z.array(StaffMember), absences: z.array(StaffAbsence) }), "/rh");
+
+export const createStaff = (member: {
+  name: string;
+  role?: string;
+  weeklyHours?: number;
+}): Promise<StaffMember> =>
+  call(StaffMember, "/rh/staff", { method: "POST", body: JSON.stringify(member) });
+
+export const updateStaff = (
+  id: string,
+  patch: { role?: string; weeklyHours?: number; active?: boolean },
+): Promise<{ updated: boolean }> =>
+  call(z.object({ updated: z.boolean() }), `/rh/staff/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const createAbsence = (absence: {
+  staffId: string;
+  type: string;
+  startDate: string;
+  endDate: string;
+}): Promise<{ id: string }> =>
+  call(z.object({ id: z.string() }), "/rh/absences", {
+    method: "POST",
+    body: JSON.stringify(absence),
+  });
+
+export const deleteAbsence = (id: string): Promise<{ deleted: boolean }> =>
+  call(z.object({ deleted: z.boolean() }), `/rh/absences/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+export const getStaffingPlan = (hourlyRateEur?: number): Promise<StaffingPlan> =>
+  call(
+    StaffingPlan,
+    `/rh/plan${hourlyRateEur ? `?hourlyRateEur=${encodeURIComponent(hourlyRateEur)}` : ""}`,
+  );
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {

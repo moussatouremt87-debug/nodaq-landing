@@ -2240,5 +2240,174 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return { updated: true };
   });
 
+  /*
+   * ── Plannings RH (3.5) ────────────────────────────────────────────────────
+   * Données RH = PII (noms) + charge dérivée du CA : OWNER-ONLY de bout en
+   * bout, comme le financier. Jamais un nom de salarié dans les logs.
+   */
+  const STAFF_SELECT = {
+    id: true,
+    name: true,
+    role: true,
+    weeklyHours: true,
+    active: true,
+  } as const;
+
+  app.get("/rh", { preHandler: ownerRoute }, async (request) => {
+    const [staff, absences] = await withTenant(request.tenantId, async (tx) => [
+      await tx.staffMember.findMany({ orderBy: { name: "asc" }, take: 200, select: STAFF_SELECT }),
+      await tx.staffAbsence.findMany({
+        orderBy: { startDate: "desc" },
+        take: 200,
+        select: { id: true, staffId: true, type: true, startDate: true, endDate: true },
+      }),
+    ]);
+    return { staff, absences };
+  });
+
+  const StaffBody = z
+    .object({
+      name: z.string().min(1).max(120),
+      role: z.string().max(80).default(""),
+      weeklyHours: z.number().int().min(0).max(80).default(35),
+    })
+    .strict();
+
+  app.post("/rh/staff", { preHandler: ownerRoute }, async (request, reply) => {
+    const parsed = StaffBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    try {
+      const member = await withTenant(request.tenantId, (tx) =>
+        tx.staffMember.create({
+          data: { tenantId: request.tenantId, ...parsed.data },
+          select: STAFF_SELECT,
+        }),
+      );
+      return reply.code(201).send(member);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return reply.code(409).send({ error: "salarié déjà enregistré" });
+      }
+      throw error;
+    }
+  });
+
+  const StaffPatch = z
+    .object({
+      role: z.string().max(80).optional(),
+      weeklyHours: z.number().int().min(0).max(80).optional(),
+      active: z.boolean().optional(),
+    })
+    .strict()
+    .refine((body) => Object.keys(body).length > 0, { message: "empty patch" });
+
+  app.patch("/rh/staff/:id", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    const body = StaffPatch.safeParse(request.body);
+    if (!params.success || !body.success) return reply.code(400).send({ error: "invalid payload" });
+    const updated = await withTenant(request.tenantId, (tx) =>
+      tx.staffMember.updateMany({
+        where: { id: params.data.id },
+        data: {
+          ...(body.data.role !== undefined ? { role: body.data.role } : {}),
+          ...(body.data.weeklyHours !== undefined ? { weeklyHours: body.data.weeklyHours } : {}),
+          ...(body.data.active !== undefined ? { active: body.data.active } : {}),
+        },
+      }),
+    );
+    if (updated.count === 0) return reply.code(404).send({ error: "unknown staff member" });
+    return { updated: true };
+  });
+
+  // Date STRICTEMENT calendaire (audit 3.5) : "2026-02-31" glisserait au
+  // 3 mars et fausserait la capacité de deux mois — round-trip exigé.
+  const IsoDay = z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .refine((value) => {
+      const date = new Date(`${value}T00:00:00Z`);
+      return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+    }, { message: "invalid calendar date" });
+
+  const AbsenceBody = z
+    .object({
+      staffId: Uuid,
+      type: z.enum(["conges", "maladie", "formation", "autre"]).default("conges"),
+      startDate: IsoDay,
+      endDate: IsoDay,
+    })
+    .strict()
+    .refine((body) => body.endDate >= body.startDate, { message: "endDate before startDate" })
+    // Amplitude bornée : une absence > 1 an est une erreur de saisie.
+    .refine(
+      (body) => Date.parse(body.endDate) - Date.parse(body.startDate) <= 366 * 86_400_000,
+      { message: "absence longer than a year" },
+    );
+
+  app.post("/rh/absences", { preHandler: ownerRoute }, async (request, reply) => {
+    const parsed = AbsenceBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    const created = await withTenant(request.tenantId, async (tx) => {
+      const member = await tx.staffMember.findUnique({
+        where: { id: parsed.data.staffId },
+        select: { id: true },
+      });
+      if (!member) return null;
+      return tx.staffAbsence.create({
+        data: {
+          tenantId: request.tenantId,
+          staffId: parsed.data.staffId,
+          type: parsed.data.type,
+          startDate: new Date(`${parsed.data.startDate}T00:00:00Z`),
+          endDate: new Date(`${parsed.data.endDate}T00:00:00Z`),
+        },
+        select: { id: true },
+      });
+    });
+    if (!created) return reply.code(404).send({ error: "unknown staff member" });
+    return reply.code(201).send(created);
+  });
+
+  app.delete("/rh/absences/:id", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    const deleted = await withTenant(request.tenantId, (tx) =>
+      tx.staffAbsence.deleteMany({ where: { id: params.data.id } }),
+    );
+    if (deleted.count === 0) return reply.code(404).send({ error: "unknown absence" });
+    return { deleted: true };
+  });
+
+  // Plan capacité vs charge : MÊME chemin que l'agent (outil owner-gated du
+  // toolset lié au tenant) — une seule implémentation, deux consommateurs.
+  app.get("/rh/plan", { preHandler: ownerRoute }, async (request, reply) => {
+    const query = z
+      .object({ hourlyRateEur: z.coerce.number().min(10).max(500).optional() })
+      .safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send({ error: "invalid query" });
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+      });
+      const result = await toolset.execute("plan_staffing", {
+        ...(query.data.hourlyRateEur !== undefined
+          ? { hourlyRateEur: query.data.hourlyRateEur }
+          : {}),
+      });
+      return JSON.parse(result) as unknown;
+    } catch (error) {
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "staffing plan unavailable",
+      );
+      return reply.code(503).send({ error: "plan indisponible" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
+
   return app;
 }

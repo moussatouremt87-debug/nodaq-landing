@@ -43,6 +43,10 @@ let pushDispatchStateAId: string;
 let pushDispatchStateBId: string;
 let fixedAssetAId: string;
 let fixedAssetBId: string;
+let staffMemberAId: string;
+let staffMemberBId: string;
+let staffAbsenceAId: string;
+let staffAbsenceBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -62,6 +66,9 @@ beforeAll(async () => {
   await admin.pushSubscription.deleteMany();
   await admin.pushDispatchState.deleteMany();
   await admin.fixedAsset.deleteMany();
+  // FK order: absences before members.
+  await admin.staffAbsence.deleteMany();
+  await admin.staffMember.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -423,6 +430,45 @@ beforeAll(async () => {
   );
   fixedAssetAId = fixedAssetA.id;
   fixedAssetBId = fixedAssetB.id;
+
+  // name/role sont des placeholders de test, jamais un vrai salarié client (PII).
+  const staffMemberA = await withTenant(tenantA, (tx) =>
+    tx.staffMember.create({
+      data: { tenantId: tenantA, name: "salarié A", role: "technicien", weeklyHours: 35 },
+    }),
+  );
+  const staffMemberB = await withTenant(tenantB, (tx) =>
+    tx.staffMember.create({
+      data: { tenantId: tenantB, name: "salarié B", role: "commercial", weeklyHours: 39 },
+    }),
+  );
+  staffMemberAId = staffMemberA.id;
+  staffMemberBId = staffMemberB.id;
+
+  const staffAbsenceA = await withTenant(tenantA, (tx) =>
+    tx.staffAbsence.create({
+      data: {
+        tenantId: tenantA,
+        staffId: staffMemberAId,
+        type: "conges",
+        startDate: new Date("2025-08-01"),
+        endDate: new Date("2025-08-15"),
+      },
+    }),
+  );
+  const staffAbsenceB = await withTenant(tenantB, (tx) =>
+    tx.staffAbsence.create({
+      data: {
+        tenantId: tenantB,
+        staffId: staffMemberBId,
+        type: "maladie",
+        startDate: new Date("2025-09-01"),
+        endDate: new Date("2025-09-03"),
+      },
+    }),
+  );
+  staffAbsenceAId = staffAbsenceA.id;
+  staffAbsenceBId = staffAbsenceB.id;
 });
 
 afterAll(async () => {
@@ -562,6 +608,22 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur fixed_assets", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'fixed_assets'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur staff_members", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'staff_members'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur staff_absences", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'staff_absences'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -1087,6 +1149,70 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (staff_members) — withTenant(A) ne voit QUE les salariés de A", async () => {
+    const members = await withTenant(tenantA, (tx) => tx.staffMember.findMany());
+    expect(members).toHaveLength(1);
+    expect(members[0]?.id).toBe(staffMemberAId);
+    expect(members.some((m) => m.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (staff_members) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const members = await prisma.staffMember.findMany();
+    expect(members).toHaveLength(0);
+  });
+
+  it("test 3 (staff_members) — lire le salarié de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.staffMember.findUnique({ where: { id: staffMemberBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (staff_members) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.staffMember.create({
+          data: { tenantId: tenantB, name: "intrusion", role: "intrus", weeklyHours: 35 },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 1 (staff_absences) — withTenant(A) ne voit QUE les absences de A", async () => {
+    const absences = await withTenant(tenantA, (tx) => tx.staffAbsence.findMany());
+    expect(absences).toHaveLength(1);
+    expect(absences[0]?.id).toBe(staffAbsenceAId);
+    expect(absences.some((a) => a.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (staff_absences) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const absences = await prisma.staffAbsence.findMany();
+    expect(absences).toHaveLength(0);
+  });
+
+  it("test 3 (staff_absences) — lire l'absence de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.staffAbsence.findUnique({ where: { id: staffAbsenceBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (staff_absences) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.staffAbsence.create({
+          data: {
+            tenantId: tenantB,
+            staffId: staffMemberBId,
+            type: "autre",
+            startDate: new Date("2025-10-01"),
+            endDate: new Date("2025-10-02"),
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -1406,5 +1532,45 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const assets = await withTenant(tenantA, (tx) => tx.fixedAsset.findMany());
     expect(assets).toHaveLength(1);
+  });
+
+  it("policy désactivée sur staff_members => la fuite se produit aussi (le référentiel des salariés des deux tenants devient visible)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "staff_members" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.staffMember.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((m) => m.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.staffMember.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "staff_members" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "staff_members" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const members = await withTenant(tenantA, (tx) => tx.staffMember.findMany());
+    expect(members).toHaveLength(1);
+  });
+
+  it("policy désactivée sur staff_absences => la fuite se produit aussi (les absences des deux tenants deviennent visibles)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "staff_absences" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.staffAbsence.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((a) => a.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.staffAbsence.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "staff_absences" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "staff_absences" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const absences = await withTenant(tenantA, (tx) => tx.staffAbsence.findMany());
+    expect(absences).toHaveLength(1);
   });
 });

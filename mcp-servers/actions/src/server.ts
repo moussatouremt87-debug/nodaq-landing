@@ -14,6 +14,7 @@ import { extractInvoiceText } from "./ocrClient.js";
 import { analyzeCustomerSignals } from "./customerSignals.js";
 import { simulateMaterialPrices } from "./materialScenario.js";
 import { buildMonthlySeries, fetchInvoiceWindow, forecastSales } from "./salesForecast.js";
+import { buildStaffingPlan } from "./staffingPlan.js";
 import { forecastTreasury } from "./treasury.js";
 import type { TreasuryTransaction } from "./treasury.js";
 
@@ -57,6 +58,7 @@ export const TOOL_POLICIES = {
   compute_treasury_forecast: { requiresValidation: false },
   forecast_sales: { requiresValidation: false },
   analyze_customer_signals: { requiresValidation: false },
+  plan_staffing: { requiresValidation: false },
   check_stock_alerts: { requiresValidation: false },
   adjust_stock: { requiresValidation: true },
   simulate_material_prices: { requiresValidation: false },
@@ -259,6 +261,92 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
               analyzedInvoices,
               unattributedInvoices,
               truncated,
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "plan_staffing",
+    {
+      description:
+        "Plannings RH (lecture seule, ticket 3.5) : capacité mensuelle de l'équipe " +
+        "(heures contractuelles moins absences) vs charge ESTIMÉE depuis la prévision " +
+        "de ventes, avec un taux horaire facturé moyen configurable. Verdicts " +
+        "sous/sur-capacité chiffrés, TOUJOURS labellisés estimation.",
+      inputSchema: {
+        hourlyRateEur: z
+          .number()
+          .min(10)
+          .max(500)
+          .optional()
+          .describe("Taux horaire facturé moyen en euros (défaut 60)"),
+        horizonMonths: z.number().int().min(1).max(6).optional(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ hourlyRateEur, horizonMonths }) => {
+      // Bornes de lecture (audit 3.5) : jamais une boucle non plafonnée —
+      // le dépassement est SIGNALÉ, pas silencieux. Le nom (PII) n'est pas
+      // sélectionné : il n'entre jamais dans le processus de l'outil.
+      const staff = await withTenant(tenantId, (tx) =>
+        tx.staffMember.findMany({
+          select: { id: true, weeklyHours: true, active: true },
+          take: 501,
+        }),
+      );
+      const absences = await withTenant(tenantId, (tx) =>
+        tx.staffAbsence.findMany({
+          select: { staffId: true, startDate: true, endDate: true },
+          take: 5001,
+        }),
+      );
+      const inputTruncated = staff.length > 500 || absences.length > 5000;
+      // Prévision de ventes (3.1) : absente (pas de connecteur) = verdicts
+      // « inconnu » — jamais une charge fabriquée.
+      let points: { month: string; revenueCents: number }[] = [];
+      let truncated = false;
+      let forecastUnavailable = false;
+      try {
+        const pennylane = await getPennylaneClient(tenantId, context);
+        const window = await fetchInvoiceWindow(pennylane, new Date());
+        truncated = window.truncated;
+        const forecast = forecastSales(
+          buildMonthlySeries(window.invoices, new Date()),
+          horizonMonths ?? 3,
+        );
+        points = forecast.points;
+      } catch {
+        // Pas de facturier configuré OU fournisseur en erreur : capacité
+        // seule, et le drapeau le DIT (jamais un motif indistinct).
+        forecastUnavailable = true;
+      }
+      const plan = buildStaffingPlan(
+        staff.slice(0, 500),
+        absences.slice(0, 5000).map((absence) => ({
+          staffId: absence.staffId,
+          startDate: absence.startDate.toISOString().slice(0, 10),
+          endDate: absence.endDate.toISOString().slice(0, 10),
+        })),
+        points,
+        new Date(),
+        {
+          ...(horizonMonths !== undefined ? { horizonMonths } : {}),
+          ...(hourlyRateEur !== undefined
+            ? { hourlyRateCents: Math.round(hourlyRateEur * 100) }
+            : {}),
+        },
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              ...plan,
+              truncated: truncated || inputTruncated,
+              forecastUnavailable,
             }),
           },
         ],
