@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
+import { VERTICALS } from "@nodaq/shared";
 import { buildApp } from "../src/app.js";
 
 /*
@@ -69,6 +72,23 @@ afterAll(async () => {
 });
 
 describe("veille réglementaire — owner-only", () => {
+  it("la liste VERTICALS (TS) et le CHECK SQL de tenant_profiles restent synchrones", () => {
+    // Liste dupliquée base/TS : un vertical ajouté côté TS sans migration
+    // donnerait un 500 (échec fermé, mais cassé). Ce test fige la synchro.
+    const sql = readFileSync(
+      fileURLToPath(
+        new URL(
+          "../../../packages/db/prisma/migrations/20260730000000_tenant_profiles/migration.sql",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    );
+    const check = /tenant_profiles_vertical_check[\s\S]*?\(([^)]*)\)/.exec(sql)?.[1] ?? "";
+    const sqlValues = [...check.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+    expect(sqlValues).toEqual([...VERTICALS].sort());
+  });
+
   it("un membre n'accède à RIEN (profil, obligations) : 403 partout", async () => {
     for (const [method, url] of [
       ["GET", "/reglementaire"],

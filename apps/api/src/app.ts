@@ -2450,14 +2450,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // information générale, jamais un conseil juridique.
 
   app.get("/reglementaire/profil", { preHandler: ownerRoute }, async (request) => {
-    const profile = await withTenant(request.tenantId, (tx) =>
-      tx.tenantProfile.findFirst({
+    const { profile, activeStaff } = await withTenant(request.tenantId, async (tx) => ({
+      profile: await tx.tenantProfile.findFirst({
         select: { vertical: true, headcountOverride: true, updatedAt: true },
       }),
-    );
-    const activeStaff = await withTenant(request.tenantId, (tx) =>
-      tx.staffMember.count({ where: { active: true } }),
-    );
+      activeStaff: await tx.staffMember.count({ where: { active: true } }),
+    }));
     return {
       vertical: profile?.vertical ?? "autre",
       headcountOverride: profile?.headcountOverride ?? null,

@@ -468,29 +468,35 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       annotations: { readOnlyHint: true },
     },
     async () => {
-      const stored = await withTenant(tenantId, (tx) =>
-        tx.tenantProfile.findFirst({
+      // Effectif : déclaré (override) sinon dérivé de l'équipe (3.5) si elle
+      // est renseignée — un inconnu reste inconnu, jamais lu comme 0, et un
+      // dérivé reste une ESTIMATION (le moteur ne peut pas exclure dessus).
+      const { stored, activeStaff } = await withTenant(tenantId, async (tx) => ({
+        stored: await tx.tenantProfile.findFirst({
           select: { vertical: true, headcountOverride: true },
         }),
-      );
-      // Effectif : déclaré (override) sinon dérivé de l'équipe (3.5) si elle
-      // est renseignée — un inconnu reste inconnu, jamais lu comme 0.
-      const activeStaff = await withTenant(tenantId, (tx) =>
-        tx.staffMember.count({ where: { active: true } }),
-      );
+        activeStaff: await tx.staffMember.count({ where: { active: true } }),
+      }));
       const vertical: Vertical = (VERTICALS as readonly string[]).includes(
         stored?.vertical ?? "",
       )
         ? (stored?.vertical as Vertical)
         : "autre";
       const headcount = stored?.headcountOverride ?? (activeStaff > 0 ? activeStaff : null);
-      const headcountSource =
+      const headcountSource: "declare" | "equipe" | "inconnu" =
         stored?.headcountOverride != null
           ? "declare"
           : activeStaff > 0
             ? "equipe"
             : "inconnu";
-      const result = matchRegulatoryItems({ vertical, headcount }, new Date());
+      const result = matchRegulatoryItems(
+        {
+          vertical,
+          headcount,
+          ...(headcountSource !== "inconnu" ? { headcountSource } : {}),
+        },
+        new Date(),
+      );
       return {
         content: [
           {

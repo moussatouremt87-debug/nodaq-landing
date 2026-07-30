@@ -19,6 +19,12 @@ juridique** : le label est permanent, dans l'outil comme dans l'UI.
 - **Aucun flux externe en V1** : pas de scraping présenté comme du droit — la
   mise à jour passe par ce fichier, versionnée et sourcée. Flux
   Légifrance/JO + résumés `route()` = ticket futur.
+- **Méthode de vérification des sources** : à chaque bump de
+  `REGULATORY_WATCH_VERSION`, ouvrir manuellement CHAQUE URL et vérifier que
+  l'article cité correspond bien à l'obligation décrite (les identifiants
+  `LEGIARTI…` sont opaques : un id erroné pointerait ailleurs sans erreur).
+  Les URLs `/codes/article_lc/` ciblent la version consolidée courante.
+  Dernière vérification : 2026-07-30 (création du catalogue).
 
 ## Moteur pur d'applicabilité
 

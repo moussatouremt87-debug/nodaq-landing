@@ -435,6 +435,34 @@ describe("analyze_hourly_performance — performance horaire (3.6)", () => {
   });
 });
 
+describe("check_regulatory_watch — veille réglementaire (3.7)", () => {
+  it("lecture seule, profil honnête (effectif inconnu jamais lu comme 0), label permanent", async () => {
+    const client = await connectedClient();
+    const tools = await client.listTools();
+    const tool = tools.tools.find((t) => t.name === "check_regulatory_watch");
+    expect(tool).toBeDefined();
+    expect(tool?.annotations?.readOnlyHint).toBe(true);
+    expect(JSON.stringify(tool?.inputSchema ?? {})).not.toContain("tenantId");
+    expect(TOOL_POLICIES.check_regulatory_watch.requiresValidation).toBe(false);
+
+    const result = await client.callTool({ name: "check_regulatory_watch", arguments: {} });
+    expect(result.isError).toBeFalsy();
+    const parsed = JSON.parse((result.content as { text: string }[])[0]!.text) as {
+      version: string;
+      label: string;
+      profile: { vertical: string; headcount: number | null; headcountSource: string };
+      matches: { id: string; applies: string }[];
+    };
+    // Tenant sans profil ni équipe : vertical « autre », effectif inconnu —
+    // les obligations à seuil restent visibles « peut_etre », jamais tues.
+    expect(parsed.version).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(parsed.label).toContain("conseil juridique");
+    expect(parsed.profile).toMatchObject({ vertical: "autre", headcount: null, headcountSource: "inconnu" });
+    const cse = parsed.matches.find((m) => m.id === "cse");
+    expect(cse?.applies).toBe("peut_etre");
+  });
+});
+
 describe("analyze_customer_signals — signaux clients (3.4)", () => {
   it("lecture seule, tenant non injectable, comptes exacts et bornage signalé", async () => {
     const client = await connectedClient();

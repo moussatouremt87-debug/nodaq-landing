@@ -49,6 +49,35 @@ describe("matchRegulatoryItems", () => {
     expect(cse?.reason).toContain("effectif non renseigné");
   });
 
+  it("effectif ESTIMÉ depuis l'équipe : sous le seuil = « peut_etre », jamais une exclusion silencieuse", () => {
+    // 3 fiches actives seulement (saisie RH partielle) : CSE et OETH restent
+    // visibles « à confirmer » — l'estimation ne peut pas taire une obligation.
+    const estimated = matchRegulatoryItems(
+      { vertical: "services", headcount: 3, headcountSource: "equipe" },
+      NOW,
+    );
+    const cse = estimated.matches.find((m) => m.id === "cse");
+    expect(cse?.applies).toBe("peut_etre");
+    expect(cse?.reason).toContain("saisie RH possiblement partielle");
+    // Le même chiffre DÉCLARÉ par l'owner exclut réellement.
+    const declared = matchRegulatoryItems(
+      { vertical: "services", headcount: 3, headcountSource: "declare" },
+      NOW,
+    );
+    expect(declared.matches.some((m) => m.id === "cse")).toBe(false);
+    // Et la source du chiffre est TOUJOURS dite dans la raison.
+    const big = matchRegulatoryItems(
+      { vertical: "services", headcount: 20, headcountSource: "equipe" },
+      NOW,
+    );
+    expect(big.matches.find((m) => m.id === "cse")?.reason).toContain("estimé depuis l'équipe");
+  });
+
+  it("médiation de la consommation : tous verticals (le BTP chez les particuliers est concerné)", () => {
+    const btp = matchRegulatoryItems({ vertical: "industrie_btp", headcount: 5 }, NOW);
+    expect(btp.matches.some((m) => m.id === "mediation-consommation")).toBe(true);
+  });
+
   it("verticals : la décennale ne s'applique qu'au BTP, l'affichage des prix au retail", () => {
     const btp = matchRegulatoryItems({ vertical: "industrie_btp", headcount: 5 }, NOW);
     const services = matchRegulatoryItems({ vertical: "services", headcount: 5 }, NOW);

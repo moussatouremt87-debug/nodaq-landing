@@ -130,6 +130,16 @@ export default function ReglementairePage() {
           <p className="muted">Veille indisponible.</p>
         ) : (
           <>
+            <p className="muted">
+              Effectif utilisé : {watch.profile.headcount ?? "inconnu"}{" "}
+              {watch.profile.headcountSource === "declare"
+                ? "(déclaré)"
+                : watch.profile.headcountSource === "equipe"
+                  ? "(estimé depuis les fiches actives de la page Équipe — saisie possiblement partielle)"
+                  : "(non renseigné — obligations à seuil affichées « à confirmer »)"}{" "}
+              — l&apos;effectif légal se calcule en moyenne annuelle (art. L130-1 du code de la
+              sécurité sociale) : ce chiffre est une approximation.
+            </p>
             <ul className="device-list">
               {watch.matches.map((match) => (
                 <li key={match.id} className="device-row" title={match.reason}>

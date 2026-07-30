@@ -70,7 +70,9 @@ export const REGULATORY_ITEMS: readonly RegulatoryItem[] = [
     category: "rgpd",
     obligation:
       "Tenir un registre des traitements de données personnelles (clients, salariés, " +
-      "prospects) et le tenir à jour ; il est exigé lors de tout contrôle CNIL.",
+      "prospects) et le tenir à jour ; il est exigé lors de tout contrôle CNIL. La " +
+      "dérogation « moins de 250 salariés » (art. 30 §5) ne joue quasi jamais : elle " +
+      "tombe dès qu'un traitement n'est pas occasionnel (paie, fichier clients).",
     source: {
       label: "RGPD, art. 30",
       url: "https://www.cnil.fr/fr/RGPD-le-registre-des-activites-de-traitement",
@@ -186,13 +188,13 @@ export const REGULATORY_ITEMS: readonly RegulatoryItem[] = [
     title: "Médiateur de la consommation",
     category: "consommation",
     obligation:
-      "Tout professionnel vendant à des consommateurs doit adhérer à un dispositif de " +
-      "médiation de la consommation et en informer ses clients.",
+      "Tout professionnel vendant à des consommateurs (y compris travaux chez des " +
+      "particuliers) doit adhérer à un dispositif de médiation de la consommation et " +
+      "en informer ses clients. Les entreprises 100 % B2B ne sont pas concernées.",
     source: {
       label: "Code de la consommation, art. L612-1",
       url: "https://www.legifrance.gouv.fr/codes/article_lc/LEGIARTI000032224806",
     },
-    verticals: ["retail", "services"],
   },
 ] as const;
 
@@ -200,6 +202,12 @@ export interface ComplianceProfile {
   vertical: Vertical;
   /** Effective headcount — null when unknown (never assumed 0). */
   headcount: number | null;
+  /**
+   * Where the figure comes from: "declare" = owner-declared (trusted for
+   * exclusions), "equipe" = derived from active staff records — possibly
+   * PARTIAL input, so it can never silently exclude an obligation.
+   */
+  headcountSource?: "declare" | "equipe";
 }
 
 export interface RegulatoryMatch extends RegulatoryItem {
@@ -262,13 +270,24 @@ export function matchRegulatoryItems(
       ? `s'applique au vertical ${profile.vertical}`
       : "s'applique à toutes les entreprises";
     if (item.minHeadcount !== undefined) {
+      const sourceText =
+        profile.headcountSource === "equipe"
+          ? "effectif estimé depuis l'équipe"
+          : "effectif déclaré";
       if (profile.headcount === null) {
         applies = "peut_etre";
         conditionText = `seuil de ${item.minHeadcount} salariés — effectif non renseigné, applicabilité à confirmer`;
       } else if (profile.headcount >= item.minHeadcount) {
-        conditionText = `effectif ${profile.headcount} ≥ seuil de ${item.minHeadcount} salariés`;
+        conditionText = `${sourceText} ${profile.headcount} ≥ seuil de ${item.minHeadcount} salariés`;
+      } else if (profile.headcountSource === "equipe") {
+        // A staff-derived figure can be a PARTIAL entry (optional module):
+        // below-threshold NEVER silently excludes on an estimate.
+        applies = "peut_etre";
+        conditionText =
+          `effectif estimé depuis l'équipe (${profile.headcount} fiches actives) < seuil de ` +
+          `${item.minHeadcount} salariés — saisie RH possiblement partielle, applicabilité à confirmer`;
       } else {
-        continue; // below threshold: genuinely not applicable
+        continue; // declared figure below threshold: genuinely not applicable
       }
     }
 
