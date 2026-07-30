@@ -28,9 +28,11 @@ export const DATA_CATEGORIES = [
   "vie_professionnelle",
   "connexion",
   "localisation",
+  "image",
   "sante",
   "autre",
 ] as const;
+export type DataCategory = (typeof DATA_CATEGORIES)[number];
 
 export interface ProcessingTemplate {
   id: string;
@@ -55,15 +57,17 @@ export const PROCESSING_TEMPLATES: readonly ProcessingTemplate[] = [
   {
     id: "paie",
     name: "Paie et administration du personnel",
-    purpose: "Établir les bulletins de paie, gérer contrats, absences et déclarations sociales",
+    purpose:
+      "Établir les bulletins de paie, gérer contrats, absences (y compris arrêts de " +
+      "travail — données de santé, art. 9) et déclarations sociales",
     legalBasis: "obligation_legale",
-    dataCategories: ["identite", "contact", "financier", "vie_professionnelle"],
+    dataCategories: ["identite", "contact", "financier", "vie_professionnelle", "sante"],
     dataSubjects: ["salaries"],
     recipients: "Service RH, expert-comptable, URSSAF, caisses sociales",
     retention: "5 ans (double des bulletins, art. L3243-4 c. trav.) ; déclarations sociales 3 ans",
-    sensitiveData: false,
+    sensitiveData: true,
     source: {
-      label: "CNIL — registre simplifié, fiche Paie",
+      label: "CNIL — modèle de registre simplifié",
       url: "https://www.cnil.fr/fr/RGPD-le-registre-des-activites-de-traitement",
     },
   },
@@ -83,9 +87,12 @@ export const PROCESSING_TEMPLATES: readonly ProcessingTemplate[] = [
     },
   },
   {
-    id: "prospection",
-    name: "Prospection commerciale",
-    purpose: "Constituer et exploiter un fichier de prospects, envoyer des offres",
+    id: "prospection-b2b",
+    name: "Prospection B2B (courrier, téléphone, e-mail professionnel)",
+    purpose:
+      "Constituer et exploiter un fichier de prospects PROFESSIONNELS et leur adresser " +
+      "des offres en lien avec leur activité (l'e-mailing vers des particuliers relève " +
+      "du modèle « Prospection B2C », soumis au consentement)",
     legalBasis: "interet_legitime",
     dataCategories: ["identite", "contact"],
     dataSubjects: ["prospects"],
@@ -94,6 +101,23 @@ export const PROCESSING_TEMPLATES: readonly ProcessingTemplate[] = [
     sensitiveData: false,
     source: {
       label: "CNIL — prospection commerciale",
+      url: "https://www.cnil.fr/fr/la-prospection-commerciale-par-courrier-electronique",
+    },
+  },
+  {
+    id: "prospection-b2c",
+    name: "Prospection B2C par voie électronique",
+    purpose:
+      "Adresser des offres par e-mail ou SMS à des PARTICULIERS — opt-in préalable " +
+      "obligatoire (art. L34-5 CPCE), sauf clients existants pour des produits analogues",
+    legalBasis: "consentement",
+    dataCategories: ["identite", "contact"],
+    dataSubjects: ["prospects", "clients"],
+    recipients: "Service commercial",
+    retention: "3 ans après le dernier contact, retrait du consentement immédiat (CNIL)",
+    sensitiveData: false,
+    source: {
+      label: "CNIL — prospection commerciale par courrier électronique",
       url: "https://www.cnil.fr/fr/la-prospection-commerciale-par-courrier-electronique",
     },
   },
@@ -108,7 +132,7 @@ export const PROCESSING_TEMPLATES: readonly ProcessingTemplate[] = [
     retention: "Durée de la relation + prescriptions légales (5 ans, art. 2224 c. civ.)",
     sensitiveData: false,
     source: {
-      label: "CNIL — registre simplifié, fiche Clients",
+      label: "CNIL — modèle de registre simplifié",
       url: "https://www.cnil.fr/fr/RGPD-le-registre-des-activites-de-traitement",
     },
   },
@@ -123,7 +147,7 @@ export const PROCESSING_TEMPLATES: readonly ProcessingTemplate[] = [
     retention: "10 ans (pièces comptables, art. L123-22 c. com.)",
     sensitiveData: false,
     source: {
-      label: "CNIL — registre simplifié, fiche Fournisseurs",
+      label: "CNIL — modèle de registre simplifié",
       url: "https://www.cnil.fr/fr/RGPD-le-registre-des-activites-de-traitement",
     },
   },
@@ -147,7 +171,7 @@ export const PROCESSING_TEMPLATES: readonly ProcessingTemplate[] = [
     name: "Vidéosurveillance des locaux",
     purpose: "Sécuriser les locaux, prévenir les vols et intrusions",
     legalBasis: "interet_legitime",
-    dataCategories: ["identite"],
+    dataCategories: ["image"],
     dataSubjects: ["salaries", "visiteurs"],
     recipients: "Dirigeant, prestataire de sécurité, forces de l'ordre sur réquisition",
     retention: "1 mois maximum (recommandation CNIL)",
@@ -160,7 +184,9 @@ export const PROCESSING_TEMPLATES: readonly ProcessingTemplate[] = [
   {
     id: "site-web",
     name: "Site web et statistiques de fréquentation",
-    purpose: "Exploiter le site vitrine, mesurer l'audience, gérer les formulaires de contact",
+    purpose:
+      "Déposer des cookies et mesurer l'audience du site vitrine (les formulaires de " +
+      "contact relèvent de la prospection ou de la relation clients)",
     legalBasis: "consentement",
     dataCategories: ["connexion", "contact"],
     dataSubjects: ["prospects", "visiteurs"],

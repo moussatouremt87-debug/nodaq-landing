@@ -3,6 +3,9 @@ import type { FastifyInstance } from "fastify";
 import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { LEGAL_BASES } from "@nodaq/shared";
 import { buildApp } from "../src/app.js";
 
 /*
@@ -69,11 +72,28 @@ afterAll(async () => {
 });
 
 describe("assistant RGPD — owner-only", () => {
+  it("la liste LEGAL_BASES (TS) et le CHECK SQL de processing_activities restent synchrones", () => {
+    const sql = readFileSync(
+      fileURLToPath(
+        new URL(
+          "../../../packages/db/prisma/migrations/20260730120000_processing_activities/migration.sql",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    );
+    const check = /processing_activities_legal_basis_check[\s\S]*?\(([^)]*)\)/.exec(sql)?.[1] ?? "";
+    const sqlValues = [...check.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+    expect(sqlValues).toEqual([...LEGAL_BASES].sort());
+  });
+
   it("un membre n'accède à RIEN : 403 partout", async () => {
     for (const [method, url] of [
       ["GET", "/rgpd"],
       ["POST", "/rgpd"],
       ["POST", "/rgpd/modele/paie"],
+      ["PATCH", "/rgpd/00000000-0000-4000-8000-000000000000"],
+      ["DELETE", "/rgpd/00000000-0000-4000-8000-000000000000"],
     ] as const) {
       const res = await app.inject({
         method,
@@ -91,6 +111,7 @@ describe("assistant RGPD — owner-only", () => {
               },
             }
           : {}),
+        ...(method === "PATCH" ? { payload: { retention: "2 ans" } } : {}),
       });
       expect(res.statusCode).toBe(403);
     }

@@ -33,12 +33,15 @@ obligation au-delà des textes cités.
 
 ## Table `processing_activities` (RLS)
 
-Une ligne par traitement : finalité, base légale (CHECK en base), catégories
-de données et personnes (JSON), destinataires, conservation, drapeau
-sensible, `sourceTemplate` (traçabilité du modèle CNIL). Unicité
-`(tenantId, name)`. Policy `tenant_isolation` + test d'isolation avec preuve.
-**La table décrit des traitements, pas des personnes** : aucune PII dans ses
-lignes par construction.
+Une ligne par traitement : finalité, base légale (CHECK en base, synchro
+TS↔SQL figée par test), catégories de données (enum fermée `DATA_CATEGORIES`
+— « Santé » ne peut pas contourner la règle d'audit sur `sante`), personnes,
+destinataires, conservation, drapeau sensible, `sourceTemplate` (traçabilité
+du modèle CNIL). Unicité `(tenantId, name)` — doublon = 409 en création
+COMME en renommage. Policy `tenant_isolation` + test d'isolation avec preuve
++ assertion RLS activée/forcée. **La table décrit des traitements, pas des
+personnes** : par convention, ses champs libres (nom, finalité,
+destinataires) ne doivent pas recevoir de données personnelles.
 
 ## Outil, routes, UI — OWNER-ONLY
 
@@ -54,7 +57,14 @@ Le registre est un document de conformité stratégique : owner-only partout.
 
 ## Limites V1 (assumées)
 
+- **Champs art. 30 §1 non portés** : transferts hors UE, description des
+  mesures de sécurité, identité/coordonnées du responsable de traitement.
+  L'audit ne les vérifie pas et l'UI le DIT (« champs couverts par
+  l'audit ») — complétion = ticket futur.
 - Registre art. 30 uniquement : pas d'AIPD, pas de gestion des demandes
   d'exercice de droits, pas de notification de violation (tickets futurs).
+- La saisie libre et la correction d'un traitement passent par l'API
+  (`POST/PATCH /rgpd`) — l'UI V1 n'expose que les modèles CNIL et la
+  suppression (confirmée).
 - Q&A RGPD dans le chat via RAG sur corpus CNIL = V2 (`services/rag`).
 - Pas d'export PDF du registre (impression navigateur en attendant).

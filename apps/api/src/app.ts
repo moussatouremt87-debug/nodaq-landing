@@ -26,6 +26,7 @@ import {
   CreateNoteInput,
   estimateIsImpact,
   buildDepreciationPlan,
+  DATA_CATEGORIES,
   LEGAL_BASES,
   PROCESSING_TEMPLATES,
   renewalWall,
@@ -2535,14 +2536,19 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     updatedAt: true,
   } as const;
 
-  app.get("/rgpd", { preHandler: ownerRoute }, async (request, reply) => {
-    const activities = await withTenant(request.tenantId, (tx) =>
+  app.get("/rgpd", { preHandler: ownerRoute }, async (request) => {
+    const rows = await withTenant(request.tenantId, (tx) =>
       tx.processingActivity.findMany({
         select: ACTIVITY_SELECT,
         orderBy: { name: "asc" },
-        take: 500,
+        take: 501,
       }),
     );
+    const activitiesTruncated = rows.length > 500;
+    const activities = rows.slice(0, 500);
+    // Audit via le MÊME outil que l'agent ; s'il échoue, le registre reste
+    // servi avec `audit: null` — jamais un 503 qui masque des données saines.
+    let audit: unknown = null;
     let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
     try {
       toolset = await buildToolset({
@@ -2550,28 +2556,29 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         tenantId: request.tenantId,
         role: request.membershipRole,
       });
-      const audit = JSON.parse(await toolset.execute("check_rgpd_register", {})) as unknown;
-      return { activities, audit, templates: PROCESSING_TEMPLATES };
+      audit = JSON.parse(await toolset.execute("check_rgpd_register", {}));
     } catch (error) {
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },
         "rgpd audit unavailable",
       );
-      return reply.code(503).send({ error: "audit indisponible" });
     } finally {
       await toolset?.close().catch(() => undefined);
     }
+    return { activities, activitiesTruncated, audit, templates: PROCESSING_TEMPLATES };
   });
 
   const ActivityBody = z
     .object({
-      name: z.string().min(1).max(200),
-      purpose: z.string().min(1).max(1_000),
+      name: z.string().trim().min(1).max(200),
+      purpose: z.string().trim().min(1).max(1_000),
       legalBasis: z.enum(LEGAL_BASES),
-      dataCategories: z.array(z.string().min(1).max(50)).min(1).max(20),
-      dataSubjects: z.array(z.string().min(1).max(50)).min(1).max(20),
+      // Catégories fermées (DATA_CATEGORIES) : « santé » ou « Santé » ne
+      // peuvent pas contourner la règle d'audit sur le littéral `sante`.
+      dataCategories: z.array(z.enum(DATA_CATEGORIES)).min(1).max(20),
+      dataSubjects: z.array(z.string().trim().min(1).max(50)).min(1).max(20),
       recipients: z.string().max(500).optional(),
-      retention: z.string().min(1).max(500),
+      retention: z.string().trim().min(1).max(500),
       sensitiveData: z.boolean().default(false),
     })
     .strict();
@@ -2648,23 +2655,31 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       return reply.code(400).send({ error: "invalid payload" });
     }
     const data = parsed.data;
-    const updated = await withTenant(request.tenantId, (tx) =>
-      tx.processingActivity.updateMany({
-        where: { id: params.data.id },
-        data: {
-          ...(data.name !== undefined ? { name: data.name } : {}),
-          ...(data.purpose !== undefined ? { purpose: data.purpose } : {}),
-          ...(data.legalBasis !== undefined ? { legalBasis: data.legalBasis } : {}),
-          ...(data.dataCategories !== undefined ? { dataCategories: data.dataCategories } : {}),
-          ...(data.dataSubjects !== undefined ? { dataSubjects: data.dataSubjects } : {}),
-          ...(data.recipients !== undefined ? { recipients: data.recipients } : {}),
-          ...(data.retention !== undefined ? { retention: data.retention } : {}),
-          ...(data.sensitiveData !== undefined ? { sensitiveData: data.sensitiveData } : {}),
-        },
-      }),
-    );
-    if (updated.count === 0) return reply.code(404).send({ error: "unknown activity" });
-    return { updated: true };
+    try {
+      const updated = await withTenant(request.tenantId, (tx) =>
+        tx.processingActivity.updateMany({
+          where: { id: params.data.id },
+          data: {
+            ...(data.name !== undefined ? { name: data.name } : {}),
+            ...(data.purpose !== undefined ? { purpose: data.purpose } : {}),
+            ...(data.legalBasis !== undefined ? { legalBasis: data.legalBasis } : {}),
+            ...(data.dataCategories !== undefined ? { dataCategories: data.dataCategories } : {}),
+            ...(data.dataSubjects !== undefined ? { dataSubjects: data.dataSubjects } : {}),
+            ...(data.recipients !== undefined ? { recipients: data.recipients } : {}),
+            ...(data.retention !== undefined ? { retention: data.retention } : {}),
+            ...(data.sensitiveData !== undefined ? { sensitiveData: data.sensitiveData } : {}),
+          },
+        }),
+      );
+      if (updated.count === 0) return reply.code(404).send({ error: "unknown activity" });
+      return { updated: true };
+    } catch (error) {
+      // Renommage vers un nom déjà pris : même 409 que POST, jamais un 500 ORM.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return reply.code(409).send({ error: "traitement déjà enregistré" });
+      }
+      throw error;
+    }
   });
 
   app.delete("/rgpd/:id", { preHandler: ownerRoute }, async (request, reply) => {

@@ -715,6 +715,14 @@ describe("garde-fou préalable", () => {
     expect(rows[0]?.relforcerowsecurity).toBe(true);
   });
 
+  it("la RLS est activée ET forcée sur processing_activities", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'processing_activities'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
   it("la RLS est activée ET forcée sur tenant_profiles", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'tenant_profiles'

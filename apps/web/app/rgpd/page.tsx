@@ -58,6 +58,8 @@ export default function RgpdPage() {
   }
 
   async function remove(id: string): Promise<void> {
+    // Ligne d'un registre de conformité : suppression irréversible, confirmée.
+    if (!window.confirm("Supprimer ce traitement du registre ?")) return;
     setError(null);
     try {
       await deleteActivity(id);
@@ -92,37 +94,53 @@ export default function RgpdPage() {
   const inRegister = new Set(
     register.activities.map((activity) => activity.sourceTemplate).filter(Boolean),
   );
-  const alerts = register.audit.issues.filter((issue) => issue.severity === "alerte");
-  const warnings = register.audit.issues.filter((issue) => issue.severity === "attention");
+  const audit = register.audit;
+  const alerts = audit?.issues.filter((issue) => issue.severity === "alerte") ?? [];
+  const warnings = audit?.issues.filter((issue) => issue.severity === "attention") ?? [];
 
   return (
     <div className="page">
       <section className="card">
         <h2>Audit du registre</h2>
-        {register.audit.issues.length === 0 ? (
-          <p>
-            ✓ Aucune alerte sur les {register.audit.activityCount} traitement(s) enregistrés.
-          </p>
+        {audit === null ? (
+          <p className="warn">Audit momentanément indisponible — le registre reste consultable.</p>
         ) : (
-          <ul className="device-list">
-            {[...alerts, ...warnings].map((issue, index) => (
-              <li key={index} className="device-row">
-                <div>
-                  {issue.severity === "alerte" ? (
-                    <strong style={{ color: "#dc2626" }}>Alerte</strong>
-                  ) : (
-                    <strong>Attention</strong>
-                  )}{" "}
-                  {issue.activityName && <strong>{issue.activityName} — </strong>}
-                  <span>{issue.reason}</span>
-                </div>
-              </li>
-            ))}
-          </ul>
+          <>
+            {audit.issues.length === 0 ? (
+              <p>
+                {/* Honnêteté : l'audit ne couvre pas TOUT l'art. 30 §1 (cf. doc). */}✓ Aucune
+                alerte sur les champs couverts par l&apos;audit ({audit.activityCount}{" "}
+                traitement(s)) — transferts hors UE, mesures de sécurité et responsable de
+                traitement ne sont pas encore portés par le registre.
+              </p>
+            ) : (
+              <ul className="device-list">
+                {[...alerts, ...warnings].map((issue, index) => (
+                  <li key={index} className="device-row">
+                    <div>
+                      {issue.severity === "alerte" ? (
+                        <strong style={{ color: "#dc2626" }}>Alerte</strong>
+                      ) : (
+                        <strong>Attention</strong>
+                      )}{" "}
+                      {issue.activityName && <strong>{issue.activityName} — </strong>}
+                      <span>{issue.reason}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {(audit.truncated || register.activitiesTruncated) && (
+              <p className="warn">
+                Lecture partielle (plus de 500 traitements) — audit et liste calculés sur les
+                500 premiers par ordre alphabétique.
+              </p>
+            )}
+            <p className="warn">
+              {audit.label} (catalogue du {audit.version})
+            </p>
+          </>
         )}
-        <p className="warn">
-          {register.audit.label} (catalogue du {register.audit.version})
-        </p>
       </section>
 
       <section className="card">
