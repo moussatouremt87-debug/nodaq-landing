@@ -1,5 +1,6 @@
 import { PennylaneClient } from "./pennylane.js";
 import { QontoClient } from "./qonto.js";
+import { SilaeClient } from "./silae.js";
 
 /*
  * Mode démo (ticket seed démo) : quand le connecteur d'un tenant est en statut
@@ -249,6 +250,101 @@ export class DemoPennylaneClient extends PennylaneClient {
         { id: "cus-4", name: "M. Bernard", emails: ["bernard@exemple-client.example"] },
       ],
       next_cursor: null,
+    };
+  }
+}
+
+/**
+ * Salariés démo (RH/paie, ticket 3.10) : 4 électriciens à 35 h/semaine,
+ * cohérents avec « Élec Provence » (6 salariés dans les fixtures bancaires —
+ * on n'en détaille ici que 4, l'effectif de paie n'a pas à matcher au
+ * salarié près) et avec les conventions du planning RH (3.5 : capacité =
+ * heures hebdo × 4,348).
+ */
+export const DEMO_SILAE_EMPLOYEES = [
+  { id: "emp-1", first_name: "Karim", last_name: "Haddad", weekly_hours: 35, active: true },
+  { id: "emp-2", first_name: "Julien", last_name: "Moreau", weekly_hours: 35, active: true },
+  { id: "emp-3", first_name: "Sofiane", last_name: "Belkacem", weekly_hours: 35, active: true },
+  { id: "emp-4", first_name: "Nordine", last_name: "Fassi", weekly_hours: 35, active: true },
+] as const;
+
+function ymd(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Absences démo, calculées PAR RAPPORT au mois courant (jamais des dates en
+ * dur — le kit reste plausible quel que soit le moment de la démo) :
+ * - un arrêt maladie court, en milieu de mois courant ;
+ * - des congés payés À CHEVAL sur le mois prochain (dernier jours du mois
+ *   courant -> premiers jours du mois suivant), pour exercer un planning RH
+ *   qui doit gérer une absence chevauchant deux mois.
+ */
+export interface DemoSilaeAbsence {
+  id: string;
+  employee_id: string;
+  type: string;
+  start_date: string;
+  end_date: string;
+}
+
+export function demoSilaeAbsences(now: Date): DemoSilaeAbsence[] {
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth();
+  const lastDayOfMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return [
+    {
+      id: "abs-1",
+      employee_id: "emp-3",
+      type: "maladie",
+      start_date: ymd(new Date(Date.UTC(year, month, 10))),
+      end_date: ymd(new Date(Date.UTC(year, month, 11))),
+    },
+    {
+      id: "abs-2",
+      employee_id: "emp-2",
+      type: "conges_payes",
+      // À cheval : les 2 derniers jours du mois courant + les 4 premiers du
+      // mois suivant (Date.UTC normalise l'overflow de mois automatiquement).
+      start_date: ymd(new Date(Date.UTC(year, month, lastDayOfMonth - 1))),
+      end_date: ymd(new Date(Date.UTC(year, month + 1, 4))),
+    },
+  ];
+}
+
+/** Client Silae de démonstration (RH/paie, 3.10) — données fictives, zéro réseau, zéro secret. */
+export class DemoSilaeClient extends SilaeClient {
+  constructor(private readonly clock: () => Date = () => new Date()) {
+    super({ apiKey: "demo-silae-key", dossierId: "demo-dossier" });
+  }
+
+  override async listEmployees({ limit = 25, cursor }: { limit?: number; cursor?: string } = {}) {
+    const offset = cursor ? Math.max(0, Number.parseInt(cursor, 10) || 0) : 0;
+    const page = DEMO_SILAE_EMPLOYEES.slice(offset, offset + limit);
+    const hasMore = offset + limit < DEMO_SILAE_EMPLOYEES.length;
+    return {
+      items: page.map((employee) => ({ ...employee })),
+      next_cursor: hasMore ? String(offset + limit) : null,
+    };
+  }
+
+  override async listAbsences({
+    from,
+    to,
+    limit = 25,
+    cursor,
+  }: { from?: string; to?: string; limit?: number; cursor?: string } = {}) {
+    const all = demoSilaeAbsences(this.clock()).filter((absence) => {
+      if (from && absence.end_date < from) return false;
+      if (to && absence.start_date > to) return false;
+      return true;
+    });
+    const offset = cursor ? Math.max(0, Number.parseInt(cursor, 10) || 0) : 0;
+    const page = all.slice(offset, offset + limit);
+    const hasMore = offset + limit < all.length;
+    return {
+      items: page,
+      next_cursor: hasMore ? String(offset + limit) : null,
     };
   }
 }

@@ -3,11 +3,12 @@ import { withTenant } from "@nodaq/db";
 import { defaultProvider } from "@nodaq/secrets";
 import type { SecretProvider } from "@nodaq/secrets";
 import { BridgeClient, BridgeCredentials } from "./bridge.js";
-import { DemoPennylaneClient, DemoQontoClient } from "./demo.js";
+import { DemoPennylaneClient, DemoQontoClient, DemoSilaeClient } from "./demo.js";
 import { FEC_CONNECTOR_STATUS, FEC_CONNECTOR_TYPE, FecPennylaneClient } from "./fec.js";
 import { PennylaneClient, PennylaneCredentials } from "./pennylane.js";
 import { QontoClient, QontoCredentials } from "./qonto.js";
 import type { QontoTransactionsOptions } from "./qonto.js";
+import { SilaeClient, SilaeCredentials } from "./silae.js";
 
 /*
  * Per-tenant connector registry (blueprint §5.6). The `connectors` table stores
@@ -16,7 +17,7 @@ import type { QontoTransactionsOptions } from "./qonto.js";
  * at call time, in memory only. Nothing from the secret value is ever logged.
  */
 
-export const ConnectorType = z.enum(["pennylane", "qonto", "bridge"]);
+export const ConnectorType = z.enum(["pennylane", "qonto", "bridge", "silae"]);
 export type ConnectorType = z.infer<typeof ConnectorType>;
 
 export class ConnectorNotConfiguredError extends Error {
@@ -45,6 +46,7 @@ export interface RegistryOptions {
   pennylaneBaseUrl?: string;
   qontoBaseUrl?: string;
   bridgeBaseUrl?: string;
+  silaeBaseUrl?: string;
 }
 
 /**
@@ -138,6 +140,18 @@ export async function getQontoClient(
     await resolveCredentials(tenantId, "qonto", options, row.credentialsRef),
   );
   return new QontoClient(credentials, options.qontoBaseUrl);
+}
+
+export async function getSilaeClient(
+  tenantId: string,
+  options: RegistryOptions = {},
+): Promise<SilaeClient> {
+  const row = await loadConnectorRow(tenantId, "silae");
+  if (row.status === DEMO_CONNECTOR_STATUS) return new DemoSilaeClient();
+  const credentials = SilaeCredentials.parse(
+    await resolveCredentials(tenantId, "silae", options, row.credentialsRef),
+  );
+  return new SilaeClient(credentials, options.silaeBaseUrl);
 }
 
 /** Sous-ensemble commun consommé par l'agent Compta — agnostique de la banque. */

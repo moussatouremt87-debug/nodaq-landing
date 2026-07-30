@@ -16,7 +16,10 @@ import {
   DEMO_LATE_TOTAL_CENTS,
   DEMO_OBSERVED_DAYS,
   DEMO_QONTO_BALANCE_CENTS,
+  DEMO_SILAE_EMPLOYEES,
+  DemoSilaeClient,
   demoQontoTransactions,
+  demoSilaeAbsences,
 } from "../src/demo.js";
 
 /**
@@ -94,6 +97,65 @@ describe("fixtures démo (chiffres du kit, verrouillés)", () => {
     expect(txs.length).toBeLessThanOrEqual(100);
     expect(Math.ceil(Math.max(...txs.map((t) => t.daysAgo)))).toBe(DEMO_OBSERVED_DAYS);
     for (const t of txs) expect(t.amountCents).toBeGreaterThan(0);
+  });
+
+  it("Silae (3.10) : 4 électriciens à 35 h/semaine", () => {
+    expect(DEMO_SILAE_EMPLOYEES).toHaveLength(4);
+    for (const employee of DEMO_SILAE_EMPLOYEES) {
+      expect(employee.weekly_hours).toBe(35);
+      expect(employee.active).toBe(true);
+    }
+  });
+
+  it("Silae (3.10) : 2 absences, l'une à cheval sur le mois prochain", () => {
+    const now = new Date("2026-07-30T12:00:00Z");
+    const absences = demoSilaeAbsences(now);
+    expect(absences).toHaveLength(2);
+    // Le premier arrêt reste entièrement DANS le mois courant.
+    const withinMonth = absences.find((a) => a.type === "maladie");
+    expect(withinMonth?.start_date.slice(0, 7)).toBe("2026-07");
+    expect(withinMonth?.end_date.slice(0, 7)).toBe("2026-07");
+    // Les congés payés démarrent en juillet et finissent en août : à CHEVAL.
+    const crossing = absences.find((a) => a.type === "conges_payes");
+    expect(crossing?.start_date.slice(0, 7)).toBe("2026-07");
+    expect(crossing?.end_date.slice(0, 7)).toBe("2026-08");
+    expect(crossing?.start_date < crossing!.end_date).toBe(true);
+    // Toujours vrai en décembre : Date.UTC normalise le débordement d'année.
+    const december = demoSilaeAbsences(new Date("2026-12-15T00:00:00Z"));
+    const crossingDecember = december.find((a) => a.type === "conges_payes");
+    expect(crossingDecember?.start_date.slice(0, 7)).toBe("2026-12");
+    expect(crossingDecember?.end_date.slice(0, 7)).toBe("2027-01");
+  });
+});
+
+describe("DemoSilaeClient", () => {
+  it("sert les 4 salariés fixtures, zéro réseau, zéro secret", async () => {
+    const client = new DemoSilaeClient();
+    const { items, next_cursor } = await client.listEmployees();
+    expect(items).toHaveLength(4);
+    expect(next_cursor).toBeNull();
+    expect(items.every((e) => e.weekly_hours === 35 && e.active)).toBe(true);
+  });
+
+  it("pagine par curseur (offset)", async () => {
+    const client = new DemoSilaeClient();
+    const page1 = await client.listEmployees({ limit: 2 });
+    expect(page1.items).toHaveLength(2);
+    expect(page1.next_cursor).toBe("2");
+    const page2 = await client.listEmployees({ limit: 2, cursor: page1.next_cursor ?? undefined });
+    expect(page2.items).toHaveLength(2);
+    expect(page2.next_cursor).toBeNull();
+  });
+
+  it("sert les absences fixtures et filtre par from/to", async () => {
+    const clock = () => new Date("2026-07-30T12:00:00Z");
+    const client = new DemoSilaeClient(clock);
+    const { items } = await client.listAbsences();
+    expect(items).toHaveLength(2);
+    // Filtre resserré au mois d'août seul : ne garde que les congés (fin en août).
+    const augustOnly = await client.listAbsences({ from: "2026-08-01", to: "2026-08-31" });
+    expect(augustOnly.items).toHaveLength(1);
+    expect(augustOnly.items[0]?.type).toBe("conges_payes");
   });
 });
 

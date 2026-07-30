@@ -14,6 +14,7 @@ import {
   getBankClient,
   getPennylaneClient,
   getQontoClient,
+  getSilaeClient,
 } from "../src/registry.js";
 import { BridgeClient } from "../src/bridge.js";
 import { DemoQontoClient } from "../src/demo.js";
@@ -27,6 +28,7 @@ import { createConnectorsMcpServer } from "../src/server.js";
 const FULL_IBAN = "FR7616798000010000012345678";
 
 const recordedSaas: string[] = [];
+let bigEmployeesPage = false;
 const fakeSaas = createServer((req, res) => {
   recordedSaas.push(req.url ?? "");
   res.writeHead(200, { "content-type": "application/json" });
@@ -49,6 +51,41 @@ const fakeSaas = createServer((req, res) => {
       JSON.stringify({
         transactions: [{ transaction_id: "tx-1", amount_cents: -100, side: "debit" }],
         meta: { current_page: 1 },
+      }),
+    );
+  } else if (path.startsWith("/employees")) {
+    if (bigEmployeesPage) {
+      // Un seul aller-retour renvoie déjà PLUS que la borne (501) : suffit à
+      // exercer `truncated` sans devoir simuler des centaines de pages.
+      res.end(
+        JSON.stringify({
+          items: Array.from({ length: 501 }, (_, i) => ({ id: `emp-${i}` })),
+          next_cursor: null,
+        }),
+      );
+      return;
+    }
+    res.end(
+      JSON.stringify({
+        items: [
+          { id: "emp-1", first_name: "Karim", last_name: "Haddad", weekly_hours: 35, active: true },
+        ],
+        next_cursor: null,
+      }),
+    );
+  } else if (path.startsWith("/absences")) {
+    res.end(
+      JSON.stringify({
+        items: [
+          {
+            id: "abs-1",
+            employee_id: "emp-1",
+            type: "maladie",
+            start_date: "2026-07-10",
+            end_date: "2026-07-11",
+          },
+        ],
+        next_cursor: null,
       }),
     );
   } else {
@@ -89,6 +126,10 @@ beforeAll(async () => {
     organizationSlug: "org-a",
     secretKey: "sk-a",
   });
+  vaultEntries[connectorSecretName(tenantA, "silae")] = JSON.stringify({
+    apiKey: "silae-api-key-1234",
+    dossierId: "dossier-a",
+  });
 
   await withTenant(tenantA, (tx) =>
     tx.connector.createMany({
@@ -99,6 +140,7 @@ beforeAll(async () => {
           credentialsRef: connectorSecretName(tenantA, "pennylane"),
         },
         { tenantId: tenantA, type: "qonto", credentialsRef: connectorSecretName(tenantA, "qonto") },
+        { tenantId: tenantA, type: "silae", credentialsRef: connectorSecretName(tenantA, "silae") },
       ],
     }),
   );
@@ -116,6 +158,7 @@ function connectedClient() {
     secretProvider: vault,
     pennylaneBaseUrl: baseUrl,
     qontoBaseUrl: baseUrl,
+    silaeBaseUrl: baseUrl,
   });
   const client = new Client({ name: "test-client", version: "0.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -129,7 +172,7 @@ function textOf(result: { content?: unknown }): string {
 }
 
 describe("MCP server (per-tenant, read-only)", () => {
-  it("exposes the 4 read-only tools", async () => {
+  it("exposes the 6 read-only tools", async () => {
     const client = await connectedClient();
     const tools = await client.listTools();
     const names = tools.tools.map((t) => t.name).sort();
@@ -138,9 +181,68 @@ describe("MCP server (per-tenant, read-only)", () => {
       "pennylane_get_invoices",
       "qonto_get_bank_transactions",
       "qonto_get_organization",
+      "silae_get_absences",
+      "silae_get_employees",
     ]);
     for (const tool of tools.tools) {
       expect(tool.annotations?.readOnlyHint).toBe(true);
+    }
+  });
+
+  it("silae_get_employees goes through registry + vault + fake API", async () => {
+    const client = await connectedClient();
+    const result = await client.callTool({ name: "silae_get_employees", arguments: {} });
+    const parsed = JSON.parse(textOf(result)) as {
+      employees: { id: string; name: string | null; weeklyHours: number | null; active: boolean | null }[];
+      truncated: boolean;
+    };
+    expect(parsed.employees).toEqual([
+      { id: "emp-1", name: "Karim Haddad", weeklyHours: 35, active: true },
+    ]);
+    expect(parsed.truncated).toBe(false);
+  });
+
+  it("silae_get_absences validates from/to (YYYY-MM-DD) and returns the mapped shape", async () => {
+    const client = await connectedClient();
+    const result = await client.callTool({
+      name: "silae_get_absences",
+      arguments: { from: "2026-07-01", to: "2026-07-31" },
+    });
+    const parsed = JSON.parse(textOf(result)) as {
+      absences: { id: string; employeeId: string; type: string | null; startDate: string; endDate: string }[];
+      truncated: boolean;
+    };
+    expect(parsed.absences).toEqual([
+      {
+        id: "abs-1",
+        employeeId: "emp-1",
+        type: "maladie",
+        startDate: "2026-07-10",
+        endDate: "2026-07-11",
+      },
+    ]);
+    expect(parsed.truncated).toBe(false);
+
+    const rejected = await client
+      .callTool({ name: "silae_get_absences", arguments: { from: "30-07-2026" } })
+      .then(
+        (r) => r,
+        (e: Error) => e,
+      );
+    const isError = rejected instanceof Error || (rejected as { isError?: boolean }).isError === true;
+    expect(isError).toBe(true);
+  });
+
+  it("silae_get_employees signals `truncated` when the bound (500) is exceeded", async () => {
+    bigEmployeesPage = true;
+    try {
+      const client = await connectedClient();
+      const result = await client.callTool({ name: "silae_get_employees", arguments: {} });
+      const parsed = JSON.parse(textOf(result)) as { employees: unknown[]; truncated: boolean };
+      expect(parsed.employees).toHaveLength(500);
+      expect(parsed.truncated).toBe(true);
+    } finally {
+      bigEmployeesPage = false;
     }
   });
 
@@ -195,6 +297,16 @@ describe("registry — tenant isolation & failure modes", () => {
     await expect(
       getPennylaneClient(tenantB, { secretProvider: vault, pennylaneBaseUrl: baseUrl }),
     ).rejects.toThrow(ConnectorNotConfiguredError);
+  });
+
+  it("silae : tenant A resolves through vault + fake API, tenant B (unconfigured) is refused", async () => {
+    const silae = await getSilaeClient(tenantA, { secretProvider: vault, silaeBaseUrl: baseUrl });
+    const { items } = await silae.listEmployees();
+    expect(items[0]).toMatchObject({ id: "emp-1", first_name: "Karim" });
+
+    await expect(
+      getSilaeClient(tenantB, { secretProvider: vault, silaeBaseUrl: baseUrl }),
+    ).rejects.toBeInstanceOf(ConnectorNotConfiguredError);
   });
 
   it("a credentials ref OUTSIDE the tenant namespace is refused BEFORE any vault read", async () => {

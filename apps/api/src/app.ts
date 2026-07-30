@@ -14,8 +14,11 @@ import {
   FEC_CONNECTOR_STATUS,
   FEC_CONNECTOR_TYPE,
   getBankClient,
+  getSilaeClient,
   PennylaneClient,
   QontoClient,
+  SilaeClient,
+  SilaeCredentials,
 } from "@nodaq/mcp-connectors";
 import type { BankClient } from "@nodaq/mcp-connectors";
 import { defaultWritableProvider } from "@nodaq/secrets";
@@ -516,6 +519,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         userUuid: z.string().min(1).max(100),
       })
       .strict(),
+    // SIRH/paie (3.10) : accès via middleware partenaire Silae.
+    silae: SilaeCredentials,
   } as const;
 
   /**
@@ -540,6 +545,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         const client = new BridgeClient(
           ConnectorCredentials.bridge.parse(credentials),
           agentContext.bridgeBaseUrl,
+        );
+        await client.testConnection();
+      } else if (type === "silae") {
+        const client = new SilaeClient(
+          SilaeCredentials.parse(credentials),
+          agentContext.silaeBaseUrl,
         );
         await client.testConnection();
       } else {
@@ -2515,6 +2526,195 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       return reply.code(503).send({ error: "veille indisponible" });
     } finally {
       await toolset?.close().catch(() => undefined);
+    }
+  });
+
+  // --- Sync Silae (3.10) — alimente équipe + absences depuis le SIRH ------
+  // Déclenchée par l'HUMAIN (bouton page Équipe, précédent FEC 2.14) ;
+  // idempotente : salariés rapprochés par externalRef puis par nom, absences
+  // dédupliquées — re-synchroniser ne duplique jamais, n'écrase jamais un
+  // conflit en silence. Salaires/bulletins JAMAIS lus (minimisation source).
+
+  const SILAE_EMPLOYEE_MAX = 500;
+  const SILAE_ABSENCE_MAX = 2_000;
+  const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+  function mapAbsenceType(raw: string | null | undefined): string {
+    const value = (raw ?? "").toLowerCase();
+    if (/malad/.test(value)) return "maladie";
+    if (/form/.test(value)) return "formation";
+    if (/cong|cp|rtt|vacan/.test(value)) return "conges";
+    return "autre";
+  }
+
+  async function collectPages<T>(
+    fetchPage: (
+      cursor?: string,
+    ) => Promise<{ items: T[]; next_cursor?: string | null | undefined }>,
+    max: number,
+  ): Promise<{ items: T[]; truncated: boolean }> {
+    const items: T[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 12; page++) {
+      const { items: pageItems, next_cursor } = await fetchPage(cursor);
+      items.push(...pageItems);
+      if (items.length > max) return { items: items.slice(0, max), truncated: true };
+      if (!next_cursor) return { items, truncated: false };
+      cursor = next_cursor;
+    }
+    return { items, truncated: true };
+  }
+
+  app.post("/connectors/silae/sync", { preHandler: ownerRoute }, async (request, reply) => {
+    let silae;
+    try {
+      silae = await getSilaeClient(request.tenantId, agentContext);
+    } catch (error) {
+      if (error instanceof ConnectorNotConfiguredError) {
+        return reply.code(409).send({ error: "connecteur silae non configuré" });
+      }
+      throw error;
+    }
+    try {
+      const employees = await collectPages(
+        (cursor) => silae.listEmployees({ limit: 100, ...(cursor ? { cursor } : {}) }),
+        SILAE_EMPLOYEE_MAX,
+      );
+      // Fenêtre d'absences bornée : 3 mois en arrière (perf horaire 3.6)
+      // jusqu'à 12 mois en avant (plannings 3.5).
+      const now = new Date();
+      const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 3, 1))
+        .toISOString()
+        .slice(0, 10);
+      const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 13, 0))
+        .toISOString()
+        .slice(0, 10);
+      const absences = await collectPages(
+        (cursor) => silae.listAbsences({ from, to, limit: 200, ...(cursor ? { cursor } : {}) }),
+        SILAE_ABSENCE_MAX,
+      );
+
+      const result = await withTenant(request.tenantId, async (tx) => {
+        const counts = {
+          employeesCreated: 0,
+          employeesUpdated: 0,
+          employeesSkipped: 0,
+          absencesCreated: 0,
+          absencesSkipped: 0,
+        };
+        const staffIdByRef = new Map<string, string>();
+        for (const employee of employees.items) {
+          const name = `${employee.first_name ?? ""} ${employee.last_name ?? ""}`
+            .trim()
+            .slice(0, 200);
+          if (!name || !employee.id) {
+            counts.employeesSkipped += 1;
+            continue;
+          }
+          const weeklyHours = Math.min(
+            80,
+            Math.max(0, Math.round(employee.weekly_hours ?? 35)),
+          );
+          const active = employee.active ?? true;
+          const byRef = await tx.staffMember.findFirst({
+            where: { externalRef: employee.id },
+            select: { id: true, name: true },
+          });
+          if (byRef) {
+            // Renommage seulement si le nouveau nom est libre — jamais un
+            // conflit d'unicité silencieux au milieu de la transaction.
+            const nameFree =
+              byRef.name === name ||
+              (await tx.staffMember.findFirst({
+                where: { name, id: { not: byRef.id } },
+                select: { id: true },
+              })) === null;
+            await tx.staffMember.update({
+              where: { id: byRef.id },
+              data: { weeklyHours, active, ...(nameFree ? { name } : {}) },
+            });
+            counts.employeesUpdated += 1;
+            staffIdByRef.set(employee.id, byRef.id);
+            continue;
+          }
+          const byName = await tx.staffMember.findFirst({
+            where: { name },
+            select: { id: true, externalRef: true },
+          });
+          if (byName && byName.externalRef === null) {
+            // Fiche saisie à la main : adoptée par la sync (externalRef posé).
+            await tx.staffMember.update({
+              where: { id: byName.id },
+              data: { externalRef: employee.id, weeklyHours, active },
+            });
+            counts.employeesUpdated += 1;
+            staffIdByRef.set(employee.id, byName.id);
+          } else if (byName) {
+            // Même nom, autre id Silae : conflit compté, jamais écrasé.
+            counts.employeesSkipped += 1;
+          } else {
+            const created = await tx.staffMember.create({
+              data: {
+                tenantId: request.tenantId,
+                name,
+                weeklyHours,
+                active,
+                externalRef: employee.id,
+              },
+              select: { id: true },
+            });
+            counts.employeesCreated += 1;
+            staffIdByRef.set(employee.id, created.id);
+          }
+        }
+
+        for (const absence of absences.items) {
+          const staffId = staffIdByRef.get(absence.employee_id);
+          const startOk = ISO_DAY.test(absence.start_date);
+          const endOk = ISO_DAY.test(absence.end_date);
+          if (!staffId || !startOk || !endOk) {
+            counts.absencesSkipped += 1;
+            continue;
+          }
+          const startDate = new Date(`${absence.start_date}T00:00:00Z`);
+          const endDate = new Date(`${absence.end_date}T00:00:00Z`);
+          if (
+            Number.isNaN(startDate.getTime()) ||
+            Number.isNaN(endDate.getTime()) ||
+            endDate < startDate ||
+            endDate.getTime() - startDate.getTime() > 366 * 86_400_000
+          ) {
+            counts.absencesSkipped += 1;
+            continue;
+          }
+          const type = mapAbsenceType(absence.type);
+          const existing = await tx.staffAbsence.findFirst({
+            where: { staffId, type, startDate, endDate },
+            select: { id: true },
+          });
+          if (existing) {
+            counts.absencesSkipped += 1;
+            continue;
+          }
+          await tx.staffAbsence.create({
+            data: { tenantId: request.tenantId, staffId, type, startDate, endDate },
+          });
+          counts.absencesCreated += 1;
+        }
+        return counts;
+      });
+
+      return {
+        ...result,
+        truncated: employees.truncated || absences.truncated,
+      };
+    } catch (error) {
+      // Jamais un détail fournisseur ni un nom de salarié dans la réponse.
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "silae sync failed",
+      );
+      return reply.code(503).send({ error: "synchronisation indisponible" });
     }
   });
 

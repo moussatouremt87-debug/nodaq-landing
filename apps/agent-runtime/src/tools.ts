@@ -50,6 +50,9 @@ export const OWNER_ONLY_TOOLS = new Set([
   "pennylane_get_invoices",
   "qonto_get_organization",
   "qonto_get_bank_transactions",
+  // SIRH Silae : noms de salariés (PII RH), même statut que plan_staffing (3.10).
+  "silae_get_employees",
+  "silae_get_absences",
   // Valorisation du stock = donnée financière agrégée (3.3).
   "simulate_material_prices",
 ]);
