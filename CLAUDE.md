@@ -70,6 +70,12 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > charge fabriquée, label estimation permanent) ; tables `staff_members` (nom =
 > PII)/`staff_absences` RLS ; OWNER-ONLY de bout en bout (routes `/rh/*`, outil
 > `plan_staffing`, page) ; solveur + connecteurs RH = V2 (`docs/plannings-rh.md`).
+> **Performance horaire (3.6)** : modèle pur `hourlyPerformance.ts` (CA mensuel
+> observé ÷ heures estimées des contrats − absences, mêmes conventions 3.1/3.5,
+> verdicts vs objectif ±10 %, label « pas d'un pointage » PERMANENT) ; outil
+> `analyze_hourly_performance` OWNER-ONLY, facturier absent = zéro mois calculé
+> (`revenueUnavailable`), route `GET /rh/performance` + carte page RH
+> (`docs/performance-horaire.md`).
 > **Support (2.18)** : schéma Postgres `ops` (tables `support_tickets`/`support_issues`)
 > hors RLS métier MAIS sous RLS gated `app.ops_operator` — accès UNIQUEMENT via
 > `withOps()` + routes OPERATOR (allowlist `OPS_OPERATOR_USER_IDS`, 404 sinon) ;

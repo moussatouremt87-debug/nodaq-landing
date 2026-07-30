@@ -73,6 +73,7 @@ describe("plannings RH — owner-only", () => {
     for (const [method, url] of [
       ["GET", "/rh"],
       ["GET", "/rh/plan"],
+      ["GET", "/rh/performance"],
       ["POST", "/rh/staff"],
     ] as const) {
       const res = await app.inject({
@@ -138,5 +139,32 @@ describe("plannings RH — owner-only", () => {
     // 35 h x 4,348 = 152 h ; pas de connecteur facturier -> « inconnu »,
     // jamais une charge fabriquée.
     expect(planBody.months[0]).toMatchObject({ capacityHours: 152, verdict: "inconnu" });
+
+    // Performance horaire (3.6) : sans facturier, AUCUN mois calculé et le
+    // drapeau le dit — jamais un taux fabriqué sur un CA inconnu.
+    const perf = await app.inject({
+      method: "GET",
+      url: "/rh/performance",
+      headers: { cookie: ownerCookie },
+    });
+    expect(perf.statusCode).toBe(200);
+    const perfBody = perf.json() as {
+      months: unknown[];
+      revenueUnavailable: boolean;
+      averageRateCents: number | null;
+      label: string;
+    };
+    expect(perfBody.revenueUnavailable).toBe(true);
+    expect(perfBody.months).toEqual([]);
+    expect(perfBody.averageRateCents).toBeNull();
+    expect(perfBody.label).toContain("estimation");
+
+    // Borne de la fenêtre : query invalide = 400 net.
+    const bad = await app.inject({
+      method: "GET",
+      url: "/rh/performance?monthsBack=99",
+      headers: { cookie: ownerCookie },
+    });
+    expect(bad.statusCode).toBe(400);
   });
 });

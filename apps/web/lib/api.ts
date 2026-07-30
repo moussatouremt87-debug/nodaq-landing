@@ -751,6 +751,34 @@ export const getStaffingPlan = (hourlyRateEur?: number): Promise<StaffingPlan> =
     `/rh/plan${hourlyRateEur ? `?hourlyRateEur=${encodeURIComponent(hourlyRateEur)}` : ""}`,
   );
 
+export const HourlyPerformance = z.object({
+  months: z.array(
+    z.object({
+      month: z.string(),
+      workedHours: z.number(),
+      absenceHours: z.number(),
+      revenueCents: z.number(),
+      revenuePerHourCents: z.number().nullable(),
+      verdict: z.string(),
+      reason: z.string(),
+    }),
+  ),
+  activeStaff: z.number(),
+  targetRateCents: z.number(),
+  averageRateCents: z.number().nullable(),
+  trendCentsPerMonth: z.number(),
+  label: z.string().min(1),
+  revenueUnavailable: z.boolean().optional(),
+  truncated: z.boolean().optional(),
+});
+export type HourlyPerformance = z.infer<typeof HourlyPerformance>;
+
+export const getHourlyPerformance = (targetRateEur?: number): Promise<HourlyPerformance> =>
+  call(
+    HourlyPerformance,
+    `/rh/performance${targetRateEur ? `?targetRateEur=${encodeURIComponent(targetRateEur)}` : ""}`,
+  );
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {
