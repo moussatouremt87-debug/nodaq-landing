@@ -615,12 +615,15 @@ model StaffMember {
   /// Heures contractuelles hebdomadaires (ex. 35).
   weeklyHours Int            @default(35) @map("weekly_hours")
   active      Boolean        @default(true)
+  /// Id du salarié chez le SIRH source (Silae) — idempotence de la sync 3.10.
+  externalRef String?        @map("external_ref")
   createdAt   DateTime       @default(now()) @map("created_at")
   updatedAt   DateTime       @default(now()) @updatedAt @map("updated_at")
   tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   absences    StaffAbsence[]
 
   @@unique([tenantId, name])
+  @@unique([tenantId, externalRef])
   @@index([tenantId, active])
   @@map("staff_members")
   @@schema("public")

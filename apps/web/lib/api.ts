@@ -160,7 +160,7 @@ export const listConnectors = (): Promise<ConnectorSummary[]> =>
   );
 
 export const connectConnector = (
-  type: "pennylane" | "qonto" | "bridge",
+  type: "pennylane" | "qonto" | "bridge" | "silae",
   credentials: Record<string, string>,
 ): Promise<void> =>
   call(z.object({ type: z.string() }), "/connectors", {
@@ -175,6 +175,20 @@ export const disconnectConnector = async (type: string): Promise<void> => {
   });
   if (!response.ok) throw new ApiError(response.status, `HTTP ${response.status}`);
 };
+
+// Sync Silae (ticket 3.10) — alimente équipe + absences depuis le SIRH.
+export const SilaeSyncResult = z.object({
+  employeesCreated: z.number(),
+  employeesUpdated: z.number(),
+  employeesSkipped: z.number(),
+  absencesCreated: z.number(),
+  absencesSkipped: z.number(),
+  truncated: z.boolean(),
+});
+export type SilaeSyncResult = z.infer<typeof SilaeSyncResult>;
+
+export const syncSilae = (): Promise<SilaeSyncResult> =>
+  call(SilaeSyncResult, "/connectors/silae/sync", { method: "POST", body: "{}" });
 
 // Import FEC (ticket 2.14) — le « connecteur fichier » universel. Le contenu
 // du fichier voyage dans UN sens (upload) ; les réponses ne contiennent que

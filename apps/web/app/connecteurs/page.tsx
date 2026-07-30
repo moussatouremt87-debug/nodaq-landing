@@ -21,7 +21,7 @@ import type { ConnectorSummary, FecImportReport, FecStatus } from "../../lib/api
  */
 
 interface ConnectorSpec {
-  type: "qonto" | "pennylane" | "bridge";
+  type: "qonto" | "pennylane" | "bridge" | "silae";
   title: string;
   purpose: string;
   fields: { name: string; label: string; secret: boolean }[];
@@ -53,6 +53,16 @@ const CONNECTORS: ConnectorSpec[] = [
     title: "Pennylane",
     purpose: "Facturation — factures clients pour les relances de l'employé Compta.",
     fields: [{ name: "apiKey", label: "Clé API", secret: true }],
+  },
+  {
+    type: "silae",
+    title: "Silae — paie & RH",
+    purpose:
+      "SIRH/paie : salariés et absences pour les plannings RH (accès via votre gestionnaire de paie partenaire Silae). La synchronisation se lance depuis la page Équipe & plannings.",
+    fields: [
+      { name: "apiKey", label: "Clé API partenaire", secret: true },
+      { name: "dossierId", label: "Numéro de dossier paie", secret: false },
+    ],
   },
 ];
 
