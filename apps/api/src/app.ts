@@ -29,6 +29,7 @@ import {
   renewalWall,
   TenantId,
   Uuid,
+  VERTICALS,
 } from "@nodaq/shared";
 import type { RegistryAsset } from "@nodaq/shared";
 import { auth } from "./auth.js";
@@ -2439,6 +2440,76 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         "hourly performance unavailable",
       );
       return reply.code(503).send({ error: "performance indisponible" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
+
+  // --- Veille réglementaire (3.7) — owner-only : profil stratégique -------
+  // (vertical + effectif RH). Obligations = catalogue versionné sourcé,
+  // information générale, jamais un conseil juridique.
+
+  app.get("/reglementaire/profil", { preHandler: ownerRoute }, async (request) => {
+    const { profile, activeStaff } = await withTenant(request.tenantId, async (tx) => ({
+      profile: await tx.tenantProfile.findFirst({
+        select: { vertical: true, headcountOverride: true, updatedAt: true },
+      }),
+      activeStaff: await tx.staffMember.count({ where: { active: true } }),
+    }));
+    return {
+      vertical: profile?.vertical ?? "autre",
+      headcountOverride: profile?.headcountOverride ?? null,
+      derivedHeadcount: activeStaff > 0 ? activeStaff : null,
+    };
+  });
+
+  const ProfileBody = z
+    .object({
+      vertical: z.enum(VERTICALS),
+      headcountOverride: z.number().int().min(0).max(10_000).nullable().optional(),
+    })
+    .strict();
+
+  app.put("/reglementaire/profil", { preHandler: ownerRoute }, async (request, reply) => {
+    const parsed = ProfileBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    const saved = await withTenant(request.tenantId, (tx) =>
+      tx.tenantProfile.upsert({
+        where: { tenantId: request.tenantId },
+        create: {
+          tenantId: request.tenantId,
+          vertical: parsed.data.vertical,
+          headcountOverride: parsed.data.headcountOverride ?? null,
+        },
+        update: {
+          vertical: parsed.data.vertical,
+          ...(parsed.data.headcountOverride !== undefined
+            ? { headcountOverride: parsed.data.headcountOverride }
+            : {}),
+        },
+        select: { vertical: true, headcountOverride: true },
+      }),
+    );
+    return saved;
+  });
+
+  // Obligations applicables : MÊME chemin que l'agent (outil owner-gated).
+  app.get("/reglementaire", { preHandler: ownerRoute }, async (request, reply) => {
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+      });
+      const result = await toolset.execute("check_regulatory_watch", {});
+      return JSON.parse(result) as unknown;
+    } catch (error) {
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "regulatory watch unavailable",
+      );
+      return reply.code(503).send({ error: "veille indisponible" });
     } finally {
       await toolset?.close().catch(() => undefined);
     }

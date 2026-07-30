@@ -76,6 +76,13 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > `analyze_hourly_performance` OWNER-ONLY, facturier absent = zéro mois calculé
 > (`revenueUnavailable`), route `GET /rh/performance` + carte page RH
 > (`docs/performance-horaire.md`).
+> **Veille réglementaire (3.7)** : catalogue d'obligations PME = CONFIG VERSIONNÉE
+> DATÉE sourcée (`regulatoryWatch.ts`, doctrine 2.19 — pas de flux externe en V1) ;
+> moteur pur d'applicabilité (vertical + effectif, inconnu = `peut_etre` jamais tu,
+> échéances fixes/récurrentes, tri par urgence) ; table `tenant_profiles` (RLS,
+> 1 ligne/tenant) ; outil `check_regulatory_watch` + routes `/reglementaire*` +
+> page OWNER-ONLY ; label « pas un conseil juridique » PERMANENT
+> (`docs/veille-reglementaire.md`).
 > **Support (2.18)** : schéma Postgres `ops` (tables `support_tickets`/`support_issues`)
 > hors RLS métier MAIS sous RLS gated `app.ops_operator` — accès UNIQUEMENT via
 > `withOps()` + routes OPERATOR (allowlist `OPS_OPERATOR_USER_IDS`, 404 sinon) ;

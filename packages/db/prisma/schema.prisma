@@ -45,6 +45,7 @@ model Tenant {
   fixedAssets         FixedAsset[]
   staffMembers        StaffMember[]
   staffAbsences       StaffAbsence[]
+  profile             TenantProfile?
 
   @@map("tenants")
   @@schema("public")
@@ -639,6 +640,27 @@ model StaffAbsence {
 
   @@index([tenantId, staffId])
   @@map("staff_absences")
+  @@schema("public")
+}
+
+/// Ticket 3.7 — profil tenant pour la veille réglementaire (secteur/effectif).
+/// Une ligne par tenant (tenantId unique). `vertical` pilote quelles obligations
+/// réglementaires sont pertinentes pour ce tenant — validé côté app par Zod
+/// (industrie_btp | retail | negoce | services | autre), défense en profondeur
+/// via CHECK en base. `headcountOverride` est l'effectif déclaré par
+/// l'utilisateur ; si absent, l'effectif est dérivé de `staff_members` côté app
+/// (jamais stocké en doublon ici). Sealed by RLS (see the migration
+/// `rls_tenant_profiles`).
+model TenantProfile {
+  id                String   @id @default(uuid()) @db.Uuid
+  tenantId          String   @unique @map("tenant_id") @db.Uuid
+  vertical          String   @default("autre")
+  headcountOverride Int?     @map("headcount_override")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_profiles")
   @@schema("public")
 }
 
