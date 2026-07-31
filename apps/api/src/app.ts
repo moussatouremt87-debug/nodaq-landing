@@ -2907,13 +2907,18 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // passe AVANT la génération : une facture incohérente ne doit pas exister,
   // pas être rejetée plus tard par la plateforme (ou par un contrôle).
 
-  app.post("/factures/facturx", { preHandler: ownerRoute }, async (request, reply) => {
+  // bodyLimit EXPLICITE : le défaut Fastify (1 Mo) rendait la borne Zod
+  // inatteignable — un vrai PDF de facture avec logo la dépasse vite.
+  app.post(
+    "/factures/facturx",
+    { preHandler: ownerRoute, bodyLimit: 12 * 1024 * 1024 },
+    async (request, reply) => {
     const body = z
       .object({
         invoice: z.unknown(),
         profile: z.enum(["MINIMUM", "BASIC_WL", "BASIC", "EN16931"]).default("EN16931"),
         /** PDF existant du tenant (base64) : on attache, on ne redessine pas. */
-        basePdfBase64: z.string().max(20_000_000).optional(),
+        basePdfBase64: z.string().max(12_000_000).optional(),
       })
       .strict()
       .safeParse(request.body);
@@ -2942,6 +2947,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           ? new Uint8Array(Buffer.from(body.data.basePdfBase64, "base64"))
           : undefined,
       );
+      // Données client (nom, adresse, SIRET, montants) : jamais mises en
+      // cache par un intermédiaire — même doctrine que la photo du classeur.
+      void reply.header("cache-control", "private, no-store");
       return {
         profile: body.data.profile,
         rulesVersion: audit.rulesVersion,
@@ -2959,20 +2967,27 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         { err: error instanceof Error ? error.name : "Error" },
         "facturx generation failed",
       );
-      return reply.code(503).send({ error: "génération indisponible" });
-    }
-  });
+      // Un PDF de base illisible/chiffré est une erreur d'ENTRÉE : un 503
+      // ferait chercher une panne serveur là où il faut corriger le fichier.
+      return reply.code(422).send({ error: "PDF de base illisible ou facture non générable" });
+      }
+    },
+  );
 
   /** Lecture d'une facture Factur-X REÇUE : extraction du XML embarqué. */
-  app.post("/factures/facturx/lire", { preHandler: businessRoute }, async (request, reply) => {
+  app.post(
+    "/factures/facturx/lire",
+    { preHandler: businessRoute, bodyLimit: 12 * 1024 * 1024 },
+    async (request, reply) => {
     const body = z
-      .object({ pdfBase64: z.string().min(1).max(20_000_000) })
+      .object({ pdfBase64: z.string().min(1).max(12_000_000) })
       .strict()
       .safeParse(request.body);
     if (!body.success) return reply.code(400).send({ error: "invalid payload" });
     try {
       const xml = await extractFacturXXml(new Uint8Array(Buffer.from(body.data.pdfBase64, "base64")));
       if (!xml) return reply.code(422).send({ error: "aucune donnée Factur-X dans ce PDF" });
+      void reply.header("cache-control", "private, no-store");
       return { xml };
     } catch (error) {
       request.log.warn(
@@ -2980,8 +2995,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         "facturx read failed",
       );
       return reply.code(422).send({ error: "PDF illisible" });
-    }
-  });
+      }
+    },
+  );
 
   // --- Socle webhooks entrants (2.13) --------------------------------------
   // Prérequis des flux PDP (2.4) et Bridge Connect. Une requête webhook n'a

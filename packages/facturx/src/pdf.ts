@@ -1,3 +1,4 @@
+import { inflateSync } from "node:zlib";
 import {
   AFRelationship,
   PDFArray,
@@ -8,9 +9,10 @@ import {
   PDFRawStream,
   PDFString,
   StandardFonts,
-  decodePDFRawStream,
 } from "pdf-lib";
+import type { PDFPage } from "pdf-lib";
 import { amount } from "./invoice.js";
+import { lineNetCents } from "./vat.js";
 import type { FacturXInvoice } from "./invoice.js";
 import {
   FACTURX_ATTACHMENT_NAME,
@@ -27,7 +29,23 @@ import type { FacturXProfile } from "./profiles.js";
  * just a file and the document is not compliant.
  */
 
-/** XMP packet: PDF/A-3 identification + the Factur-X extension schema. */
+/*
+ * XMP packet: the Factur-X extension schema, which is what lets a reader or
+ * a platform recognise the embedded XML as invoice data.
+ *
+ * DELIBERATELY ABSENT: the `pdfaid:part 3 / conformance B` claim. The file is
+ * not yet a verified PDF/A-3 — standard fonts are not embedded, there is no
+ * OutputIntent and no trailer /ID. Claiming a conformity we cannot prove
+ * (no veraPDF in CI) would be worse than not claiming it; the strict PDF/A-3
+ * marking is its own ticket. See docs/facturx.md.
+ */
+/** Ceilings for reading a THIRD-PARTY invoice (see extractFacturXXml). */
+const MAX_COMPRESSED_BYTES = 4 * 1024 * 1024;
+const MAX_XML_BYTES = 4 * 1024 * 1024;
+
+const BOTTOM_MARGIN = 60;
+const LINE_HEIGHT = 16;
+
 function xmpMetadata(profile: FacturXProfile, invoiceNumber: string): string {
   const conformance = FACTURX_PROFILES[profile].conformanceLevel;
   const escape = (value: string): string =>
@@ -35,10 +53,6 @@ function xmpMetadata(profile: FacturXProfile, invoiceNumber: string): string {
   return `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-  <rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/">
-   <pdfaid:part>3</pdfaid:part>
-   <pdfaid:conformance>B</pdfaid:conformance>
-  </rdf:Description>
   <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
    <dc:title><rdf:Alt><rdf:li xml:lang="x-default">Facture ${escape(invoiceNumber)}</rdf:li></rdf:Alt></dc:title>
   </rdf:Description>
@@ -74,16 +88,22 @@ function xmpMetadata(profile: FacturXProfile, invoiceNumber: string): string {
 
 /** Minimal human-readable page — replaced by the tenant's own PDF when given. */
 async function renderInvoicePage(pdf: PDFDocument, invoice: FacturXInvoice): Promise<void> {
-  const page = pdf.addPage([595.28, 841.89]); // A4
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const newPage = (): { page: PDFPage; y: number } => ({
+    page: pdf.addPage([595.28, 841.89]), // A4
+    y: 800,
+  });
+  const first = newPage();
+  let page = first.page;
+  let y = first.y;
   const draw = (text: string, y: number, size = 10, useBold = false): void => {
     // WinAnsi-safe: the standard fonts cannot encode every character.
     const safe = text.replace(/[^\x20-\xFF]/g, "?");
     page.drawText(safe, { x: 50, y, size, font: useBold ? bold : font });
   };
 
-  let y = 780;
+  y = 780;
   draw(`Facture ${invoice.number}`, y, 18, true);
   y -= 30;
   draw(`Date d'emission : ${invoice.issueDate}`, y);
@@ -110,24 +130,30 @@ async function renderInvoicePage(pdf: PDFDocument, invoice: FacturXInvoice): Pro
   y -= 6;
   page.drawLine({ start: { x: 50, y }, end: { x: 545, y }, thickness: 0.5 });
 
-  for (const line of invoice.lines.slice(0, 30)) {
-    y -= 16;
+  // Pagination : la page lisible et le XML doivent décrire la MÊME facture.
+  // Tronquer les lignes (ou laisser les totaux sortir de la page) casserait
+  // l'équivalence des deux lectures, qui est la définition de Factur-X.
+  for (const line of invoice.lines) {
+    if (y < BOTTOM_MARGIN + LINE_HEIGHT) ({ page, y } = newPage());
+    y -= LINE_HEIGHT;
     draw(line.description.slice(0, 45), y);
     page.drawText(line.quantity.toFixed(2), { x: 330, y, size: 10, font });
     page.drawText(amount(line.unitPriceCents), { x: 380, y, size: 10, font });
     page.drawText(`${line.vatRate}%`, { x: 450, y, size: 10, font });
-    page.drawText(amount(Math.round(line.quantity * line.unitPriceCents)), {
-      x: 490,
-      y,
-      size: 10,
-      font,
-    });
+    page.drawText(amount(lineNetCents(line)), { x: 490, y, size: 10, font });
   }
 
+  // Totaux et mentions légales : jamais orphelins en bas de page.
+  const footerHeight = 90;
+  if (y < BOTTOM_MARGIN + footerHeight) ({ page, y } = newPage());
   y -= 30;
   draw(`Total HT : ${amount(invoice.totals.netCents)} ${invoice.currency}`, y);
   draw(`TVA : ${amount(invoice.totals.vatCents)} ${invoice.currency}`, (y -= 14));
   draw(`Total TTC : ${amount(invoice.totals.grossCents)} ${invoice.currency}`, (y -= 16), 12, true);
+  if (invoice.prepaidCents) {
+    draw(`Acompte verse : ${amount(invoice.prepaidCents)} ${invoice.currency}`, (y -= 14));
+    draw(`Net a payer : ${amount(invoice.totals.dueCents)} ${invoice.currency}`, (y -= 14), 11, true);
+  }
   if (invoice.vatExemptionReason) draw(invoice.vatExemptionReason, (y -= 20), 9);
   if (invoice.note) draw(invoice.note.slice(0, 110), (y -= 14), 9);
 }
@@ -153,7 +179,7 @@ export async function buildFacturXPdf(
   // AFRelationship "Data": the normative marker telling a reader this
   // attachment IS the invoice data, not a random extra file.
   await pdf.attach(new TextEncoder().encode(xml), FACTURX_ATTACHMENT_NAME, {
-    mimeType: "application/xml",
+    mimeType: "text/xml",
     description: "Factur-X invoice data",
     afRelationship: AFRelationship.Data,
     creationDate: new Date(`${invoice.issueDate}T00:00:00Z`),
@@ -211,7 +237,37 @@ export async function extractFacturXXml(pdfBytes: Uint8Array): Promise<string | 
   const ef = target.spec.lookupMaybe(PDFName.of("EF"), PDFDict);
   const stream = ef?.lookup(PDFName.of("F"));
   if (!(stream instanceof PDFRawStream)) return null;
-  // The stream is Flate-encoded by the writer: decode before reading.
-  const bytes = decodePDFRawStream(stream).decode();
+
+  // DECOMPRESSION BOMB GUARD (audit 2.3): a 700 KB PDF can carry a Flate
+  // stream inflating to 700 MB. `maxOutputLength` makes zlib abort at the
+  // ceiling instead of allocating first and failing after — the API process
+  // is shared by every tenant and this route is open to any member.
+  const raw = stream.getContents();
+  if (raw.length > MAX_COMPRESSED_BYTES) return null;
+  const filter = stream.dict.lookup(PDFName.of("Filter"));
+  const filterName =
+    filter instanceof PDFName
+      ? filter.decodeText()
+      : filter instanceof PDFArray && filter.size() === 1
+        ? (filter.get(0) as PDFName).decodeText()
+        : "";
+
+  let bytes: Uint8Array;
+  if (filterName === "" ) {
+    bytes = raw;
+  } else if (filterName === "FlateDecode") {
+    try {
+      bytes = inflateSync(Buffer.from(raw), { maxOutputLength: MAX_XML_BYTES });
+    } catch {
+      // Dépassement du plafond (bombe) ou flux corrompu : refus PROPRE —
+      // l'appelant reçoit "pas de Factur-X", jamais une exception qui
+      // remonterait jusqu'au gestionnaire d'erreurs global.
+      return null;
+    }
+  } else {
+    // Un filtre exotique sur une pièce jointe de facture n'est pas légitime.
+    return null;
+  }
+  if (bytes.length > MAX_XML_BYTES) return null;
   return new TextDecoder().decode(bytes);
 }

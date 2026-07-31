@@ -25,6 +25,8 @@ export interface FacturXProfileDefinition {
   conformanceLevel: string;
   /** Whether the profile carries invoice detail lines. */
   includesLines: boolean;
+  /** False = catalogued as a normative fact, but not emitted by V1. */
+  implemented: boolean;
   description: string;
   source: { label: string; url: string };
 }
@@ -40,6 +42,7 @@ export const FACTURX_PROFILES = {
     urn: "urn:factur-x.eu:1p0:minimum",
     conformanceLevel: "MINIMUM",
     includesLines: false,
+    implemented: false,
     description: "Données d'en-tête seules (piste d'audit fiable, e-reporting).",
     source: FNFE,
   },
@@ -48,6 +51,7 @@ export const FACTURX_PROFILES = {
     urn: "urn:factur-x.eu:1p0:basicwl",
     conformanceLevel: "BASIC WL",
     includesLines: false,
+    implemented: false,
     description: "En-tête et ventilation de TVA, sans lignes de détail.",
     source: FNFE,
   },
@@ -56,6 +60,7 @@ export const FACTURX_PROFILES = {
     urn: "urn:cen.eu:en16931:2017#compliant#urn:factur-x.eu:1p0:basic",
     conformanceLevel: "BASIC",
     includesLines: true,
+    implemented: true,
     description: "Lignes de facture simples, conforme au socle EN 16931.",
     source: FNFE,
   },
@@ -64,6 +69,7 @@ export const FACTURX_PROFILES = {
     urn: "urn:cen.eu:en16931:2017",
     conformanceLevel: "EN 16931",
     includesLines: true,
+    implemented: true,
     description: "Norme sémantique européenne complète (profil de référence B2B).",
     source: {
       label: "EN 16931-1 — modèle sémantique de la facture électronique",
@@ -98,6 +104,19 @@ export const FRENCH_VAT_RATES = [20, 10, 5.5, 2.1, 0] as const;
  */
 export const VAT_CATEGORIES = ["S", "Z", "E", "AE"] as const;
 export type VatCategory = (typeof VAT_CATEGORIES)[number];
+
+/** Categories that charge no VAT — they require a legal mention (BT-120). */
+export const UNTAXED_CATEGORIES = ["Z", "E", "AE"] as const;
+
+/**
+ * Category/rate compatibility (BR-S-*, BR-Z-*, BR-E-*, BR-AE-*): an "exempt"
+ * line at 20 % is a contradiction the standard rejects, and a 0 % line is
+ * category Z (or E/AE), never S. Checked at audit time.
+ */
+export function isRateAllowedForCategory(category: VatCategory, ratePercent: number): boolean {
+  if (category === "S") return ratePercent > 0;
+  return ratePercent === 0;
+}
 
 /** UNTDID 1001 — 380 = commercial invoice, 381 = credit note. */
 export const DOCUMENT_TYPE_CODES = { invoice: "380", creditNote: "381" } as const;

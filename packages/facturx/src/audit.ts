@@ -1,13 +1,22 @@
 import { sirenOf } from "./invoice.js";
 import type { FacturXInvoice } from "./invoice.js";
-import { FACTURX_RULES_VERSION, FRENCH_VAT_RATES } from "./profiles.js";
+import {
+  FACTURX_RULES_VERSION,
+  FRENCH_VAT_RATES,
+  isRateAllowedForCategory,
+  UNTAXED_CATEGORIES,
+} from "./profiles.js";
+import { computeVatBreakdown } from "./vat.js";
 
 /*
  * Pre-issuance conformity audit (ticket 2.3) — PURE and deterministic. An
- * invoice that leaves the product is a legal document: an incoherent total or
- * a missing mandatory mention must be caught HERE, not by the PDP rejecting
- * the submission (or worse, by a tax audit years later). Every issue carries
- * its figures; nothing is "fixed" silently.
+ * invoice that leaves the product is a legal document: an incoherent total
+ * or a missing mandatory mention must be caught HERE, not by the PDP
+ * rejecting the submission (or worse, by a tax audit years later).
+ *
+ * Arithmetic is checked with ZERO tolerance against the SINGLE breakdown
+ * (vat.ts) that the XML serializer also uses: what we validate is exactly
+ * what we write. EN 16931's BR-CO-* rules admit no rounding slack.
  */
 
 export interface FacturXIssue {
@@ -21,9 +30,12 @@ export interface FacturXIssue {
     | "siret_acheteur_invalide"
     | "aucune_ligne"
     | "taux_tva_inconnu"
+    | "categorie_tva_incoherente"
+    | "montant_negatif"
     | "total_ht_incoherent"
     | "tva_incoherente"
     | "total_ttc_incoherent"
+    | "montant_du_incoherent"
     | "mention_exoneration_manquante";
   severity: "bloquant" | "attention";
   /** French, self-contained justification with the figures. */
@@ -38,11 +50,40 @@ export interface FacturXAudit {
 }
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
-/** Cent-level rounding slack across a whole invoice. */
-const TOLERANCE_CENTS = 1;
 
 function euro(cents: number): string {
   return (cents / 100).toFixed(2);
+}
+
+/**
+ * Luhn check digit — the standard SIREN/SIRET control. Length alone lets
+ * "99999999999999" through, and the SIREN is the most scrutinised mention
+ * of the reform.
+ */
+export function isValidLuhn(digits: string): boolean {
+  if (!/^\d+$/.test(digits)) return false;
+  let sum = 0;
+  let double = false;
+  for (let index = digits.length - 1; index >= 0; index--) {
+    let value = Number(digits[index]);
+    if (double) {
+      value *= 2;
+      if (value > 9) value -= 9;
+    }
+    sum += value;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+
+/**
+ * La Poste SIRET (starting 356000000) is the documented exception to Luhn —
+ * excluded rather than silently failing a legitimate invoice.
+ */
+function siretLooksValid(digits: string): boolean {
+  if (digits.length !== 14) return false;
+  if (digits.startsWith("356000000")) return true;
+  return isValidLuhn(digits) && isValidLuhn(digits.slice(0, 9));
 }
 
 /** Checks the invoice against the French mandatory mentions and its own maths. */
@@ -88,6 +129,8 @@ export function auditInvoice(invoice: FacturXInvoice): FacturXAudit {
         "bloquant",
         `SIRET du ${role} invalide (${digits.length} chiffres, 14 attendus)`,
       );
+    } else if (!siretLooksValid(digits)) {
+      add(invalid, "bloquant", `SIRET du ${role} invalide (clé de contrôle incorrecte)`);
     }
   }
 
@@ -95,8 +138,6 @@ export function auditInvoice(invoice: FacturXInvoice): FacturXAudit {
     add("aucune_ligne", "attention", "facture sans ligne de détail");
   }
 
-  let computedNet = 0;
-  let computedVat = 0;
   for (const line of invoice.lines) {
     if (!(FRENCH_VAT_RATES as readonly number[]).includes(line.vatRate)) {
       add(
@@ -104,31 +145,53 @@ export function auditInvoice(invoice: FacturXInvoice): FacturXAudit {
         "bloquant",
         `taux de TVA ${line.vatRate} % hors barème français (${FRENCH_VAT_RATES.join(", ")})`,
       );
+    } else if (!isRateAllowedForCategory(line.vatCategory, line.vatRate)) {
+      // BR-E-*/BR-Z-* : une catégorie exonérée à 20 % est une contradiction.
+      add(
+        "categorie_tva_incoherente",
+        "bloquant",
+        `catégorie de TVA « ${line.vatCategory} » incompatible avec un taux de ${line.vatRate} %`,
+      );
     }
-    const lineNet = Math.round(line.quantity * line.unitPriceCents);
-    computedNet += lineNet;
-    computedVat += Math.round((lineNet * line.vatRate) / 100);
   }
 
+  // Un avoir se déclare avec le code 381, non implémenté : mieux vaut
+  // refuser que d'émettre un avoir typé comme une facture.
+  if (
+    invoice.totals.grossCents < 0 ||
+    invoice.totals.netCents < 0 ||
+    invoice.lines.some((line) => line.unitPriceCents < 0 || line.quantity < 0)
+  ) {
+    add(
+      "montant_negatif",
+      "bloquant",
+      "montant négatif : un avoir doit être émis en type 381, non pris en charge en V1",
+    );
+  }
+
+  // Arithmétique : comparaison à la ventilation UNIQUE, tolérance ZÉRO —
+  // c'est elle qui sera écrite dans le document.
   if (invoice.lines.length > 0) {
-    if (Math.abs(computedNet - invoice.totals.netCents) > TOLERANCE_CENTS) {
+    const breakdown = computeVatBreakdown(invoice);
+    if (breakdown.netCents !== invoice.totals.netCents) {
       add(
         "total_ht_incoherent",
         "bloquant",
-        `total HT déclaré ${euro(invoice.totals.netCents)} € ≠ somme des lignes ${euro(computedNet)} €`,
+        `total HT déclaré ${euro(invoice.totals.netCents)} € ≠ somme des lignes ${euro(breakdown.netCents)} €`,
       );
     }
-    if (Math.abs(computedVat - invoice.totals.vatCents) > TOLERANCE_CENTS) {
+    if (breakdown.vatCents !== invoice.totals.vatCents) {
       add(
         "tva_incoherente",
         "bloquant",
-        `TVA déclarée ${euro(invoice.totals.vatCents)} € ≠ TVA calculée ${euro(computedVat)} €`,
+        `TVA déclarée ${euro(invoice.totals.vatCents)} € ≠ TVA de la ventilation ${euro(breakdown.vatCents)} € ` +
+          "(arrondi par taux, règle BR-CO-14)",
       );
     }
   }
 
   const expectedGross = invoice.totals.netCents + invoice.totals.vatCents;
-  if (Math.abs(expectedGross - invoice.totals.grossCents) > TOLERANCE_CENTS) {
+  if (expectedGross !== invoice.totals.grossCents) {
     add(
       "total_ttc_incoherent",
       "bloquant",
@@ -136,10 +199,26 @@ export function auditInvoice(invoice: FacturXInvoice): FacturXAudit {
     );
   }
 
+  // BR-CO-16 : le montant réclamé est le TTC diminué des acomptes déjà
+  // versés. C'est la somme que le client va payer : jamais non contrôlée.
+  const prepaid = invoice.prepaidCents ?? 0;
+  if (prepaid < 0) {
+    add("montant_negatif", "bloquant", "acompte négatif");
+  }
+  if (invoice.totals.dueCents !== invoice.totals.grossCents - prepaid) {
+    add(
+      "montant_du_incoherent",
+      "bloquant",
+      `montant dû ${euro(invoice.totals.dueCents)} € ≠ TTC ${euro(invoice.totals.grossCents)} € − acompte ${euro(prepaid)} €`,
+    );
+  }
+
   // Pas de TVA facturée : la mention légale qui le justifie est obligatoire.
   const untaxed =
     invoice.totals.vatCents === 0 ||
-    invoice.lines.some((line) => line.vatCategory === "E" || line.vatCategory === "AE");
+    invoice.lines.some((line) =>
+      (UNTAXED_CATEGORIES as readonly string[]).includes(line.vatCategory),
+    );
   if (untaxed && !invoice.vatExemptionReason?.trim()) {
     add(
       "mention_exoneration_manquante",

@@ -8,34 +8,54 @@ import { OPERATION_CATEGORIES, VAT_CATEGORIES } from "./profiles.js";
  * FEC-derived registry, or manual entry.
  */
 
+
+/**
+ * Text safe for an XML 1.0 document. Control characters are NOT escapable in
+ * XML: a NUL in a customer name would produce a document no parser can read.
+ * Rejected at the typed boundary rather than mangled at serialization.
+ */
+// Détecter ces caractères EST l'objet du contrôle : ils ne sont pas
+// échappables en XML 1.0, donc ils ne doivent jamais entrer dans le modèle.
+// eslint-disable-next-line no-control-regex
+const XML_CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+const safeText = (max: number, min = 0): z.ZodEffects<z.ZodString, string, string> =>
+  z
+    .string()
+    .trim()
+    .min(min)
+    .max(max)
+    .refine((value) => !XML_CONTROL_CHARS.test(value), {
+      message: "control characters are not valid in XML",
+    });
+
 const Address = z.object({
-  street: z.string().trim().max(200).default(""),
-  postalCode: z.string().trim().max(20).default(""),
-  city: z.string().trim().max(100).default(""),
+  street: safeText(200).default(""),
+  postalCode: safeText(20).default(""),
+  city: safeText(100).default(""),
   countryCode: z.string().trim().length(2).default("FR"),
 });
 
 const Party = z.object({
-  name: z.string().trim().min(1).max(200),
+  name: safeText(200, 1),
   /** 14 digits; the SIREN (first 9) is a mandatory mention of the reform. */
-  siret: z.string().trim().max(20).default(""),
+  siret: safeText(20).default(""),
   /** Intra-community VAT number, e.g. FR12812345678. */
-  vatNumber: z.string().trim().max(20).optional(),
+  vatNumber: safeText(20).optional(),
   address: Address,
 });
 
 const Line = z.object({
-  description: z.string().trim().min(1).max(500),
+  description: safeText(500, 1),
   quantity: z.number().finite(),
   unitPriceCents: z.number().int(),
   /** Percentage, e.g. 20 or 5.5 — checked against the French scale in audit. */
   vatRate: z.number().finite(),
   vatCategory: z.enum(VAT_CATEGORIES).default("S"),
-  unit: z.string().trim().max(20).optional(),
+  unit: safeText(20).optional(),
 });
 
 export const FacturXInvoice = z.object({
-  number: z.string().trim().max(50),
+  number: safeText(50),
   /** ISO day, YYYY-MM-DD. */
   issueDate: z.string().trim(),
   dueDate: z.string().trim().optional(),
@@ -52,11 +72,17 @@ export const FacturXInvoice = z.object({
     grossCents: z.number().int(),
     dueCents: z.number().int(),
   }),
+  /** Already-paid deposit, cents — BR-CO-16: due = gross − prepaid. */
+  prepaidCents: z.number().int().optional(),
   /** Legal wording required whenever VAT is not charged. */
-  vatExemptionReason: z.string().trim().max(300).optional(),
+  vatExemptionReason: safeText(300).optional(),
+  /** Delivery date (BT-72) — emitted only when the tenant provides it. */
+  deliveryDate: z.string().trim().optional(),
+  /** Buyer reference (BT-10) — required by Chorus Pro for public buyers. */
+  buyerReference: safeText(50).optional(),
   /** Free-text note carried into the XML (payment terms, PO reference…). */
-  note: z.string().trim().max(1000).optional(),
-  purchaseOrderRef: z.string().trim().max(50).optional(),
+  note: safeText(1000).optional(),
+  purchaseOrderRef: safeText(50).optional(),
 });
 
 export type FacturXInvoice = z.infer<typeof FacturXInvoice>;

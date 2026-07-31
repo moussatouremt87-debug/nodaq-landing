@@ -28,13 +28,13 @@ const INVOICE = {
   operationCategory: "prestation_services",
   seller: {
     name: "Élec Provence SARL",
-    siret: "81234567800017",
-    vatNumber: "FR12812345678",
+    siret: "81234567600009",
+    vatNumber: "FR12812345676",
     address: { street: "12 rue des Oliviers", postalCode: "13100", city: "Aix", countryCode: "FR" },
   },
   buyer: {
     name: "Boulangerie Martin",
-    siret: "52345678900023",
+    siret: "52345678800018",
     address: { street: "5 place du Marché", postalCode: "13090", city: "Aix", countryCode: "FR" },
   },
   lines: [
@@ -119,7 +119,7 @@ describe("POST /factures/facturx", () => {
     expect(JSON.stringify(bad.json())).not.toContain("number");
   });
 
-  it("facture conforme : PDF/A-3 avec XML embarqué, profil demandé respecté", async () => {
+  it("facture conforme : PDF avec XML Factur-X embarqué, profil demandé respecté", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/factures/facturx",
@@ -144,7 +144,9 @@ describe("POST /factures/facturx", () => {
 
     const pdf = Buffer.from(body.pdfBase64, "base64");
     expect(pdf.subarray(0, 5).toString()).toBe("%PDF-");
-    expect(pdf.toString("latin1")).toContain("<pdfaid:part>3</pdfaid:part>");
+    // Marqueur Factur-X (le fichier ne revendique PAS une conformité PDF/A
+    // non vérifiée — voir docs/facturx.md).
+    expect(pdf.toString("latin1")).toContain("<fx:DocumentType>INVOICE</fx:DocumentType>");
   });
 
   it("REFUS : une facture incohérente n'est jamais générée, les motifs sont rendus", async () => {

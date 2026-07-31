@@ -23,12 +23,12 @@ const INVOICE: FacturXInvoice = {
   operationCategory: "livraison_biens",
   seller: {
     name: "Élec Provence SARL",
-    siret: "81234567800017",
+    siret: "81234567600009",
     address: { street: "12 rue des Oliviers", postalCode: "13100", city: "Aix", countryCode: "FR" },
   },
   buyer: {
     name: "Boulangerie Martin",
-    siret: "52345678900023",
+    siret: "52345678800018",
     address: { street: "5 place du Marché", postalCode: "13090", city: "Aix", countryCode: "FR" },
   },
   lines: [
@@ -46,9 +46,10 @@ describe("buildFacturXPdf", () => {
     expect(await listAttachments(bytes)).toContain(FACTURX_ATTACHMENT_NAME);
 
     const raw = Buffer.from(bytes).toString("latin1");
-    // Identification PDF/A-3 niveau B.
-    expect(raw).toContain("<pdfaid:part>3</pdfaid:part>");
-    expect(raw).toContain("<pdfaid:conformance>B</pdfaid:conformance>");
+    // PAS de revendication `pdfaid` : le fichier n'est pas un PDF/A-3
+    // VÉRIFIÉ (polices non embarquées, pas d'OutputIntent). Annoncer une
+    // conformité non prouvée serait pire que ne rien annoncer.
+    expect(raw).not.toContain("pdfaid:part");
     // Schéma d'extension Factur-X : c'est LUI qui rend le fichier
     // reconnaissable par un lecteur ou une plateforme.
     expect(raw).toContain("urn:factur-x:pdfa:CrossIndustryDocument:invoice:1p0#");
@@ -60,10 +61,44 @@ describe("buildFacturXPdf", () => {
   });
 
   it("le profil demandé est celui inscrit dans les métadonnées", async () => {
-    const bytes = await buildFacturXPdf(INVOICE, buildCiiXml(INVOICE, "MINIMUM"), "MINIMUM");
+    const bytes = await buildFacturXPdf(INVOICE, buildCiiXml(INVOICE, "BASIC"), "BASIC");
     expect(Buffer.from(bytes).toString("latin1")).toContain(
-      "<fx:ConformanceLevel>MINIMUM</fx:ConformanceLevel>",
+      "<fx:ConformanceLevel>BASIC</fx:ConformanceLevel>",
     );
+  });
+
+  it("PAGINATION : toutes les lignes sont rendues, totaux et mentions jamais hors page", async () => {
+    // 60 lignes : le rendu doit déborder sur plusieurs pages plutôt que
+    // tronquer — la page lisible et le XML décrivent la MÊME facture.
+    const many: FacturXInvoice = {
+      ...INVOICE,
+      lines: Array.from({ length: 60 }, (_, index) => ({
+        description: `Ligne ${index + 1}`,
+        quantity: 1,
+        unitPriceCents: 1_000,
+        vatRate: 20,
+        vatCategory: "S" as const,
+      })),
+      vatExemptionReason: undefined,
+      totals: { netCents: 60_000, vatCents: 12_000, grossCents: 72_000, dueCents: 72_000 },
+    };
+    const bytes = await buildFacturXPdf(many, buildCiiXml(many, "EN16931"), "EN16931");
+    const pdf = await PDFDocument.load(bytes);
+    expect(pdf.getPageCount()).toBeGreaterThan(1);
+  });
+
+  it("BOMBE DE DÉCOMPRESSION : une pièce jointe qui se déplie trop est refusée", async () => {
+    // Un PDF de quelques centaines de Ko peut porter un flux Flate se
+    // dépliant en centaines de Mo. La lecture est ouverte aux membres et le
+    // process est partagé par tous les tenants : la borne est structurelle.
+    const bomb = await PDFDocument.create();
+    bomb.addPage();
+    const huge = new Uint8Array(8 * 1024 * 1024); // 8 Mo de zéros -> ~8 Ko compressés
+    await bomb.attach(huge, "factur-x.xml", { mimeType: "text/xml" });
+    const bytes = await bomb.save();
+    expect(bytes.length).toBeLessThan(2 * 1024 * 1024);
+    // Ni exception non maîtrisée, ni allocation de 8 Mo : simplement null.
+    expect(await extractFacturXXml(bytes)).toBeNull();
   });
 
   it("PDF existant du tenant : on ATTACHE, on ne redessine jamais sa mise en page", async () => {
