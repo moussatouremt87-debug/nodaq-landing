@@ -488,18 +488,36 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
           take: 200,
         }),
       );
+      // « Les six postes sont renseignés » ne prouve pas que le mois soit
+      // ARRÊTÉ. Preuve indirecte et bon marché : l'existence de charges sur un
+      // mois POSTÉRIEUR. Sans elle, le mois analysé est peut-être le dernier
+      // d'un FEC qui s'arrête en plein milieu.
+      const laterCosts = await withTenant(tenantId, (tx) =>
+        tx.costEntry.findFirst({
+          where: { month: { gt: target } },
+          select: { id: true },
+        }),
+      );
       // Facturier absent = AUCUN CA connu : le rapport le dira (dénominateur
       // nul), plutôt que de faire échouer l'outil.
       let invoices: Awaited<ReturnType<typeof fetchInvoiceWindow>>["invoices"] = [];
       let revenueUnavailable = false;
+      let revenueTruncated = false;
       try {
         const pennylane = await getPennylaneClient(tenantId, context);
         const window = await fetchInvoiceWindow(pennylane, now, { monthsBack: monthsAgo + 1 });
         invoices = window.invoices;
+        // Un CA tronqué change le DÉNOMINATEUR du ratio : le taire ici
+        // laisserait un pourcentage douteux passer pour un constat (tous les
+        // autres outils remontent déjà ce drapeau).
+        revenueTruncated = window.truncated;
       } catch {
         revenueUnavailable = true;
       }
-      const report = buildMarginReport(invoices, costs as CostEntry[], target);
+      const report = buildMarginReport(invoices, costs as CostEntry[], target, {
+        revenueTruncated,
+        costsPossiblyPartial: laterCosts === null,
+      });
       return {
         content: [
           { type: "text" as const, text: JSON.stringify({ ...report, revenueUnavailable }) },

@@ -55,13 +55,13 @@ export default function MargePage() {
 
   async function saveCost(category: string): Promise<void> {
     const raw = (amounts[category] ?? "").trim().replace(",", ".");
-    const euros = Number(raw);
-    if (raw === "" || !Number.isFinite(euros)) {
+    const amount = Number(raw);
+    if (raw === "" || !Number.isFinite(amount)) {
       setError("montant illisible");
       return;
     }
     try {
-      await putCost({ month, category, amountCents: Math.round(euros * 100) });
+      await putCost({ month, category, amountCents: Math.round(amount * 100) });
       setAmounts((previous) => ({ ...previous, [category]: "" }));
       await load(month);
     } catch (err) {
@@ -107,12 +107,31 @@ export default function MargePage() {
       {report && (
         <>
           <section className="card">
+            {/* Un CA inconnu ne s'affiche pas « 0,00 € » : ce serait affirmer
+                un chiffre d'affaires nul là où il n'a pas été lu. */}
             <h2>
-              {report.month} — {euros(report.revenueCents)} de chiffre d&apos;affaires
+              {report.month} —{" "}
+              {report.revenueUnavailable
+                ? "chiffre d'affaires non lu"
+                : `${euros(report.revenueCents)} de chiffre d'affaires`}
             </h2>
             {report.revenueUnavailable && (
               <p className="warn">
-                Facturier indisponible : aucun chiffre d&apos;affaires n&apos;a pu être lu.
+                Facturier indisponible : aucun chiffre d&apos;affaires n&apos;a pu être lu, donc
+                aucune marge n&apos;est calculée.
+              </p>
+            )}
+            {report.revenueTruncated && (
+              <p className="warn">
+                Lecture du facturier tronquée : le chiffre d&apos;affaires du mois est
+                possiblement partiel, donc le pourcentage aussi.
+              </p>
+            )}
+            {report.unmappedCents !== 0 && (
+              <p className="warn">
+                {euros(report.unmappedCents)} de charges qu&apos;aucun poste ne couvre (variation
+                de stocks, comptes hors catalogue) : tant qu&apos;elles existent, la marge reste
+                un plafond.
               </p>
             )}
             {report.levels.length === 0 ? (
@@ -128,7 +147,14 @@ export default function MargePage() {
                           se lire comme un résultat, même en diagonale. */}
                       <span style={{ fontSize: "1.2em" }}>
                         {level.kind === "borne_superieure" ? "au plus " : ""}
-                        <strong>{Math.round(level.marginRatio * 100)} %</strong>{" "}
+                        <strong>
+                          {Math.round(
+                            (level.kind === "complete"
+                              ? level.marginRatio
+                              : level.maxMarginRatio) * 100,
+                          )}{" "}
+                          %
+                        </strong>{" "}
                         <span className="muted">({euros(level.marginCents)})</span>
                       </span>
                       <br />
@@ -137,6 +163,15 @@ export default function MargePage() {
                   </li>
                 ))}
               </ul>
+            )}
+            {(report.excludedCount > 0 || report.unusableCount > 0) && (
+              <p className="muted">
+                Sur la fenêtre de factures lue :{" "}
+                {report.excludedCount > 0 &&
+                  `${report.excludedCount} hors CA (brouillon, avoir, annulée). `}
+                {report.unusableCount > 0 &&
+                  `${report.unusableCount} écartée(s) (montant illisible ou devise étrangère).`}
+              </p>
             )}
             <p className="warn">
               {report.label} (règles du {report.rulesVersion})
@@ -180,14 +215,7 @@ export default function MargePage() {
               saisie les complète sans les remplacer. Importez votre FEC pour éviter de tout saisir
               — un poste oublié fait paraître la marge meilleure qu&apos;elle n&apos;est.
             </p>
-            {(report.excludedCount > 0 || report.unusableCount > 0) && (
-              <p className="muted">
-                {report.excludedCount > 0 &&
-                  `${report.excludedCount} facture(s) hors CA (brouillon, avoir, annulée). `}
-                {report.unusableCount > 0 &&
-                  `${report.unusableCount} facture(s) écartée(s) (montant illisible ou devise étrangère).`}
-              </p>
-            )}
+
           </section>
         </>
       )}

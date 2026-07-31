@@ -72,6 +72,22 @@ export const COST_CATEGORIES: readonly CostCategory[] = [
 export const COST_CATEGORY_IDS = COST_CATEGORIES.map((category) => category.id);
 
 /**
+ * Poste TECHNIQUE : charges de classe 6 réelles qu'aucun poste ne couvre
+ * (603 variation des stocks, 600, 608…). Ce n'est PAS une catégorie attendue —
+ * son absence ne manque à personne — mais sa présence prouve qu'il existe des
+ * charges dont on ignore le niveau, donc que la marge ne peut pas être
+ * annoncée comme complète.
+ *
+ * Sans ce poste, un compte non rattaché disparaissait en silence et le rapport
+ * pouvait afficher un pourcentage ferme sur une base incomplète : exactement
+ * ce que le ticket existe pour interdire.
+ */
+export const UNMAPPED_CATEGORY = "non_rattachees";
+
+/** Ce qui peut être STOCKÉ (postes attendus + le poste technique). */
+export const STORABLE_CATEGORY_IDS = [...COST_CATEGORY_IDS, UNMAPPED_CATEGORY];
+
+/**
  * Comptes de classe 6 DÉLIBÉRÉMENT hors marge, et pourquoi. Les taire ferait
  * croire à un oubli ; les inclure fausserait la marge d'exploitation.
  */
@@ -87,15 +103,29 @@ export const EXCLUDED_ACCOUNTS: readonly { prefix: string; reason: string }[] = 
 ];
 
 /**
- * Poste correspondant à un numéro de compte, `null` si le compte n'entre pas
- * dans une marge (classe ≠ 6, ou exclusion assumée ci-dessus).
+ * Ce qu'un numéro de compte est, du point de vue de la marge.
  *
- * Le préfixe le plus long gagne : 611 (sous-traitance) doit primer sur 61
- * (services extérieurs), sinon un poste direct serait compté en exploitation.
+ * `exclu` et `non_rattache` sont DEUX choses différentes, et les confondre
+ * était le défaut central corrigé par l'audit 2.8 : une exclusion est une
+ * décision documentée (dotations, IS…), un compte non rattaché est une charge
+ * réelle qu'on ne sait pas classer — la première se tait, la seconde doit
+ * empêcher d'annoncer une marge complète.
  */
-export function categoryForAccount(accountNumber: string): CostCategory | null {
-  if (!accountNumber.startsWith("6")) return null;
-  if (EXCLUDED_ACCOUNTS.some((excluded) => accountNumber.startsWith(excluded.prefix))) return null;
+export type AccountClassification =
+  | { kind: "poste"; category: CostCategory }
+  | { kind: "exclu"; reason: string }
+  | { kind: "non_rattache" }
+  | { kind: "hors_charges" };
+
+/**
+ * Classe un numéro de compte. Le préfixe le plus long gagne : 611
+ * (sous-traitance) doit primer sur 61 (services extérieurs), sinon un poste
+ * direct serait compté en exploitation.
+ */
+export function classifyAccount(accountNumber: string): AccountClassification {
+  if (!accountNumber.startsWith("6")) return { kind: "hors_charges" };
+  const excluded = EXCLUDED_ACCOUNTS.find((entry) => accountNumber.startsWith(entry.prefix));
+  if (excluded) return { kind: "exclu", reason: excluded.reason };
   let best: CostCategory | null = null;
   let bestLength = 0;
   for (const category of COST_CATEGORIES) {
@@ -106,5 +136,12 @@ export function categoryForAccount(accountNumber: string): CostCategory | null {
       }
     }
   }
-  return best;
+  // Classe 6, ni exclu, ni rattaché : une charge réelle de niveau inconnu.
+  return best === null ? { kind: "non_rattache" } : { kind: "poste", category: best };
+}
+
+/** Poste d'un compte, `null` s'il n'entre pas dans un poste attendu. */
+export function categoryForAccount(accountNumber: string): CostCategory | null {
+  const classified = classifyAccount(accountNumber);
+  return classified.kind === "poste" ? classified.category : null;
 }

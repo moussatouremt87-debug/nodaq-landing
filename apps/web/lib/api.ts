@@ -985,16 +985,25 @@ export const getProspectionPlan = (): Promise<ProspectionPlan> =>
 /* Marge (2.8) — le schéma REFUSE de porter un « marginRatio » nu : chaque
  * niveau porte son `kind`, et un plafond ne peut donc pas s'afficher comme un
  * résultat par un simple oubli de rendu. */
-export const MarginLevel = z.object({
+const MarginLevelBase = {
   level: z.string(),
   label: z.string(),
   costCents: z.number(),
   missingCategories: z.array(z.string()),
   marginCents: z.number(),
-  kind: z.enum(["complete", "borne_superieure"]),
-  marginRatio: z.number(),
   reason: z.string().min(1),
-});
+};
+
+/* Union DISCRIMINÉE : un niveau borné ne porte pas de `marginRatio`, donc le
+ * front ne peut pas afficher un point là où il n'y a qu'un plafond. */
+export const MarginLevel = z.discriminatedUnion("kind", [
+  z.object({ ...MarginLevelBase, kind: z.literal("complete"), marginRatio: z.number() }),
+  z.object({
+    ...MarginLevelBase,
+    kind: z.literal("borne_superieure"),
+    maxMarginRatio: z.number(),
+  }),
+]);
 
 export const MarginReport = z.object({
   month: z.string(),
@@ -1011,6 +1020,9 @@ export const MarginReport = z.object({
   ),
   levels: z.array(MarginLevel),
   missingCategories: z.array(z.object({ id: z.string(), label: z.string() })),
+  unmappedCents: z.number(),
+  revenueTruncated: z.boolean(),
+  costsPossiblyPartial: z.boolean(),
   notEvaluated: z.array(z.string()),
   excludedCount: z.number(),
   unusableCount: z.number(),

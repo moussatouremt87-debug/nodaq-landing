@@ -55,6 +55,21 @@ describe("deriveCharges", () => {
     expect(charges.some((charge) => charge.amountCents === 40_000)).toBe(false);
   });
 
+  it("un compte NON RATTACHÉ (603) devient une charge `non_rattachees`, pas un silence", () => {
+    // Avant l'audit 2.8, un 603 était compté avec les exclusions et
+    // disparaissait : la marge pouvait s'annoncer complète en l'ignorant.
+    const { charges, unmappedCount, excludedCount } = deriveCharges(
+      entriesOf([
+        ...charge("40", "20260610", "607100", "Achat", "1000,00"),
+        ...charge("41", "20260615", "603700", "Variation de stocks", "300,00"),
+      ]),
+    );
+    expect(unmappedCount).toBe(1);
+    expect(excludedCount).toBe(0);
+    const unmapped = charges.find((entry) => entry.category === "non_rattachees");
+    expect(unmapped?.amountCents).toBe(30_000);
+  });
+
   it("un avoir RÉDUIT la charge, il n'est pas ignoré", () => {
     const { charges } = deriveCharges(
       entriesOf([

@@ -27,9 +27,13 @@ CREATE TABLE "cost_entries" (
 -- Défense en profondeur : un poste hors catalogue serait silencieusement
 -- ignoré par le moteur, donc absent de la marge SANS être compté comme
 -- manquant — le pire des deux mondes.
+-- `non_rattachees` est un poste TECHNIQUE : les charges de classe 6 qu'aucun
+-- poste ne couvre (603 variation des stocks, 600, 608…). Sans lui, ces charges
+-- réelles disparaissaient en silence et la marge pouvait s'annoncer complète
+-- sur une base incomplète — le défaut central relevé par l'audit 2.8.
 ALTER TABLE "cost_entries"
   ADD CONSTRAINT "cost_entries_category_check"
-  CHECK ("category" IN ('achats', 'sous_traitance', 'main_oeuvre', 'services_exterieurs', 'impots_taxes', 'autres_charges'));
+  CHECK ("category" IN ('achats', 'sous_traitance', 'main_oeuvre', 'services_exterieurs', 'impots_taxes', 'autres_charges', 'non_rattachees'));
 
 ALTER TABLE "cost_entries"
   ADD CONSTRAINT "cost_entries_source_check"

@@ -1,4 +1,4 @@
-import { categoryForAccount } from "@nodaq/shared";
+import { classifyAccount, UNMAPPED_CATEGORY } from "@nodaq/shared";
 import type { FecEntry } from "./parse.js";
 
 /*
@@ -29,11 +29,20 @@ export interface DerivedCharge {
 }
 
 export interface ChargeDerivation {
+  /**
+   * Charges par (mois, poste). Le poste technique `non_rattachees` y figure
+   * comme les autres : c'est une charge RÉELLE dont on ignore le niveau, et le
+   * moteur de marge s'en sert pour refuser d'annoncer un résultat complet.
+   */
   charges: DerivedCharge[];
   /** Écritures de classe 6 volontairement écartées (dotations, IS…). */
   excludedCount: number;
-  /** Écritures de charge à date illisible : comptées, jamais rattachées au hasard. */
-  undatedCount: number;
+  /**
+   * Écritures de classe 6 qu'aucun poste ne couvre. Comptées SÉPARÉMENT des
+   * exclusions : confondre les deux faisait disparaître une charge réelle en
+   * silence (audit 2.8).
+   */
+  unmappedCount: number;
 }
 
 /**
@@ -46,23 +55,23 @@ export interface ChargeDerivation {
 export function deriveCharges(entries: readonly FecEntry[]): ChargeDerivation {
   const totals = new Map<string, number>();
   let excludedCount = 0;
-  let undatedCount = 0;
+  let unmappedCount = 0;
 
   for (const entry of entries) {
-    if (!entry.compteNum.startsWith("6")) continue;
-    const category = categoryForAccount(entry.compteNum);
-    if (category === null) {
-      // Classe 6 mais hors marge par décision (dotations, financier, IS).
+    const classified = classifyAccount(entry.compteNum);
+    if (classified.kind === "hors_charges") continue;
+    if (classified.kind === "exclu") {
+      // Hors marge PAR DÉCISION (dotations, financier, exceptionnel, IS).
       excludedCount += 1;
       continue;
     }
     const month = entry.ecritureDate.slice(0, 7);
-    if (!/^\d{4}-\d{2}$/.test(month)) {
-      // Rattacher une charge à un mois deviné fausserait DEUX mois.
-      undatedCount += 1;
-      continue;
-    }
-    const key = `${month}|${category.id}`;
+    // Le parseur rejette déjà tout fichier dont une date est non conforme :
+    // pas de branche « date illisible » ici, elle serait morte.
+    const category =
+      classified.kind === "poste" ? classified.category.id : UNMAPPED_CATEGORY;
+    if (classified.kind === "non_rattache") unmappedCount += 1;
+    const key = `${month}|${category}`;
     totals.set(key, (totals.get(key) ?? 0) + entry.debitCents - entry.creditCents);
   }
 
@@ -75,5 +84,5 @@ export function deriveCharges(entries: readonly FecEntry[]): ChargeDerivation {
     // résultat, ligne pour ligne.
     .sort((a, b) => a.month.localeCompare(b.month) || a.category.localeCompare(b.category));
 
-  return { charges, excludedCount, undatedCount };
+  return { charges, excludedCount, unmappedCount };
 }

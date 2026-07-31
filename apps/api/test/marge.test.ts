@@ -219,6 +219,43 @@ describe("charges : provenance et priorité", () => {
     expect(achats.map((cost) => cost.source).sort()).toEqual(["fec", "saisi"]);
   });
 
+  it("des charges non rattachées remontent jusqu'à l'écran et bornent la marge", async () => {
+    const month = "2026-01";
+    for (const category of [
+      "achats",
+      "sous_traitance",
+      "main_oeuvre",
+      "services_exterieurs",
+      "impots_taxes",
+      "autres_charges",
+    ]) {
+      await withTenant(orgId, (tx) =>
+        tx.costEntry.create({
+          data: { tenantId: orgId, month, category, amountCents: 10_000, source: "fec" },
+        }),
+      );
+    }
+    // 603 & co. : charge réelle de niveau inconnu.
+    await withTenant(orgId, (tx) =>
+      tx.costEntry.create({
+        data: {
+          tenantId: orgId,
+          month,
+          category: "non_rattachees",
+          amountCents: 50_000,
+          source: "fec",
+        },
+      }),
+    );
+    const body = (await app.inject({
+      method: "GET",
+      url: `/marge?month=${month}`,
+      headers: { cookie: ownerCookie },
+    })).json() as { unmappedCents: number; levels: { kind: string }[] };
+    expect(body.unmappedCents).toBe(50_000);
+    for (const level of body.levels) expect(level.kind).toBe("borne_superieure");
+  });
+
   it("une charge dérivée du FEC ne se supprime pas à la main : 409", async () => {
     const derived = await withTenant(orgId, (tx) =>
       tx.costEntry.create({

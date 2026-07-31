@@ -23,10 +23,39 @@ D'où la règle du module :
 > « Votre marge est **au plus** de 42 % — deux postes ne sont pas renseignés. »
 
 C'est mathématiquement vrai (les charges manquantes ne peuvent que réduire la
-marge) et impossible à confondre avec un résultat complet. Le champ
-`marginRatio` ne vit jamais seul : chaque niveau porte son `kind`
-(`complete` | `borne_superieure`), et l'écran écrit « au plus » **avant** le
-chiffre. Un plafond ne peut pas se lire comme un résultat, même en diagonale.
+marge) et impossible à confondre avec un résultat complet.
+
+La garantie est portée par une **union discriminée** : `marginRatio` n'existe
+que sur un niveau `complete`, `maxMarginRatio` sur un niveau
+`borne_superieure`. Un consommateur — écran ou modèle — ne peut donc pas
+afficher un point là où il n'y a qu'un plafond, même par distraction. Et
+l'écran écrit « au plus » **avant** le chiffre.
+
+*(Le code affichait d'abord un `marginRatio` nu dans les deux cas, pendant
+qu'un commentaire affirmait le contraire. L'audit l'a relevé ; c'est le genre
+d'écart entre la prose et le code qui coûte le plus cher.)*
+
+### Trois raisons de borner, pas une
+
+Un niveau est un plafond dès que **l'une** de ces trois conditions tient :
+
+1. **un poste attendu n'est pas renseigné** ;
+2. **des charges de classe 6 qu'aucun poste ne couvre** existent (603
+   variation des stocks, 600, 608…) — ce sont des charges *réelles* dont on
+   ignore le niveau. Elles sont déduites au niveau exploitation (le plafond se
+   rapproche de la vérité) mais interdisent d'annoncer un résultat ;
+3. **aucune charge n'est enregistrée sur un mois postérieur** — preuve
+   indirecte et bon marché que la comptabilité du mois n'est peut-être pas
+   arrêtée. En PME, des charges arrivent avec un ou deux mois de retard, et le
+   dernier mois d'un FEC s'arrête souvent en plein milieu. « Les six postes
+   sont renseignés » ne vaut pas « le mois est clos ».
+
+La deuxième condition est le défaut central qu'a trouvé l'audit : un compte
+non rattaché était compté avec les *exclusions volontaires* et disparaissait.
+Un négociant dont le 607 était présent pouvait obtenir un pourcentage **ferme**
+alors que ses 603 de déstockage — une charge réelle — avaient été avalés en
+silence. `exclu` et `non_rattaché` sont désormais deux verdicts distincts : le
+premier se tait (il porte sa raison), le second borne la marge.
 
 ## Deux niveaux, empilés
 
@@ -45,12 +74,22 @@ pendant que la marge d'exploitation reste un plafond.
 sont agrégées par (mois, poste) — **agrégats seulement** : aucun libellé,
 aucun tiers, aucune ligne du journal n'en sort (donnée confidentielle, 2.14).
 
-**De la saisie de l'owner**, pour compléter. Les deux sources coexistent :
-l'unicité porte sur `(tenant, mois, poste, source)`, donc un nouvel import ne
-piétine pas une saisie, et une saisie ne masque pas l'import. Une charge
-dérivée du FEC ne se supprime d'ailleurs pas à la main (409) : elle
+**De la saisie de l'owner**, pour compléter. Les deux sources coexistent en
+base — l'unicité porte sur `(tenant, mois, poste, source)`, donc un import ne
+piétine pas une saisie et réciproquement — mais **au calcul, la comptabilité
+prime** : pour un même poste, la ligne `fec` l'emporte et la saisie est
+ignorée. Sans cette règle, l'owner qui déclare un poste « non renseigné » puis
+importe son FEC verrait la charge comptée **deux fois**.
+
+Une charge dérivée du FEC ne se supprime pas à la main (409) : elle
 reviendrait au prochain import, et son absence ferait remonter la marge sans
 que personne sache pourquoi.
+
+Ce que l'import ne peut ni rattacher ni stocker est **dit** dans les
+avertissements du rapport d'import : écritures sans poste de marge, agrégats
+hors bornes. Une charge avalée en silence embellit la marge sans laisser de
+trace — et les charges dérivées sont validées **avant** l'écriture, pour qu'une
+ligne aberrante n'emporte pas tout l'import.
 
 Sans cette dérivation, la marge reposerait sur une saisie mensuelle que
 personne ne tient à jour — et l'oubli est précisément ce qui l'embellit.
@@ -88,6 +127,11 @@ dépasser les achats. Le ramener à zéro fabriquerait une charge inexistante.
 
 ## Cohérence du chiffre d'affaires
 
+Une **lecture tronquée** du facturier est signalée (`revenueTruncated`) : elle
+change le *dénominateur*, donc le pourcentage lui-même — pas seulement la liste
+des charges. Et un facturier indisponible n'affiche pas « 0,00 € » : un chiffre
+d'affaires inconnu n'est pas un chiffre d'affaires nul.
+
 Le CA suit la **même séquence de décisions** que la prévision (3.1) et le
 rapport mensuel (2.11) — `normalizeSaleInvoice` : brouillons, avoirs et
 factures annulées écartés, devise étrangère jamais convertie, montant
@@ -117,9 +161,12 @@ la policy.
 - **Pas de marge par chantier ni par client.** Il faudrait imputer chaque
   charge à une affaire — c'est un choix de gestion analytique que le produit
   ne peut pas deviner depuis un FEC.
-- **Pas de stocks dans le calcul.** La variation de stock (comptes 603) n'est
-  pas retraitée : sur un mois où l'entreprise stocke beaucoup, les achats
-  surestiment le coût des ventes. Dit ici plutôt que découvert.
+- **Pas de retraitement de la variation de stock.** Les comptes 603 ne sont
+  rattachés à aucun poste : ils comptent comme « charges non rattachées », ce
+  qui **borne** la marge au lieu de la fausser. L'effet est réel dans les deux
+  sens — sur un mois de stockage les achats surestiment le coût des ventes, sur
+  un mois de déstockage ils le sous-estiment et embellissent la marge — d'où la
+  borne plutôt qu'un chiffre.
 - **Le coût d'achat des articles (3.3) n'est pas utilisé.** Il ne couvre que
   les articles en stock — l'utiliser comme coût des ventes ignorerait la
   main-d'œuvre et les frais généraux, c'est-à-dire referait l'erreur du

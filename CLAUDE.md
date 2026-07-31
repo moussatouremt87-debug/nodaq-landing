@@ -73,14 +73,22 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > **Marge (2.8)** : le ticket que 2.11 avait refusé de faire à moitié. Le
 > danger est ASYMÉTRIQUE — une charge oubliée fait TOUJOURS paraître la marge
 > meilleure. Règle centrale : une base de charges incomplète ne produit PAS un
-> chiffre mais une BORNE SUPÉRIEURE (« au plus X % »), chaque niveau portant
-> son `kind` (`complete`|`borne_superieure`) et l'écran écrivant « au plus »
-> AVANT le chiffre ; postes manquants NOMMÉS, jamais supposés à zéro. Deux
+> chiffre mais une BORNE SUPÉRIEURE (« au plus X % ») — portée par une UNION
+> DISCRIMINÉE (`marginRatio` seulement si `complete`, `maxMarginRatio` si
+> borné : un écran ou un modèle ne PEUT pas afficher un point là où il n'y a
+> qu'un plafond), écran écrivant « au plus » AVANT le chiffre ; postes
+> manquants NOMMÉS, jamais supposés à zéro. TROIS causes de bornage : poste
+> manquant, charges NON RATTACHÉES (603/600/608 — `exclu` ≠ `non_rattache`,
+> les confondre faisait disparaître une charge réelle et permettait un
+> pourcentage FERME sur base amputée), et aucune charge sur un mois POSTÉRIEUR
+> (la compta du mois n'est peut-être pas arrêtée). Deux
 > niveaux empilés (marge brute = achats + sous-traitance ; marge
 > d'exploitation = + personnel/services/impôts/autres), qualifiés séparément.
 > Charges = dérivées du FEC à l'import (`deriveCharges`, AGRÉGATS seuls —
 > aucun libellé ni tiers, donnée confidentielle 2.14) + saisie owner, les deux
-> coexistant par l'unicité (tenant, mois, poste, SOURCE) ; une charge `fec` ne
+> coexistant EN BASE par l'unicité (tenant, mois, poste, SOURCE) mais au
+> CALCUL la compta PRIME (sinon double compte) ; charges dérivées VALIDÉES
+> avant écriture (une ligne aberrante ne doit pas emporter tout l'import) ; une charge `fec` ne
 > se supprime pas à la main (409 — elle reviendrait, et son absence
 > embellirait la marge). Rattachement compte PCG → poste = CONFIG VERSIONNÉE
 > DATÉE SOURCÉE (`costCategories.ts`, ANC 2014-03) avec préfixe LE PLUS LONG

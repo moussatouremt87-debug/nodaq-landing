@@ -60,6 +60,7 @@ import type { RegistryAsset } from "@nodaq/shared";
 import {
   COST_CATEGORY_IDS,
   INTERACTION_KINDS,
+  STORABLE_CATEGORY_IDS,
   PROSPECT_SOURCES,
   PROSPECT_STAGES,
 } from "@nodaq/shared";
@@ -844,6 +845,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         // personne ne tient — et l'oubli fait justement paraître la marge
         // meilleure qu'elle n'est. Agrégats SEULEMENT (mois, poste, montant).
         const chargeDerivation = deriveCharges(parsed.entries);
+        // Lignes de charge écartées à l'écriture : comptées, jamais tues.
+        let rejectedCharges = 0;
 
         // Métadonnée d'affichage : nom de fichier assaini, optionnel.
         let fileName: string | null = null;
@@ -859,7 +862,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           }
         }
 
-        const warnings = [...parsed.warnings, ...derivation.warnings];
+        // Charges (2.8) : ce qui n'a pas pu être rattaché ou stocké est DIT.
+        // Une charge avalée en silence embellit la marge sans laisser de trace.
+        const chargeWarnings: string[] = [];
+        if (chargeDerivation.unmappedCount > 0) {
+          chargeWarnings.push(
+            `${chargeDerivation.unmappedCount} écriture(s) de charge sans poste de marge ` +
+              "(variation de stocks, comptes hors catalogue) : la marge restera un plafond",
+          );
+        }
+        const warnings = [...parsed.warnings, ...derivation.warnings, ...chargeWarnings];
         type Outcome =
           | { kind: "already"; existing: { entryCount: number; customerCount: number; invoiceCount: number; overdueCount: number; overdueCents: bigint; warnings: unknown } }
           | { kind: "created" };
@@ -916,9 +928,20 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
               await tx.costEntry.deleteMany({
                 where: { tenantId: request.tenantId, source: "fec" },
               });
-              for (let i = 0; i < chargeDerivation.charges.length; i += 5000) {
+              // Validation AVANT écriture : un poste hors catalogue ou un
+              // agrégat hors bornes violerait le CHECK et ferait échouer TOUT
+              // l'import (500) au lieu de rejeter une ligne. Le CHECK reste le
+              // dernier rempart, il n'est pas le premier.
+              const storable = chargeDerivation.charges.filter(
+                (charge) =>
+                  STORABLE_CATEGORY_IDS.includes(charge.category) &&
+                  Number.isSafeInteger(charge.amountCents) &&
+                  Math.abs(charge.amountCents) <= 2_000_000_000,
+              );
+              rejectedCharges = chargeDerivation.charges.length - storable.length;
+              for (let i = 0; i < storable.length; i += 5000) {
                 await tx.costEntry.createMany({
-                  data: chargeDerivation.charges.slice(i, i + 5000).map((charge) => ({
+                  data: storable.slice(i, i + 5000).map((charge) => ({
                     tenantId: request.tenantId,
                     month: charge.month,
                     category: charge.category,
@@ -977,6 +1000,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         const proposals = allProposals.slice(0, 200);
         if (allProposals.length > 200) {
           warnings.push("propositions d'immobilisations tronquées à 200");
+        }
+        if (rejectedCharges > 0) {
+          warnings.push(
+            `${rejectedCharges} agrégat(s) de charges non enregistré(s) (hors bornes) : ` +
+              "la marge de ces mois restera un plafond",
+          );
         }
         try {
           if (proposals.length > 0) {
@@ -2808,9 +2837,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // Saisie d'une charge par l'owner. Source `saisi` : elle ne peut donc jamais
   // être écrasée par un import FEC (l'unicité porte la source), ni l'écraser.
   app.put("/marge/charges", { preHandler: ownerRoute }, async (request, reply) => {
+    // En-tête posé AVANT toute sortie : un 400 aussi porte une réponse.
+    void reply.header("cache-control", "private, no-store");
     const parsed = CostBody.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
-    void reply.header("cache-control", "private, no-store");
     const { month, category, amountCents } = parsed.data;
     const saved = await withTenant(request.tenantId, (tx) =>
       tx.costEntry.upsert({

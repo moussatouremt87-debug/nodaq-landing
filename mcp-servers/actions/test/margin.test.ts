@@ -39,6 +39,8 @@ describe("base incomplète : une BORNE, jamais un chiffre", () => {
     const report = buildMarginReport(INVOICES, [cost("achats", 30_000)], "2026-06");
     const brute = report.levels.find((level) => level.level === "direct");
     expect(brute?.kind).toBe("borne_superieure");
+    // Union discriminée : un niveau borné ne porte PAS de `marginRatio`.
+    expect(brute && "marginRatio" in brute).toBe(false);
     expect(brute?.missingCategories).toContain("Sous-traitance et travaux confiés");
     expect(brute?.reason).toContain("AU PLUS");
     expect(brute?.reason).toContain("INFÉRIEURE");
@@ -81,6 +83,7 @@ describe("base complète : un chiffre est un chiffre", () => {
     const report = buildMarginReport(INVOICES, COMPLETE, "2026-06");
     const exploitation = report.levels.find((level) => level.level === "exploitation");
     expect(exploitation?.kind).toBe("complete");
+    expect(exploitation && "maxMarginRatio" in exploitation).toBe(false);
     expect(exploitation?.missingCategories).toEqual([]);
     // 100 000 € de CA − 76 000 € de charges = 24 000 €.
     expect(exploitation?.marginCents).toBe(2_400_000);
@@ -154,15 +157,60 @@ describe("invariants", () => {
     );
   });
 
-  it("plusieurs sources sur un même poste s'additionnent, et la provenance est portée", () => {
+  it("FEC et saisie sur un même poste : la comptabilité PRIME, pas de double compte", () => {
+    // Un owner qui saisit un poste « non renseigné » puis importe son FEC
+    // verrait sinon la charge comptée deux fois (audit 2.8).
     const report = buildMarginReport(
       INVOICES,
       [cost("achats", 20_000, "fec"), cost("achats", 10_000, "saisi")],
       "2026-06",
     );
     const achats = report.costs.find((line) => line.category === "achats");
-    expect(achats?.amountCents).toBe(3_000_000);
-    expect(achats?.source).toBe("fec+saisi");
+    expect(achats?.amountCents).toBe(2_000_000);
+    expect(achats?.source).toBe("fec");
+  });
+
+  it("saisie seule : elle compte, et sa provenance est dite", () => {
+    const report = buildMarginReport(INVOICES, [cost("achats", 10_000, "saisi")], "2026-06");
+    const achats = report.costs.find((line) => line.category === "achats");
+    expect(achats?.amountCents).toBe(1_000_000);
+    expect(achats?.source).toBe("saisi");
+  });
+
+  it("BLOQUANT corrigé : des charges non rattachées INTERDISENT un résultat complet", () => {
+    // 603 & co. : charges réelles de niveau inconnu. Sans ce garde, les six
+    // postes peuplés donnaient « complete » sur une base amputée — un
+    // pourcentage ferme biaisé dans le sens rassurant.
+    const report = buildMarginReport(
+      INVOICES,
+      [...COMPLETE, { category: "non_rattachees", month: "2026-06", amountCents: 500_000, source: "fec" }],
+      "2026-06",
+    );
+    expect(report.unmappedCents).toBe(500_000);
+    for (const level of report.levels) {
+      expect(level.kind).toBe("borne_superieure");
+    }
+    const exploitation = report.levels.find((level) => level.level === "exploitation");
+    // Elles sont DÉDUITES au niveau exploitation : le plafond se rapproche de
+    // la vérité au lieu de rester flatteur.
+    expect(exploitation?.marginCents).toBe(1_900_000);
+    expect(exploitation?.reason).toContain("aucun poste ne couvre");
+  });
+
+  it("mois peut-être pas arrêté : « tous les postes renseignés » ne suffit pas", () => {
+    // En PME, des charges arrivent avec un ou deux mois de retard, et le
+    // dernier mois d'un FEC s'arrête souvent en plein milieu.
+    const report = buildMarginReport(INVOICES, COMPLETE, "2026-06", {
+      costsPossiblyPartial: true,
+    });
+    for (const level of report.levels) expect(level.kind).toBe("borne_superieure");
+    expect(report.levels[0]?.reason).toContain("pas arrêtée");
+  });
+
+  it("lecture du facturier tronquée : le dénominateur est douteux, et c'est DIT", () => {
+    const report = buildMarginReport(INVOICES, COMPLETE, "2026-06", { revenueTruncated: true });
+    expect(report.revenueTruncated).toBe(true);
+    expect(report.notEvaluated.some((line) => line.includes("tronquée"))).toBe(true);
   });
 
   it("label PERMANENT : une charge oubliée embellit TOUJOURS la marge", () => {

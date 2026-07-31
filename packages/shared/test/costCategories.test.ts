@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   categoryForAccount,
+  classifyAccount,
   COST_CATEGORIES,
   COST_RULES_VERSION,
   EXCLUDED_ACCOUNTS,
@@ -62,6 +63,17 @@ describe("rattachement des comptes", () => {
     for (const account of ["411000", "706", "2183"]) {
       expect(categoryForAccount(account)).toBeNull();
     }
+  });
+
+  it("EXCLU et NON RATTACHÉ sont deux choses différentes", () => {
+    // Les confondre faisait disparaître une charge réelle en silence, et la
+    // marge pouvait alors s'annoncer « complète » sur une base incomplète.
+    expect(classifyAccount("681120").kind).toBe("exclu");
+    // 603 = variation des stocks : une charge réelle, hors catalogue.
+    expect(classifyAccount("603700").kind).toBe("non_rattache");
+    expect(classifyAccount("608000").kind).toBe("non_rattache");
+    expect(classifyAccount("607100").kind).toBe("poste");
+    expect(classifyAccount("411000").kind).toBe("hors_charges");
   });
 
   it("PURE : deux appels identiques donnent le même rattachement", () => {
