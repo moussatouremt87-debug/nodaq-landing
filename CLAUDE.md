@@ -54,6 +54,17 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > reformule au lieu d'inventer un chiffre) ; unité (centimes) et troncature
 > DITES, tri par l'agrégat côté base ; outil `query_business_data` (membres) +
 > `POST /cockpit/ask` = même boucle que le chat (`docs/cockpit-conversationnel.md`).
+> **Devis depuis un e-mail (2.7)** : premier ticket où du texte de TIERS
+> alimente une préparation d'ÉCRITURE — 3 gardes testées (corps délimité et
+> annoncé comme donnée jamais instruction ; pipeline d'extraction SANS AUCUN
+> OUTIL — `route()` nu, pas la boucle d'agent, donc une injection n'a rien à
+> détourner ; sortie Zod bornée → `pending_action` `create_quote`) ; AUCUN
+> PRIX inventé : le schéma n'a pas de champ de prix (un prix glissé par le
+> modèle est strippé), `unitCostCents` (COÛT owner-only 3.3) n'est même pas lu
+> — vendre au coût serait une erreur de gestion ; rapprochement au référentiel
+> `quoteRequest.ts` (pur) = exact | probable | AUCUNE (jamais forcé : une
+> ligne vide se relit, une ligne fausse ne se relit pas), `unmatchedCount`
+> jamais tu ; corps jamais logué ni renvoyé (`docs/devis-email.md`).
 > **Banque DSP2 (2.15)** : `getBankClient()` = Qonto direct sinon agrégateur Bridge
 > (toutes banques FR) — TOUS les consommateurs bancaires passent par lui, jamais par
 > un client direct ; identifiants Bridge (clientId/clientSecret/userUuid) testés

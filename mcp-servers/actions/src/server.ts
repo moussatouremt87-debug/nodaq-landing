@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { withTenant } from "@nodaq/db";
+import type { Prisma } from "@nodaq/db";
 import { route } from "@nodaq/llm";
 import { getBankClient, getPennylaneClient } from "@nodaq/mcp-connectors";
 import type { RegistryOptions } from "@nodaq/mcp-connectors";
@@ -28,6 +29,14 @@ import type { OcrClientOptions } from "./ocrClient.js";
 import { extractInvoiceText } from "./ocrClient.js";
 import { analyzeCustomerSignals } from "./customerSignals.js";
 import { runDataQuery } from "./dataQuery.js";
+import {
+  buildQuoteProposal,
+  EMAIL_BODY_MAX,
+  QUOTE_EXTRACTION_PROMPT,
+  QuoteRequestExtraction,
+  wrapEmailBody,
+} from "./quoteRequest.js";
+import type { CatalogItem } from "./quoteRequest.js";
 import { simulateMaterialPrices } from "./materialScenario.js";
 import { analyzeHourlyPerformance } from "./hourlyPerformance.js";
 import { buildMonthlySeries, fetchInvoiceWindow, forecastSales } from "./salesForecast.js";
@@ -91,6 +100,7 @@ export const TOOL_POLICIES = {
   check_rgpd_register: { requiresValidation: false },
   analyze_reputation: { requiresValidation: false },
   draft_review_reply: { requiresValidation: true },
+  draft_quote_from_email: { requiresValidation: true },
   check_stock_alerts: { requiresValidation: false },
   adjust_stock: { requiresValidation: true },
   simulate_material_prices: { requiresValidation: false },
@@ -751,6 +761,107 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
               // une réponse à deux ordres de grandeur près.
               unit: compiled.plan.measureColumn?.endsWith("Cents") ? "centimes" : "unités",
               ...outcome,
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  // Devis depuis un e-mail (2.7) : le premier ticket où du texte écrit par un
+  // INCONNU alimente une préparation d'écriture. Le pipeline d'extraction n'a
+  // AUCUN OUTIL (doctrine 2.18) — une injection réussie n'a rien à détourner —
+  // et la sortie est un objet borné, puis une pending_action.
+  server.registerTool(
+    "draft_quote_from_email",
+    {
+      description:
+        "Prépare une PROPOSITION de devis à partir d'un e-mail reçu (ticket 2.7) : la " +
+        "demande est extraite, les articles rapprochés du référentiel, et la proposition " +
+        "déposée dans la file de validation. N'ENVOIE JAMAIS et NE FIXE AUCUN PRIX : les " +
+        "montants sont laissés au dirigeant.",
+      inputSchema: {
+        emailBody: z
+          .string()
+          .min(10)
+          .max(EMAIL_BODY_MAX)
+          .describe("Corps de l'e-mail reçu (texte brut)"),
+        from: z.string().max(320).optional().describe("Expéditeur, tel qu'affiché"),
+      },
+      annotations,
+    },
+    async ({ emailBody, from }) => {
+      // Le référentiel sert à RECONNAÎTRE, pas à chiffrer : `unitCostCents`
+      // (coût d'achat, owner-only 3.3) n'est délibérément pas lu ici.
+      const catalog = await withTenant(tenantId, (tx) =>
+        tx.stockItem.findMany({
+          select: { id: true, name: true, sku: true, unit: true },
+          take: 500,
+        }),
+      );
+
+      const requestId = `quote-email-${randomUUID()}`;
+      const answer = await route({
+        text: `${QUOTE_EXTRACTION_PROMPT}${wrapEmailBody(emailBody)}`,
+        category: "confidentiel",
+        tenantId,
+        requestId,
+      });
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(
+          answer.text
+            .trim()
+            .replace(/^```(?:json)?\s*/i, "")
+            .replace(/\s*```$/, ""),
+        );
+      } catch {
+        // Jamais la sortie du modèle dans l'erreur : elle contient l'e-mail.
+        throw new Error("quote extraction returned non-JSON output");
+      }
+      const extraction = QuoteRequestExtraction.parse(parsed);
+      const proposal = buildQuoteProposal(extraction, catalog as CatalogItem[]);
+
+      const pendingAction = await withTenant(tenantId, (tx) =>
+        tx.pendingAction.create({
+          data: {
+            tenantId,
+            type: "create_quote",
+            requestedBy: context.requestedBy ?? null,
+            employee: context.employee ?? null,
+            payload: {
+              quote: {
+                // `number` et `amountCents` restent ABSENTS : un devis sans
+                // prix n'a pas de montant, et le numéro vient du facturier au
+                // moment de l'émission.
+                customer: proposal.customerName,
+                label: proposal.summary,
+                deadline: proposal.deadline,
+                lines: proposal.lines,
+                unmatchedCount: proposal.unmatchedCount,
+              },
+              source: "email",
+              // Expéditeur conservé pour que l'humain sache À QUI répondre —
+              // borné, et jamais renvoyé au modèle.
+              from: typeof from === "string" ? from.slice(0, 320) : null,
+              label: proposal.label,
+            } as unknown as Prisma.InputJsonValue,
+          },
+        }),
+      );
+      context.onPendingAction?.();
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              pendingActionId: pendingAction.id,
+              status: "pending_validation",
+              lines: proposal.lines.length,
+              unmatchedCount: proposal.unmatchedCount,
+              pricing: "à fixer par le dirigeant",
             }),
           },
         ],
