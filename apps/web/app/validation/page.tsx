@@ -100,6 +100,20 @@ function actionLine(action: PendingActionSummary, detail: PendingActionDetail | 
         .join(" · "),
     };
   }
+  // Relance prospect (2.12) : l'owner doit voir QUI est relancé et que rien
+  // ne part — approuver consigne le contact, l'envoi reste manuel.
+  if (action.type === "record_prospect_contact" && payload) {
+    const prospect = asDict(payload.prospect);
+    return {
+      title: "Relance prospect",
+      meta: [
+        prospect ? asString(prospect.stage) : null,
+        "aucun envoi : le message se copie après validation",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
   // Facturation électronique (2.4) : ce que l'owner approuve part sur le
   // réseau national — le résumé dit QUOI, pour QUEL montant, sans détour.
   if (action.type === "submit_einvoice" && payload) {

@@ -57,6 +57,7 @@ import {
   VERTICALS,
 } from "@nodaq/shared";
 import type { RegistryAsset } from "@nodaq/shared";
+import { INTERACTION_KINDS, PROSPECT_SOURCES, PROSPECT_STAGES } from "@nodaq/shared";
 import { auth } from "./auth.js";
 import { DocExtraction, DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.js";
 import {
@@ -68,6 +69,7 @@ import {
 } from "./classeurMemory.js";
 import type { MemoryApplication, SupplierMemory } from "./classeurMemory.js";
 import { defaultExecutors } from "./executors.js";
+import { contactHashes } from "./prospectExclusion.js";
 import type { ExecutorRegistry } from "./executors.js";
 import {
   isAllowedPushEndpoint,
@@ -4247,6 +4249,363 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     replyText: true,
     repliedAt: true,
   } as const;
+
+  // --- CRM & prospection (2.12) — données personnelles de TIERS non clients.
+  // Accessible aux MEMBRES : prospecter est leur métier, et la fiche ne porte
+  // aucun chiffre d'affaires (contrairement aux signaux clients 3.4, owner-
+  // only). La suppression définitive, elle, reste à l'owner.
+
+  const PROSPECT_SELECT = {
+    id: true,
+    name: true,
+    company: true,
+    email: true,
+    phone: true,
+    stage: true,
+    source: true,
+    optedOut: true,
+    optedOutAt: true,
+    notes: true,
+    createdAt: true,
+  } as const;
+
+  /**
+   * Retire de la file les brouillons de relance visant ce prospect. Leur
+   * payload porte son nom : ni l'opposition ni l'effacement ne seraient
+   * complets s'ils survivaient dans `pending_actions`.
+   */
+  async function rejectProspectDrafts(
+    tx: Prisma.TransactionClient,
+    prospectId: string,
+  ): Promise<void> {
+    await tx.pendingAction.updateMany({
+      where: {
+        type: "record_prospect_contact",
+        status: "pending",
+        payload: { path: ["prospect", "id"], equals: prospectId },
+      },
+      data: {
+        status: "rejected",
+        // Le payload est RÉDUIT en même temps : rejeter sans réduire
+        // laisserait le brouillon nominatif en base indéfiniment.
+        payload: { reduced: true, prospectId } as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  app.get("/prospects", { preHandler: businessRoute }, async (request, reply) => {
+    // Fiches = données personnelles : jamais de cache partagé.
+    void reply.header("cache-control", "private, no-store");
+    // Troncature DITE (doctrine maison) : au-delà de la borne, une partie du
+    // CRM deviendrait invisible sans que personne le sache.
+    const PROSPECT_PAGE = 500;
+    const prospects = await withTenant(request.tenantId, (tx) =>
+      tx.prospect.findMany({
+        select: PROSPECT_SELECT,
+        orderBy: { createdAt: "desc" },
+        take: PROSPECT_PAGE + 1,
+      }),
+    );
+    return {
+      prospects: prospects.slice(0, PROSPECT_PAGE),
+      truncated: prospects.length > PROSPECT_PAGE,
+    };
+  });
+
+  const ProspectBody = z
+    .object({
+      name: z.string().min(1).max(200),
+      company: z.string().max(200).optional(),
+      // `.trim()` AVANT la validation : une adresse collée avec des espaces
+      // est la même adresse, et un 400 ici masquerait le contrôle
+      // d'exclusion qui vient juste après.
+      email: z.string().trim().email().max(320).optional(),
+      phone: z.string().trim().max(40).optional(),
+      stage: z.enum(PROSPECT_STAGES).default("nouveau"),
+      // Provenance EXIGÉE (art. 14) : pas de valeur par défaut, pas de fiche
+      // dont on ne saurait pas dire d'où elle vient.
+      source: z.enum(PROSPECT_SOURCES),
+      notes: z.string().max(1_000).optional(),
+    })
+    .strict();
+
+  app.post("/prospects", { preHandler: businessRoute }, async (request, reply) => {
+    const parsed = ProspectBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    void reply.header("cache-control", "private, no-store");
+    // LISTE D'EXCLUSION (audit 2.12) : une personne qui s'est opposée ne doit
+    // pas revenir par une resaisie. Ses coordonnées ayant été effacées, c'est
+    // le condensat qui la reconnaît — sinon la garde annoncée n'existe pas.
+    const hashes = contactHashes(request.tenantId, parsed.data);
+    if (hashes.length > 0) {
+      const excluded = await withTenant(request.tenantId, (tx) =>
+        tx.prospectExclusion.findFirst({
+          where: { contactHash: { in: hashes } },
+          select: { id: true },
+        }),
+      );
+      if (excluded) {
+        return reply.code(409).send({ error: "personne opposée à la prospection" });
+      }
+    }
+    const created = await withTenant(request.tenantId, (tx) =>
+      tx.prospect.create({
+        data: {
+          tenantId: request.tenantId,
+          name: parsed.data.name,
+          company: parsed.data.company ?? null,
+          email: parsed.data.email ?? null,
+          phone: parsed.data.phone ?? null,
+          stage: parsed.data.stage,
+          source: parsed.data.source,
+          notes: parsed.data.notes ?? null,
+        },
+        select: { id: true },
+      }),
+    );
+    return reply.code(201).send(created);
+  });
+
+  const ProspectPatchBody = z
+    .object({
+      stage: z.enum(PROSPECT_STAGES).optional(),
+      notes: z.string().max(1_000).optional(),
+      company: z.string().max(200).optional(),
+      // `.trim()` AVANT la validation : une adresse collée avec des espaces
+      // est la même adresse, et un 400 ici masquerait le contrôle
+      // d'exclusion qui vient juste après.
+      email: z.string().trim().email().max(320).optional(),
+      phone: z.string().trim().max(40).optional(),
+    })
+    .strict();
+
+  app.patch("/prospects/:id", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    const parsed = ProspectPatchBody.safeParse(request.body);
+    if (!params.success || !parsed.success) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    void reply.header("cache-control", "private, no-store");
+    // `optedOut` n'est PAS modifiable ici (schéma strict) : lever une
+    // opposition par un PATCH générique serait trop facile — elle a sa route.
+    const data = {
+      ...(parsed.data.stage !== undefined ? { stage: parsed.data.stage } : {}),
+      ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes } : {}),
+      ...(parsed.data.company !== undefined ? { company: parsed.data.company } : {}),
+      ...(parsed.data.email !== undefined ? { email: parsed.data.email } : {}),
+      ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone } : {}),
+    };
+    // Même garde qu'à la création : rattacher à une AUTRE fiche la coordonnée
+    // d'une personne opposée la ferait revenir dans les relances par la porte
+    // du PATCH.
+    const patchHashes = contactHashes(request.tenantId, parsed.data);
+    if (patchHashes.length > 0) {
+      const excluded = await withTenant(request.tenantId, (tx) =>
+        tx.prospectExclusion.findFirst({
+          where: { contactHash: { in: patchHashes } },
+          select: { id: true },
+        }),
+      );
+      if (excluded) {
+        return reply.code(409).send({ error: "personne opposée à la prospection" });
+      }
+    }
+    // `optedOut: false` dans le WHERE : sans lui, un PATCH remettrait un
+    // e-mail ou un téléphone sur une personne qui s'y est opposée — la
+    // minimisation faite à l'opposition serait défaite en un appel.
+    const { count } = await withTenant(request.tenantId, (tx) =>
+      tx.prospect.updateMany({ where: { id: params.data.id, optedOut: false }, data }),
+    );
+    if (count === 0) {
+      const exists = await withTenant(request.tenantId, (tx) =>
+        tx.prospect.findUnique({ where: { id: params.data.id }, select: { optedOut: true } }),
+      );
+      if (!exists) return reply.code(404).send({ error: "prospect not found" });
+      return reply.code(409).send({ error: "prospect opposé" });
+    }
+    return { updated: true };
+  });
+
+  const InteractionBody = z
+    .object({
+      kind: z.enum(INTERACTION_KINDS),
+      occurredAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      note: z.string().max(1_000).optional(),
+    })
+    .strict();
+
+  app.post("/prospects/:id/interactions", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    const parsed = InteractionBody.safeParse(request.body);
+    if (!params.success || !parsed.success) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    // Date STRICTEMENT calendaire : "2026-02-31" glisserait au 3 mars et
+    // décalerait un « dernier contact », donc une relance.
+    const occurredAt = new Date(`${parsed.data.occurredAt}T00:00:00Z`);
+    if (
+      Number.isNaN(occurredAt.getTime()) ||
+      occurredAt.toISOString().slice(0, 10) !== parsed.data.occurredAt
+    ) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    void reply.header("cache-control", "private, no-store");
+    // Lecture ET insertion dans la MÊME transaction (audit 2.12) : en deux
+    // transactions, une opposition validée entre les deux laisserait consigner
+    // un contact sur une personne qui vient de s'y opposer.
+    const created = await withTenant(request.tenantId, async (tx) => {
+      const prospect = await tx.prospect.findUnique({
+        where: { id: params.data.id },
+        select: { optedOut: true },
+      });
+      if (!prospect) return { error: "not-found" as const };
+      // Consigner un contact sur une personne opposée reviendrait à documenter
+      // une prospection qui n'aurait pas dû avoir lieu : refus net.
+      if (prospect.optedOut) return { error: "opposed" as const };
+      const row = await tx.prospectInteraction.create({
+        data: {
+          tenantId: request.tenantId,
+          prospectId: params.data.id,
+          kind: parsed.data.kind,
+          occurredAt,
+          note: parsed.data.note ?? null,
+          createdBy: request.authSession.user.id,
+        },
+        select: { id: true },
+      });
+      return { id: row.id };
+    });
+    if ("error" in created) {
+      return created.error === "not-found"
+        ? reply.code(404).send({ error: "prospect not found" })
+        : reply.code(409).send({ error: "prospect opposé" });
+    }
+    return reply.code(201).send(created);
+  });
+
+  app.get("/prospects/:id/interactions", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    void reply.header("cache-control", "private, no-store");
+    const JOURNAL_PAGE = 200;
+    const interactions = await withTenant(request.tenantId, (tx) =>
+      tx.prospectInteraction.findMany({
+        where: { prospectId: params.data.id },
+        select: { id: true, kind: true, occurredAt: true, note: true, createdAt: true },
+        orderBy: { occurredAt: "desc" },
+        take: JOURNAL_PAGE + 1,
+      }),
+    );
+    return {
+      interactions: interactions.slice(0, JOURNAL_PAGE),
+      truncated: interactions.length > JOURNAL_PAGE,
+    };
+  });
+
+  // Opposition (art. 21). Elle n'est PAS réversible depuis le produit : lever
+  // une opposition demanderait la preuve d'un nouveau consentement, que le
+  // produit n'a aucun moyen de recueillir ici. On garde la fiche MINIMALE —
+  // la supprimer laisserait la même personne être réimportée demain.
+  app.post("/prospects/:id/opposition", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    void reply.header("cache-control", "private, no-store");
+    const result = await withTenant(request.tenantId, async (tx) => {
+      const prospect = await tx.prospect.findUnique({
+        where: { id: params.data.id },
+        select: { id: true, optedOut: true, email: true, phone: true },
+      });
+      if (!prospect) return null;
+      if (prospect.optedOut) return { alreadyOptedOut: true };
+
+      // L'exclusion est dérivée AVANT l'effacement : après, la clé n'existe
+      // plus. C'est elle — et non la fiche conservée — qui empêche vraiment
+      // la personne d'être resaisie demain.
+      const hashes = contactHashes(request.tenantId, prospect);
+      if (hashes.length > 0) {
+        await tx.prospectExclusion.createMany({
+          data: hashes.map((hash) => ({ tenantId: request.tenantId, contactHash: hash })),
+          skipDuplicates: true,
+        });
+      }
+
+      await tx.prospect.update({
+        where: { id: prospect.id },
+        data: {
+          optedOut: true,
+          optedOutAt: new Date(),
+          // Minimisation immédiate : on ne garde que de quoi ne PAS
+          // recontacter la personne. Les coordonnées et les notes n'ont plus
+          // de finalité une fois l'opposition exprimée.
+          email: null,
+          phone: null,
+          notes: null,
+        },
+      });
+      // Les comptes rendus de contacts perdent aussi leur finalité : le
+      // journal reste (il prouve la chronologie) mais vidé de son contenu.
+      await tx.prospectInteraction.updateMany({
+        where: { prospectId: prospect.id },
+        data: { note: null },
+      });
+      // Une relance encore EN ATTENTE porte le nom de la personne dans son
+      // brouillon : la laisser en file, c'est garder — et pouvoir approuver —
+      // une prospection à laquelle elle vient de s'opposer.
+      await rejectProspectDrafts(tx, prospect.id);
+      return { alreadyOptedOut: false, hashed: hashes.length > 0 };
+    });
+    if (result === null) return reply.code(404).send({ error: "prospect not found" });
+    return { optedOut: true, ...result };
+  });
+
+  // Suppression définitive : OWNER. Effacer une fiche efface aussi son
+  // journal (cascade) — c'est le droit à l'effacement, pas un archivage.
+  app.delete(
+    "/prospects/:id",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+      if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+      void reply.header("cache-control", "private, no-store");
+      const count = await withTenant(request.tenantId, async (tx) => {
+        // La cascade FK emporte le journal, mais pas la file : un brouillon
+        // nominatif y survivrait à l'effacement, qui ne serait donc que
+        // partiel. On le retire dans la MÊME transaction.
+        await rejectProspectDrafts(tx, params.data.id);
+        const deleted = await tx.prospect.deleteMany({ where: { id: params.data.id } });
+        return deleted.count;
+      });
+      if (count === 0) return reply.code(404).send({ error: "prospect not found" });
+      return { deleted: true };
+    },
+  );
+
+  // Plan de relance : même chemin que l'agent (outil du toolset lié au
+  // tenant) — une implémentation, un seul jeu de seuils.
+  app.get("/prospection/suivi", { preHandler: businessRoute }, async (request, reply) => {
+    void reply.header("cache-control", "private, no-store");
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+      });
+      const result = await toolset.execute("list_prospection_followups", {});
+      return JSON.parse(result) as unknown;
+    } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "outil indisponible pour ce tenant" });
+      }
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "prospection plan unavailable",
+      );
+      return reply.code(503).send({ error: "suivi indisponible" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
 
   app.get("/avis", { preHandler: businessRoute }, async (request) => {
     const reviews = await withTenant(request.tenantId, (tx) =>

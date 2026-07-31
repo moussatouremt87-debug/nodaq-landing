@@ -13,6 +13,7 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   book_invoice: "Écriture comptable",
   create_fixed_asset: "Immobilisation proposée",
   record_review_reply: "Réponse à un avis client",
+  record_prospect_contact: "Relance prospect",
   submit_einvoice: "Dépôt de facture électronique",
   report_einvoice_transactions: "Transmission e-reporting",
 };
@@ -34,6 +35,7 @@ const ACTION_CHIP_LABELS: Record<string, string> = {
   book_invoice: "Écriture",
   create_fixed_asset: "Immo",
   record_review_reply: "Avis",
+  record_prospect_contact: "Prospect",
   submit_einvoice: "Facture",
   report_einvoice_transactions: "E-reporting",
 };

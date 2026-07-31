@@ -100,6 +100,18 @@ export function reduceFinishedPayload(
   payload: unknown,
 ): Prisma.InputJsonValue | null {
   if (type === "create_quote") return reduceQuotePayload(payload);
+  // Relance prospect (2.12) : le texte validé vit dans le journal du prospect
+  // (où il suit la vie de la fiche et sa suppression), pas indéfiniment dans
+  // la file. Rejetée, la proposition n'a plus aucune raison d'être conservée.
+  if (type === "record_prospect_contact") {
+    const data = payload as Record<string, unknown> | null;
+    const prospect = (data?.prospect ?? null) as Record<string, unknown> | null;
+    return {
+      reduced: true,
+      prospectId: typeof prospect?.id === "string" ? prospect.id : null,
+      stage: typeof prospect?.stage === "string" ? prospect.stage : null,
+    } as Prisma.InputJsonValue;
+  }
   if (type !== "submit_einvoice") return null;
   const data = payload as Record<string, unknown> | null;
   const invoice = (data?.invoice ?? null) as Record<string, unknown> | null;
