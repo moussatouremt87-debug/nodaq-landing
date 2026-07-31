@@ -49,6 +49,8 @@ export const OWNER_ONLY_TOOLS = new Set([
   "check_regulatory_watch",
   // Registre des traitements = document de conformité stratégique (3.9).
   "check_rgpd_register",
+  // Régime fiscal + montants d'impôts et de cotisations à payer (2.9).
+  "check_tax_calendar",
   "pennylane_get_invoices",
   "qonto_get_organization",
   "qonto_get_bank_transactions",

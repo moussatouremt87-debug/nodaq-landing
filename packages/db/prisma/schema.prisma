@@ -51,6 +51,7 @@ model Tenant {
   webhookEndpoints    WebhookEndpoint[]
   webhookEvents       WebhookEvent[]
   einvoiceSubmissions EInvoiceSubmission[]
+  taxDeadlines        TaxDeadline[]
 
   @@map("tenants")
   @@schema("public")
@@ -662,17 +663,37 @@ model StaffAbsence {
 /// l'utilisateur ; si absent, l'effectif est dérivé de `staff_members` côté app
 /// (jamais stocké en doublon ici). Sealed by RLS (see the migration
 /// `rls_tenant_profiles`).
+///
+/// Ticket 2.9 — profil FISCAL (pilote la génération de l'échéancier fiscal &
+/// social, `taxCalendar.ts`) : `vatRegime`/`payrollPeriodicity` valent
+/// respectivement 'inconnu'/'aucune' PAR DÉFAUT — le produit ne DEVINE JAMAIS
+/// le régime fiscal ou social d'une entreprise ; tant que l'owner n'a pas
+/// renseigné son profil, l'échéancier le DIT explicitement au lieu d'inventer
+/// des échéances. `corporateTaxLiable`/`fiscalYearEndMonth` pilotent les
+/// échéances d'IS (acomptes/solde).
 model TenantProfile {
-  id                String   @id @default(uuid()) @db.Uuid
-  tenantId          String   @unique @map("tenant_id") @db.Uuid
-  vertical          String   @default("autre")
-  headcountOverride Int?     @map("headcount_override")
+  id                 String   @id @default(uuid()) @db.Uuid
+  tenantId           String   @unique @map("tenant_id") @db.Uuid
+  vertical           String   @default("autre")
+  headcountOverride  Int?     @map("headcount_override")
   /// Surcharges de modules (3.11) : map moduleId -> bool, choix explicites de
   /// l'owner par-dessus les défauts du vertical (moduleCatalog.ts).
-  moduleOverrides   Json?    @map("module_overrides")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
-  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  moduleOverrides    Json?    @map("module_overrides")
+  /// 'inconnu' | 'franchise' | 'reel_simplifie' | 'reel_normal_mensuel' |
+  /// 'reel_normal_trimestriel' — validé côté app par Zod, défense en
+  /// profondeur via CHECK en base. 'inconnu' PAR DÉFAUT (jamais deviné).
+  vatRegime          String   @default("inconnu") @map("vat_regime")
+  /// Soumis à l'IS (impôt sur les sociétés) — pilote les échéances d'acomptes/solde.
+  corporateTaxLiable Boolean  @default(true) @map("corporate_tax_liable")
+  /// Mois de clôture de l'exercice (1..12) — défaut calendaire (décembre).
+  fiscalYearEndMonth Int      @default(12) @map("fiscal_year_end_month")
+  /// 'aucune' | 'mensuelle' | 'trimestrielle' — validé côté app par Zod,
+  /// défense en profondeur via CHECK en base. 'aucune' PAR DÉFAUT (jamais
+  /// deviné — pas de charges sociales inventées sans effectif déclaré).
+  payrollPeriodicity String   @default("aucune") @map("payroll_periodicity")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at")
+  tenant             Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("tenant_profiles")
   @@schema("public")
@@ -848,6 +869,38 @@ model EInvoiceSubmission {
   @@unique([tenantId, invoiceNumber, direction])
   @@index([tenantId, status])
   @@map("einvoice_submissions")
+  @@schema("public")
+}
+
+/// Ticket 2.9 — échéancier fiscal & social. Le calendrier lui-même est
+/// CALCULÉ (catalogue versionné `taxCalendar.ts` + profil fiscal du tenant),
+/// JAMAIS stocké : cette table ne porte QUE des surcharges HUMAINES posées
+/// par l'owner sur une occurrence dérivée précise (obligation + échéance).
+/// `amountCents` est le montant DÉCLARÉ par l'owner ; NULL = inconnu, jamais
+/// estimé par le produit. `@@unique([tenantId, obligationId, dueDate])`
+/// garantit une seule surcharge par occurrence. Sealed by RLS (see the
+/// migration `rls_tax_deadlines`).
+model TaxDeadline {
+  id           String    @id @default(uuid()) @db.Uuid
+  tenantId     String    @map("tenant_id") @db.Uuid
+  /// Identifiant de l'obligation dans le catalogue versionné (`taxCalendar.ts`).
+  obligationId String    @map("obligation_id")
+  /// Échéance concernée — une occurrence précise (le calendrier peut être récurrent).
+  dueDate      DateTime  @map("due_date") @db.Date
+  /// Montant DÉCLARÉ par l'owner, en centimes — NULL = inconnu, jamais estimé.
+  amountCents  Int?      @map("amount_cents")
+  /// 'prevu' | 'paye' | 'non_applicable' — validé côté app par Zod, défense
+  /// en profondeur via CHECK en base.
+  status       String    @default("prevu")
+  /// Annotation libre de l'owner — bornée côté app à 500 caractères.
+  note         String?
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at")
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, obligationId, dueDate])
+  @@index([tenantId, dueDate])
+  @@map("tax_deadlines")
   @@schema("public")
 }
 

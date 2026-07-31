@@ -59,6 +59,8 @@ let webhookEventAId: string;
 let webhookEventBId: string;
 let einvoiceSubmissionAId: string;
 let einvoiceSubmissionBId: string;
+let taxDeadlineAId: string;
+let taxDeadlineBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -88,6 +90,7 @@ beforeAll(async () => {
   await admin.webhookEvent.deleteMany();
   await admin.webhookEndpoint.deleteMany();
   await admin.eInvoiceSubmission.deleteMany();
+  await admin.taxDeadline.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -622,6 +625,34 @@ beforeAll(async () => {
   );
   einvoiceSubmissionAId = einvoiceSubmissionA.id;
   einvoiceSubmissionBId = einvoiceSubmissionB.id;
+
+  // obligationId est un identifiant de placeholder du catalogue versionné
+  // (taxCalendar.ts) ; amountCents reste NULL par défaut ici (montant DÉCLARÉ
+  // par l'owner, jamais estimé par le produit) — le calendrier lui-même est
+  // calculé, JAMAIS stocké : cette table ne porte que des surcharges humaines.
+  const taxDeadlineA = await withTenant(tenantA, (tx) =>
+    tx.taxDeadline.create({
+      data: {
+        tenantId: tenantA,
+        obligationId: "tva-reel-normal-mensuel",
+        dueDate: new Date("2026-08-24"),
+        status: "prevu",
+      },
+    }),
+  );
+  const taxDeadlineB = await withTenant(tenantB, (tx) =>
+    tx.taxDeadline.create({
+      data: {
+        tenantId: tenantB,
+        obligationId: "is-acompte",
+        dueDate: new Date("2026-09-15"),
+        amountCents: 50000,
+        status: "paye",
+      },
+    }),
+  );
+  taxDeadlineAId = taxDeadlineA.id;
+  taxDeadlineBId = taxDeadlineB.id;
 });
 
 afterAll(async () => {
@@ -825,6 +856,14 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur einvoice_submissions", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'einvoice_submissions'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur tax_deadlines", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'tax_deadlines'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -1614,6 +1653,40 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (tax_deadlines) — withTenant(A) ne voit QUE l'échéance de A", async () => {
+    const deadlines = await withTenant(tenantA, (tx) => tx.taxDeadline.findMany());
+    expect(deadlines).toHaveLength(1);
+    expect(deadlines[0]?.id).toBe(taxDeadlineAId);
+    expect(deadlines.some((d) => d.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (tax_deadlines) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const deadlines = await prisma.taxDeadline.findMany();
+    expect(deadlines).toHaveLength(0);
+  });
+
+  it("test 3 (tax_deadlines) — lire l'échéance de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.taxDeadline.findUnique({ where: { id: taxDeadlineBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (tax_deadlines) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.taxDeadline.create({
+          data: {
+            tenantId: tenantB,
+            obligationId: "intrusion",
+            dueDate: new Date("2026-10-01"),
+            status: "prevu",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -2093,5 +2166,25 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const submissions = await withTenant(tenantA, (tx) => tx.eInvoiceSubmission.findMany());
     expect(submissions).toHaveLength(1);
+  });
+
+  it("policy désactivée sur tax_deadlines => la fuite se produit aussi (les surcharges des deux tenants deviennent visibles)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "tax_deadlines" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.taxDeadline.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((d) => d.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.taxDeadline.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "tax_deadlines" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "tax_deadlines" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const deadlines = await withTenant(tenantA, (tx) => tx.taxDeadline.findMany());
+    expect(deadlines).toHaveLength(1);
   });
 });

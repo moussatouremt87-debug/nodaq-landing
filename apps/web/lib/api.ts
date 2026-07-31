@@ -1122,6 +1122,84 @@ export const proposeEReporting = (declaration: {
     body: JSON.stringify(declaration),
   });
 
+/*
+ * Échéancier fiscal & social (2.9). Le calendrier est DÉRIVÉ à chaque
+ * lecture ; seules les décisions du dirigeant (montant, payé, non
+ * applicable) sont enregistrées.
+ */
+export const FiscalProfile = z.object({
+  vatRegime: z.string(),
+  corporateTaxLiable: z.boolean(),
+  fiscalYearEndMonth: z.number(),
+  payrollPeriodicity: z.string(),
+  rulesVersion: z.string().optional(),
+});
+export type FiscalProfile = z.infer<typeof FiscalProfile>;
+
+export const TaxDeadline = z.object({
+  obligationId: z.string(),
+  label: z.string(),
+  category: z.string(),
+  dueDate: z.string(),
+  period: z.string(),
+  basis: z.string(),
+  dateIsApproximate: z.boolean(),
+  source: z.object({ label: z.string(), url: z.string() }),
+  amountCents: z.number().nullable(),
+  status: z.string(),
+  note: z.string().nullable(),
+});
+export type TaxDeadline = z.infer<typeof TaxDeadline>;
+
+export const TaxSchedule = z.object({
+  rulesVersion: z.string(),
+  from: z.string(),
+  to: z.string(),
+  deadlines: z.array(TaxDeadline),
+  gaps: z.array(z.string()),
+  plannedOutflowCents: z.number(),
+  unpricedCount: z.number(),
+  label: z.string(),
+});
+export type TaxSchedule = z.infer<typeof TaxSchedule>;
+
+export const getTaxSchedule = (monthsAhead = 3): Promise<TaxSchedule> =>
+  call(TaxSchedule, `/echeancier?monthsAhead=${monthsAhead}`);
+
+/**
+ * Variante pour le cockpit : l'échéancier est owner-only côté API, alors on
+ * ne l'appelle QUE pour un owner. Sans ce garde, chaque ouverture du cockpit
+ * par un membre ou un expert-comptable produirait un 403 dans les logs API.
+ */
+export const getTaxScheduleIfOwner = async (
+  monthsAhead = 3,
+): Promise<TaxSchedule | null> => {
+  const session = await getMe();
+  const active = session.memberships.find((m) => m.tenantId === session.activeOrganizationId);
+  if (active?.role !== "owner") return null;
+  return getTaxSchedule(monthsAhead);
+};
+
+export const getFiscalProfile = (): Promise<FiscalProfile> =>
+  call(FiscalProfile, "/echeancier/profil");
+
+export const putFiscalProfile = (profile: {
+  vatRegime: string;
+  corporateTaxLiable: boolean;
+  fiscalYearEndMonth: number;
+  payrollPeriodicity: string;
+}): Promise<unknown> =>
+  call(z.unknown(), "/echeancier/profil", { method: "PUT", body: JSON.stringify(profile) });
+
+export const putTaxDeadline = (deadline: {
+  obligationId: string;
+  dueDate: string;
+  amountCents: number | null;
+  status: string;
+  note: string | null;
+}): Promise<unknown> =>
+  call(z.unknown(), "/echeancier/deadline", { method: "PUT", body: JSON.stringify(deadline) });
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {
