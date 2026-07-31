@@ -1003,6 +1003,58 @@ export const setModule = (id: string, active: boolean): Promise<{ active: boolea
     { method: "PUT", body: JSON.stringify({ active }) },
   );
 
+// Webhooks entrants (2.13) — le secret ne transite qu'UNE fois, à la
+// création : il n'est jamais relisible ensuite (ni en base, ni par l'API).
+export const WebhookEndpoint = z.object({
+  id: z.string(),
+  provider: z.string(),
+  active: z.boolean(),
+  description: z.string(),
+  createdAt: z.string(),
+});
+export type WebhookEndpoint = z.infer<typeof WebhookEndpoint>;
+
+export const WebhookEvent = z.object({
+  id: z.string(),
+  provider: z.string(),
+  eventType: z.string(),
+  externalId: z.string(),
+  status: z.string(),
+  attempts: z.number(),
+  receivedAt: z.string(),
+  processedAt: z.string().nullable(),
+});
+export type WebhookEvent = z.infer<typeof WebhookEvent>;
+
+export const listWebhookEndpoints = (): Promise<WebhookEndpoint[]> =>
+  call(z.object({ endpoints: z.array(WebhookEndpoint) }), "/webhooks/endpoints").then(
+    (body) => body.endpoints,
+  );
+
+export const createWebhookEndpoint = (
+  provider: string,
+  description?: string,
+): Promise<WebhookEndpoint & { url: string; secret: string; signatureHeader: string }> =>
+  call(
+    WebhookEndpoint.extend({
+      url: z.string(),
+      secret: z.string(),
+      signatureHeader: z.string(),
+    }),
+    "/webhooks/endpoints",
+    { method: "POST", body: JSON.stringify({ provider, ...(description ? { description } : {}) }) },
+  );
+
+export const deleteWebhookEndpoint = (provider: string): Promise<{ deleted: boolean }> =>
+  call(z.object({ deleted: z.boolean() }), `/webhooks/endpoints/${encodeURIComponent(provider)}`, {
+    method: "DELETE",
+  });
+
+export const listWebhookEvents = (): Promise<WebhookEvent[]> =>
+  call(z.object({ events: z.array(WebhookEvent) }), "/webhooks/events").then(
+    (body) => body.events,
+  );
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {

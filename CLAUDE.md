@@ -113,6 +113,15 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > de sécurité (routes/autorisations inchangées, données conservées) ;
 > `tenant_profiles.module_overrides` (JSONB), `GET /modules` (membres) /
 > `PUT /modules/:id` (owner), page Réglages → Modules (`docs/modules.md`).
+> **Webhooks entrants (2.13)** : SEULE surface sans session — la signature HMAC
+> (`t=<unix>,v1=<hmac(secret, "t.corps brut")>`, ±300 s, `timingSafeEqual`, corps
+> brut via plugin encapsulé, 1 Mo) est l'UNIQUE preuve ; le tenant vient de
+> l'ENDPOINT via `withWebhookResolver()` (RLS gated `app.webhook_resolver`,
+> LECTURE SEULE sur `webhook_endpoints`, doctrine `withOps`) — JAMAIS du corps ;
+> 401 CONSTANT sur tout échec (pas d'oracle) ; idempotence
+> `(tenant, provider, externalId)` → re-livraison = 202 `duplicate` sans écriture ;
+> handlers métier APRÈS la réponse (`received→processed|ignored|failed`) ; secret
+> serveur au coffre, renvoyé UNE fois (`docs/webhooks.md`).
 > **Support (2.18)** : schéma Postgres `ops` (tables `support_tickets`/`support_issues`)
 > hors RLS métier MAIS sous RLS gated `app.ops_operator` — accès UNIQUEMENT via
 > `withOps()` + routes OPERATOR (allowlist `OPS_OPERATOR_USER_IDS`, 404 sinon) ;

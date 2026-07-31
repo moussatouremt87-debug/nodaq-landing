@@ -6,13 +6,23 @@ import {
   ApiError,
   FecInvalidError,
   connectConnector,
+  createWebhookEndpoint,
+  deleteWebhookEndpoint,
   disconnectConnector,
   formatEuroCents,
   getFecStatus,
   importFec,
   listConnectors,
+  listWebhookEndpoints,
+  listWebhookEvents,
 } from "../../lib/api";
-import type { ConnectorSummary, FecImportReport, FecStatus } from "../../lib/api";
+import type {
+  ConnectorSummary,
+  FecImportReport,
+  FecStatus,
+  WebhookEndpoint,
+  WebhookEvent,
+} from "../../lib/api";
 
 /*
  * Connector onboarding (ticket 1.8). The credentials travel ONE way: entered
@@ -331,6 +341,123 @@ export default function ConnecteursPage() {
         ))}
         <FecCard onChanged={refresh} />
       </div>
+      <WebhooksCard />
     </>
+  );
+}
+
+/*
+ * Webhooks entrants (2.13) — l'URL et le secret à recopier chez le
+ * fournisseur (PDP, Bridge…). Le secret n'est affiché QU'UNE fois, à la
+ * création : ni l'API ni la base ne peuvent le rejouer ensuite.
+ */
+function WebhooksCard() {
+  const [endpoints, setEndpoints] = useState<WebhookEndpoint[]>([]);
+  const [events, setEvents] = useState<WebhookEvent[]>([]);
+  const [provider, setProvider] = useState("pdp");
+  const [created, setCreated] = useState<{ url: string; secret: string } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [forbidden, setForbidden] = useState(false);
+
+  const refresh = useCallback(() => {
+    listWebhookEndpoints()
+      .then(setEndpoints)
+      .catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 403) setForbidden(true);
+      });
+    listWebhookEvents()
+      .then(setEvents)
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(refresh, [refresh]);
+
+  if (forbidden) return null;
+
+  async function create(): Promise<void> {
+    setNotice(null);
+    try {
+      const endpoint = await createWebhookEndpoint(provider);
+      setCreated({ url: endpoint.url, secret: endpoint.secret });
+      refresh();
+    } catch {
+      setNotice("Création impossible.");
+    }
+  }
+
+  async function revoke(target: string): Promise<void> {
+    if (!window.confirm(`Révoquer l'endpoint ${target} ? Les livraisons seront refusées.`)) return;
+    setNotice(null);
+    try {
+      await deleteWebhookEndpoint(target);
+      setCreated(null);
+      refresh();
+    } catch {
+      setNotice("Révocation impossible.");
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginTop: 24, maxWidth: 880 }}>
+      <span className="overline">Webhooks entrants</span>
+      <p className="hint" style={{ margin: "4px 0 14px" }}>
+        Recevez les notifications de vos fournisseurs (plateforme de facturation, banque). Chaque
+        livraison doit être signée : NODAQ refuse tout ce qui n&apos;est pas prouvé.
+      </p>
+      <div className="form-grid">
+        <select value={provider} onChange={(e) => setProvider(e.target.value)}>
+          {["pdp", "bridge", "pennylane", "qonto", "test"].map((value) => (
+            <option key={value} value={value}>
+              {value}
+            </option>
+          ))}
+        </select>
+        <button className="primary" onClick={() => void create()}>
+          Créer / renouveler
+        </button>
+      </div>
+      {created && (
+        <p className="hint">
+          <strong>URL :</strong> <code>{created.url}</code>
+          <br />
+          <strong>Secret (affiché une seule fois) :</strong> <code>{created.secret}</code>
+          <br />
+          En-tête de signature : <code>X-Nodaq-Signature: t=&lt;unix&gt;,v1=&lt;hmac-sha256&gt;</code> —
+          recopiez ce secret chez le fournisseur maintenant : il ne sera plus jamais affiché.
+        </p>
+      )}
+      <ul className="device-list">
+        {endpoints.map((endpoint) => (
+          <li key={endpoint.id} className="device-row">
+            <div>
+              <strong>{endpoint.provider}</strong>{" "}
+              <span className="muted">
+                /webhooks/{endpoint.provider}/{endpoint.id}
+                {!endpoint.active && " · inactif"}
+              </span>
+            </div>
+            <button onClick={() => void revoke(endpoint.provider)}>Révoquer</button>
+          </li>
+        ))}
+      </ul>
+      {events.length > 0 && (
+        <>
+          <span className="overline">Dernières réceptions</span>
+          <ul className="device-list">
+            {events.slice(0, 10).map((event) => (
+              <li key={event.id} className="device-row">
+                <div>
+                  <strong>{event.eventType || event.provider}</strong>{" "}
+                  <span className="muted">
+                    {event.status} · {new Date(event.receivedAt).toLocaleString("fr-FR")}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {notice && <p className="error-line">{notice}</p>}
+    </div>
   );
 }

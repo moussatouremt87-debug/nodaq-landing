@@ -19,6 +19,8 @@ export type {
   AgentConversation,
   FecImport,
   FecInvoice,
+  WebhookEndpoint,
+  WebhookEvent,
 } from "@prisma/client";
 
 /**
@@ -71,6 +73,28 @@ export async function withTenant<T>(
 export async function withOps<T>(fn: (tx: TenantClient) => Promise<T>): Promise<T> {
   return prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT set_config('app.ops_operator', 'on', true)`;
+    return fn(tx);
+  });
+}
+
+/**
+ * Resolution-only door for INBOUND webhook requests (ticket 2.13). A webhook
+ * request arrives with no better-auth session and therefore no known tenant —
+ * the endpoint (and thus its tenant) must be looked up BEFORE `withTenant` can
+ * be opened at all. This helper poses the transaction-scoped
+ * `app.webhook_resolver` flag that the `webhook_resolver_lookup` RLS policy
+ * gates on, exactly like `withOps` poses `app.ops_operator`.
+ *
+ * Scope, strictly: read-only, limited to `webhook_endpoints`, and only exposes
+ * endpoint metadata (id, tenantId, provider, secretRef, active) — never
+ * business data. It must NEVER be used to read or write business tables; once
+ * the endpoint (and its tenantId) is resolved, recording the actual webhook
+ * event goes through the normal `withTenant(tenantId, …)` path so the event
+ * row lands under the regular tenant RLS policy.
+ */
+export async function withWebhookResolver<T>(fn: (tx: TenantClient) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT set_config('app.webhook_resolver', 'on', true)`;
     return fn(tx);
   });
 }

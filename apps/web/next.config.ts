@@ -26,6 +26,7 @@ const BUSINESS_PREFIXES = [
   "avis",
   "rgpd",
   "modules",
+  "webhooks",
 ];
 
 const nextConfig: NextConfig = {
