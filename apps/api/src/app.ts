@@ -2715,8 +2715,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       });
       return JSON.parse(result) as unknown;
     } catch (error) {
+      // `ownerRoute` a déjà garanti le rôle : un outil inconnu ici ne peut plus
+      // venir du gate owner (fail-closed), seulement d'un outil retiré du
+      // toolset. Le 409 dit donc bien ce qu'il dit.
       if (isUnknownTool(error)) {
-        return reply.code(409).send({ error: "module désactivé" });
+        return reply.code(409).send({ error: "outil indisponible pour ce tenant" });
       }
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },

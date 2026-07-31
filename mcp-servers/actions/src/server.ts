@@ -39,15 +39,20 @@ import {
 } from "./quoteRequest.js";
 import type { CatalogItem } from "./quoteRequest.js";
 import {
-  ANOMALY_THRESHOLDS,
   buildMonthlyReport,
   MAX_REPORT_AGE_MONTHS,
+  MEDIAN_WINDOW_MONTHS,
   monthsBetween,
   previousMonthKey,
 } from "./monthlyReport.js";
 import { simulateMaterialPrices } from "./materialScenario.js";
 import { analyzeHourlyPerformance } from "./hourlyPerformance.js";
-import { buildMonthlySeries, fetchInvoiceWindow, forecastSales } from "./salesForecast.js";
+import {
+  buildMonthlySeries,
+  fetchInvoiceWindow,
+  forecastSales,
+  UNPAID_STATUSES,
+} from "./salesForecast.js";
 import type { MonthlyRevenuePoint } from "./salesForecast.js";
 import { buildStaffingPlan } from "./staffingPlan.js";
 import { forecastTreasury } from "./treasury.js";
@@ -387,22 +392,18 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       // complet ; la troncature est remontée (un mois manquant ne vaut pas
       // zéro).
       const pennylane = await getPennylaneClient(tenantId, context);
+      // Fenêtre = mois visé + la profondeur FIXE dont les règles ont besoin
+      // (médiane sur 12 mois). Elle ne dépend donc que du mois demandé : le
+      // rapport d'un mois donné dit la même chose quel que soit le jour où on
+      // l'ouvre.
       const { invoices, truncated } = await fetchInvoiceWindow(pennylane, now, {
-        monthsBack: monthsAgo + ANOMALY_THRESHOLDS.minHistoryMonths + 1,
+        monthsBack: monthsAgo + MEDIAN_WINDOW_MONTHS,
       });
-      const report = buildMonthlyReport(invoices, target);
+      // La troncature entre DANS le modèle : elle marque les anomalies, au
+      // lieu d'être un drapeau affiché dans un autre coin de l'écran.
+      const report = buildMonthlyReport(invoices, target, { windowTruncated: truncated });
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              ...report,
-              // Une fenêtre tronquée peut faire manquer des mois ANCIENS : la
-              // référence serait alors calculée sur moins que ce qu'on croit.
-              truncated,
-            }),
-          },
-        ],
+        content: [{ type: "text" as const, text: JSON.stringify(report) }],
       };
     },
   );
@@ -1333,7 +1334,8 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       // Financial data feeding a write action is validated, never defaulted:
       // a silent "0 EUR / 0 days overdue" pending action would mislead the
       // human validator (RGPD audit 1.5).
-      const UNPAID_STATUSES = new Set(["late", "overdue", "unpaid", "pending"]);
+      // Liste partagée (2.11) : un statut reconnu ici et pas dans le rapport
+      // mensuel produirait deux vérités sur la même facture.
       if (!invoice.status || !UNPAID_STATUSES.has(invoice.status)) {
         throw new Error(
           `invoice "${invoiceId}" is not eligible for dunning (status: ${invoice.status ?? "unknown"})`,

@@ -150,20 +150,30 @@ export default function RapportsPage() {
                 </li>
               )}
             </ul>
-            {(report.unusableCount > 0 || report.excludedCount > 0 || report.truncated) && (
+            {(report.unusableCount > 0 ||
+              report.excludedCount > 0 ||
+              report.unattributedCount > 0) && (
               <p className="muted">
                 {report.unusableCount > 0 &&
                   `${report.unusableCount} facture(s) écartée(s) (montant ou date illisible, devise étrangère jamais convertie). `}
                 {report.excludedCount > 0 &&
-                  `${report.excludedCount} brouillon(s), devis ou facture(s) annulée(s) hors du CA. `}
-                {report.truncated &&
-                  "Historique tronqué par la limite de lecture : des mois anciens peuvent manquer — la référence est calculée sur ce qui a été lu."}
+                  `${report.excludedCount} brouillon(s), devis, avoir(s) ou facture(s) annulée(s) hors du CA. `}
+                {report.unattributedCount > 0 &&
+                  `${report.unattributedCount} facture(s) (${euros(report.unattributedCents)}) ne sont rattachées à aucun client : comptées au CA, jamais attribuées.`}
               </p>
             )}
           </section>
 
           <section className="card">
             <h2>Anomalies</h2>
+            {/* La troncature qualifie les anomalies : elle est affichée AVEC
+                elles, pas dans un autre coin de l'écran. */}
+            {report.windowTruncated && (
+              <p className="warn">
+                Lecture du facturier tronquée : des factures peuvent manquer, y compris sur le mois
+                analysé. Les écarts ci-dessous portent sur un historique incomplet.
+              </p>
+            )}
             {report.anomalies.length === 0 ? (
               <p className="muted">
                 Aucun écart au-delà des seuils sur les règles évaluées ci-dessous.

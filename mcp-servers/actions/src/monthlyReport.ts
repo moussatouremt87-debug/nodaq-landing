@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EXCLUDED_STATUSES, euroToCents } from "./salesForecast.js";
+import { normalizeSaleInvoice, OVERDUE_STATUSES } from "./salesForecast.js";
 
 /*
  * Rapport mensuel + anomalies (ticket 2.11).
@@ -95,42 +95,35 @@ export interface MonthlyReport {
   referenceMonths: number;
   /** Meilleur client du mois — owner-only par construction (dataset entier). */
   topCustomer: { name: string | null; totalCents: number; share: number } | null;
+  /** Factures du mois rattachées à AUCUN client : comptées au CA, jamais
+   * attribuées — elles diluent la part du premier client, donc elles se
+   * disent (sinon une vraie concentration passe sous le seuil en silence). */
+  unattributedCount: number;
+  unattributedCents: number;
   anomalies: Anomaly[];
   /** Règles NON évaluées faute de données — dites, jamais tues. */
   notEvaluated: string[];
   /** Factures ignorées (date ou montant illisible, devise étrangère). */
   unusableCount: number;
-  /** Brouillons, devis et factures annulées — écartés du CA, jamais tus. */
+  /** Brouillons, devis, avoirs et factures annulées — hors CA, jamais tus. */
   excludedCount: number;
+  /** La lecture du facturier a été coupée : des factures peuvent manquer,
+   * y compris sur le mois analysé (l'ordre de tri n'est pas contractuel). */
+  windowTruncated: boolean;
   label: string;
 }
 
 const MONTH = /^\d{4}-\d{2}$/;
 
-/**
- * Montant -> centimes, avec le parseur STRICT de la prévision (3.1) : un
- * montant malformé est écarté, jamais tronqué en un chiffre d'affaires faux.
- * Partagé volontairement — deux lectures différentes du même montant sur deux
- * écrans du même produit seraient un défaut, pas un détail.
- */
-function centsOf(value: unknown): number | null {
-  if (typeof value !== "string" && typeof value !== "number") return null;
-  return euroToCents(value);
-}
-
-function monthOf(date: unknown): string | null {
-  if (typeof date !== "string" || date.length < 7) return null;
-  const month = date.slice(0, 7);
-  return MONTH.test(month) ? month : null;
+/** Décale un "YYYY-MM" de `delta` mois (négatif = vers le passé). */
+export function shiftMonthKey(month: string, delta: number): string {
+  const total = Number(month.slice(0, 4)) * 12 + Number(month.slice(5, 7)) - 1 + delta;
+  return `${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, "0")}`;
 }
 
 /** Mois précédent d'un "YYYY-MM". */
 export function previousMonthKey(month: string): string {
-  const year = Number(month.slice(0, 4));
-  const index = Number(month.slice(5, 7));
-  return index === 1
-    ? `${year - 1}-12`
-    : `${year}-${String(index - 1).padStart(2, "0")}`;
+  return shiftMonthKey(month, -1);
 }
 
 /**
@@ -147,6 +140,12 @@ export function monthsBetween(month: string, reference: string): number | null {
 
 /** Profondeur de lecture maximale d'un rapport mensuel. */
 export const MAX_REPORT_AGE_MONTHS = 24;
+
+/**
+ * Fenêtre de la médiane, adossée au mois ANALYSÉ (et non à aujourd'hui) : le
+ * rapport d'un mois donné doit dire la même chose en juillet et en décembre.
+ */
+export const MEDIAN_WINDOW_MONTHS = 12;
 
 /** Médiane — robuste à une valeur extrême, contrairement à la moyenne. */
 function median(values: readonly number[]): number | null {
@@ -171,6 +170,7 @@ const euros = (cents: number): string =>
 export function buildMonthlyReport(
   invoices: readonly ReportInvoice[],
   month: string,
+  { windowTruncated = false }: { windowTruncated?: boolean } = {},
 ): MonthlyReport {
   if (!MONTH.test(month)) throw new Error("invalid month");
 
@@ -183,38 +183,47 @@ export function buildMonthlyReport(
   let previousOverdueCents = 0;
   const previous = previousMonthKey(month);
 
+  // Fenêtre de la médiane : FIXE et adossée au mois analysé, jamais à la date
+  // de consultation — sinon le même mois change de verdict selon le jour où on
+  // l'ouvre. Bornes calculées une fois.
+  const medianWindowStart = shiftMonthKey(month, -(MEDIAN_WINDOW_MONTHS - 1));
+  const windowAmounts: number[] = [];
+
   for (const invoice of invoices) {
-    // Brouillon, devis ou facture annulée : ce n'est pas une vente. Écarté
-    // AVANT toute agrégation, avec la même liste que la prévision (3.1).
-    if (invoice.status && EXCLUDED_STATUSES.has(invoice.status)) {
-      excludedCount += 1;
+    // UNE seule séquence de décisions, partagée avec la prévision (3.1) :
+    // brouillon/annulée, avoir, devise étrangère, montant ou date illisible.
+    const normalized = normalizeSaleInvoice(invoice);
+    if (!normalized.ok) {
+      if (normalized.reason === "exclue" || normalized.reason === "non_positif") {
+        excludedCount += 1;
+      } else {
+        unusableCount += 1;
+      }
       continue;
     }
-    const cents = centsOf(invoice.amount);
-    const invoiceMonth = monthOf(invoice.date);
-    const currency = (invoice.currency ?? "EUR").toUpperCase();
-    // Devise étrangère : comptée à part, JAMAIS convertie à un taux inventé.
-    if (cents === null || invoiceMonth === null || currency !== "EUR") {
-      unusableCount += 1;
-      continue;
-    }
+    const { cents, month: invoiceMonth } = normalized;
     const bucket = byMonth.get(invoiceMonth) ?? { cents: 0, count: 0 };
     bucket.cents += cents;
     bucket.count += 1;
     byMonth.set(invoiceMonth, bucket);
 
+    // La médiane est calculée sur la MÊME population que le CA (factures
+    // retenues), et sur une fenêtre bornée — pas sur tout ce qui a été lu.
+    if (invoiceMonth <= month && invoiceMonth >= medianWindowStart) windowAmounts.push(cents);
+
+    const overdue = invoice.status ? OVERDUE_STATUSES.has(invoice.status) : false;
     if (invoiceMonth === month) {
       monthInvoices.push({
         cents,
         customerId: invoice.customer?.id ?? "",
         customerName: invoice.customer?.name ?? null,
       });
-      if (invoice.status === "late") {
+      if (overdue) {
         overdueCents += cents;
         overdueCount += 1;
       }
     }
-    if (invoiceMonth === previous && invoice.status === "late") previousOverdueCents += cents;
+    if (invoiceMonth === previous && overdue) previousOverdueCents += cents;
   }
 
   const current = byMonth.get(month) ?? { cents: 0, count: 0 };
@@ -261,20 +270,20 @@ export function buildMonthlyReport(
     }
   }
 
-  // --- Facture inhabituelle (médiane sur tout l'historique fourni) --------
-  // Même population que le CA : un brouillon n'entre pas dans la médiane, sinon
-  // la référence n'est pas celle des factures auxquelles on la compare.
-  const allAmounts = invoices
-    .filter((invoice) => !(invoice.status && EXCLUDED_STATUSES.has(invoice.status)))
-    .map((invoice) => centsOf(invoice.amount))
-    .filter((value): value is number => value !== null);
-  const medianAmount = median(allAmounts);
-  if (allAmounts.length < ANOMALY_THRESHOLDS.minInvoicesForMedian || medianAmount === null) {
+  // --- Facture inhabituelle (médiane sur une fenêtre FIXE) ----------------
+  const medianAmount = median(windowAmounts);
+  if (windowAmounts.length < ANOMALY_THRESHOLDS.minInvoicesForMedian || medianAmount === null) {
     notEvaluated.push(
       `Facture inhabituelle : non évaluée — il faut ${ANOMALY_THRESHOLDS.minInvoicesForMedian} ` +
-        `factures, ${allAmounts.length} disponible(s).`,
+        `factures sur ${MEDIAN_WINDOW_MONTHS} mois, ${windowAmounts.length} disponible(s).`,
     );
-  } else if (medianAmount > 0) {
+  } else if (medianAmount <= 0) {
+    // Médiane nulle : le seuil « ×3 » n'aurait aucun sens. Une règle qui ne
+    // s'exécute pas doit se voir, sinon son silence se lit comme un feu vert.
+    notEvaluated.push(
+      "Facture inhabituelle : non évaluée — la médiane des factures est à zéro.",
+    );
+  } else {
     const biggest = monthInvoices.reduce<number>((max, entry) => Math.max(max, entry.cents), 0);
     if (biggest >= medianAmount * ANOMALY_THRESHOLDS.unusualInvoiceFactor) {
       anomalies.push({
@@ -282,10 +291,11 @@ export function buildMonthlyReport(
         observed: biggest,
         reference: medianAmount,
         threshold: ANOMALY_THRESHOLDS.unusualInvoiceFactor,
-        sampleSize: allAmounts.length,
+        sampleSize: windowAmounts.length,
         reason:
           `Une facture de ${euros(biggest)} ce mois, contre une médiane de ` +
-          `${euros(medianAmount)} sur ${allAmounts.length} factures ` +
+          `${euros(medianAmount)} sur ${windowAmounts.length} factures des ` +
+          `${MEDIAN_WINDOW_MONTHS} derniers mois ` +
           `(seuil : ×${ANOMALY_THRESHOLDS.unusualInvoiceFactor}). À vérifier, pas forcément une erreur.`,
       });
     }
@@ -293,17 +303,32 @@ export function buildMonthlyReport(
 
   // --- Concentration client ----------------------------------------------
   let topCustomer: MonthlyReport["topCustomer"] = null;
-  if (current.cents > 0) {
+  // Factures sans client rattaché : comptées au CA, JAMAIS attribuées — donc
+  // elles diluent la part du premier client. Tues, elles pourraient faire
+  // passer une vraie concentration sous le seuil (même traitement qu'en 3.4).
+  const unattributed = monthInvoices.filter((entry) => !entry.customerId);
+  const unattributedCount = unattributed.length;
+  const unattributedCents = unattributed.reduce((sum, entry) => sum + entry.cents, 0);
+
+  if (current.cents <= 0) {
+    notEvaluated.push(
+      "Concentration client : non évaluée — aucun chiffre d'affaires retenu sur le mois.",
+    );
+  } else {
     const perCustomer = new Map<string, { name: string | null; cents: number }>();
     for (const entry of monthInvoices) {
-      // Facture sans client rattaché : comptée au CA, jamais attribuée.
       if (!entry.customerId) continue;
       const bucket = perCustomer.get(entry.customerId) ?? { name: entry.customerName, cents: 0 };
       bucket.cents += entry.cents;
       perCustomer.set(entry.customerId, bucket);
     }
     const best = [...perCustomer.values()].sort((a, b) => b.cents - a.cents)[0];
-    if (best) {
+    if (!best) {
+      notEvaluated.push(
+        `Concentration client : non évaluée — aucune des ${monthInvoices.length} facture(s) du ` +
+          "mois n'est rattachée à un client.",
+      );
+    } else {
       const share = best.cents / current.cents;
       topCustomer = { name: best.name, totalCents: best.cents, share };
       if (share >= ANOMALY_THRESHOLDS.customerConcentrationRatio) {
@@ -316,7 +341,11 @@ export function buildMonthlyReport(
           reason:
             `${Math.round(share * 100)} % du chiffre d'affaires du mois vient d'un seul client ` +
             `(${euros(best.cents)} sur ${euros(current.cents)}, ${perCustomer.size} client(s) ` +
-            `facturé(s)) — seuil : ${Math.round(ANOMALY_THRESHOLDS.customerConcentrationRatio * 100)} %.`,
+            `facturé(s)) — seuil : ${Math.round(ANOMALY_THRESHOLDS.customerConcentrationRatio * 100)} %.` +
+            (unattributedCount > 0
+              ? ` ${unattributedCount} facture(s) (${euros(unattributedCents)}) ne sont ` +
+                "rattachées à aucun client : la part réelle peut être plus élevée."
+              : ""),
         });
       }
     }
@@ -349,6 +378,22 @@ export function buildMonthlyReport(
     }
   }
 
+  // Fenêtre de lecture tronquée : l'ordre de tri du fournisseur n'est pas
+  // contractuel, donc la coupe peut amputer le mois CIBLE lui-même. Les
+  // anomalies restent affichées (les taire serait aussi trompeur) mais elles
+  // sont MARQUÉES : un écart calculé sur des données incomplètes n'a pas le
+  // même poids qu'un écart calculé sur tout le mois.
+  if (windowTruncated) {
+    const caveat =
+      " Attention : la lecture du facturier a été tronquée — des factures " +
+      "peuvent manquer, y compris sur le mois analysé.";
+    for (const anomaly of anomalies) anomaly.reason += caveat;
+    notEvaluated.push(
+      "Lecture tronquée : toutes les règles ci-dessus portent sur un historique " +
+        "possiblement incomplet.",
+    );
+  }
+
   return {
     month,
     rulesVersion: ANOMALY_RULES_VERSION,
@@ -359,10 +404,13 @@ export function buildMonthlyReport(
     referenceRevenueCents,
     referenceMonths: history.length,
     topCustomer,
+    unattributedCount,
+    unattributedCents,
     anomalies,
     notEvaluated,
     unusableCount,
     excludedCount,
+    windowTruncated,
     label:
       "Chiffres lus dans votre facturier ; chaque anomalie est un écart mesuré " +
       "avec son seuil, pas un jugement — à confirmer avant d'agir.",

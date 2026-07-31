@@ -851,6 +851,8 @@ export const MonthlyReport = z.object({
       share: z.number(),
     })
     .nullable(),
+  unattributedCount: z.number(),
+  unattributedCents: z.number(),
   anomalies: z.array(
     z.object({
       kind: z.string(),
@@ -864,8 +866,8 @@ export const MonthlyReport = z.object({
   notEvaluated: z.array(z.string()),
   unusableCount: z.number(),
   excludedCount: z.number(),
+  windowTruncated: z.boolean(),
   label: z.string().min(1),
-  truncated: z.boolean().optional(),
 });
 export type MonthlyReport = z.infer<typeof MonthlyReport>;
 

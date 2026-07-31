@@ -60,6 +60,68 @@ export function euroToCents(amount: string | number): number | null {
   return Math.round(Number.parseFloat(trimmed.replace(",", ".")) * 100);
 }
 
+/**
+ * Statuts d'une facture ÉCHUE. Le libellé varie d'un facturier à l'autre
+ * (`late` chez Pennylane, `overdue` ailleurs) : ne reconnaître que `late`
+ * afficherait « 0 € d'impayés » comme un constat alors que c'est un défaut de
+ * correspondance — une affirmation fausse, pas une absence de données.
+ *
+ * `pending` en est volontairement ABSENT : une facture non encore exigible
+ * n'est pas un impayé, et la compter gonflerait l'encours échu.
+ */
+export const OVERDUE_STATUSES: ReadonlySet<string> = new Set(["late", "overdue", "unpaid"]);
+
+/** Éligible à une relance : échu, plus les factures en attente de règlement. */
+export const UNPAID_STATUSES: ReadonlySet<string> = new Set([...OVERDUE_STATUSES, "pending"]);
+
+/**
+ * Pourquoi une facture n'entre pas dans un chiffre d'affaires. Le motif est
+ * RENDU au lieu d'être perdu : le rapport mensuel (2.11) en fait des compteurs
+ * affichés, la prévision (3.1) se contente de sauter la ligne.
+ */
+export type InvoiceRejection =
+  /** Montant, date ou ligne illisible. */
+  | "illisible"
+  /** Brouillon, devis, facture annulée — ce n'est pas une vente. */
+  | "exclue"
+  /** Avoir ou ligne à zéro : ne s'additionne pas à un CA. */
+  | "non_positif"
+  /** Devise étrangère : jamais convertie à un taux inventé. */
+  | "devise";
+
+export type NormalizedInvoice =
+  | { ok: true; cents: number; month: string }
+  | { ok: false; reason: InvoiceRejection };
+
+/**
+ * Normalisation PARTAGÉE d'une facture en (centimes, mois) — l'UNIQUE endroit
+ * où le produit décide qu'une facture compte dans un chiffre d'affaires.
+ *
+ * Deux écrans qui liraient la même facture différemment (l'un tolérant « eur »,
+ * l'autre non ; l'un sommant les avoirs, l'autre non) afficheraient deux CA
+ * pour le même mois. Partager les deux constantes ne suffisait pas : c'est la
+ * SÉQUENCE de décisions qui doit être unique.
+ */
+export function normalizeSaleInvoice(candidate: unknown): NormalizedInvoice {
+  // safeParse par ligne : une ligne malformée est écartée, jamais une
+  // exception dont la ZodError repartirait vers le modèle comme erreur d'outil.
+  const item = ForecastInvoice.safeParse(candidate);
+  if (!item.success) return { ok: false, reason: "illisible" };
+  const invoice = item.data;
+  if (invoice.status && EXCLUDED_STATUSES.has(invoice.status)) {
+    return { ok: false, reason: "exclue" };
+  }
+  if (!invoice.date || invoice.amount == null) return { ok: false, reason: "illisible" };
+  // Une devise étrangère ne se somme pas avec des euros (V1 : EUR only).
+  if (invoice.currency && invoice.currency !== "EUR") return { ok: false, reason: "devise" };
+  const cents = euroToCents(invoice.amount);
+  if (cents === null) return { ok: false, reason: "illisible" };
+  if (cents <= 0) return { ok: false, reason: "non_positif" };
+  const date = new Date(invoice.date);
+  if (Number.isNaN(date.getTime())) return { ok: false, reason: "illisible" };
+  return { ok: true, cents, month: monthKey(date) };
+}
+
 function monthKey(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
 }
@@ -81,24 +143,14 @@ export function buildMonthlySeries(
 ): MonthlyRevenuePoint[] {
   const byMonth = new Map<string, { revenueCents: number; invoiceCount: number }>();
   for (const candidate of invoices) {
-    // Per-item safeParse: one malformed row is skipped, never an exception
-    // whose ZodError would travel back to the model as a tool error.
-    const item = ForecastInvoice.safeParse(candidate);
-    if (!item.success) continue;
-    const invoice = item.data;
-    if (!invoice.date || invoice.amount == null) continue;
-    if (invoice.status && EXCLUDED_STATUSES.has(invoice.status)) continue;
-    // Une devise étrangère ne se somme pas avec des euros (V1 : EUR only).
-    if (invoice.currency && invoice.currency !== "EUR") continue;
-    const cents = euroToCents(invoice.amount);
-    if (cents === null || cents <= 0) continue;
-    const date = new Date(invoice.date);
-    if (Number.isNaN(date.getTime())) continue;
-    const key = monthKey(date);
-    const bucket = byMonth.get(key) ?? { revenueCents: 0, invoiceCount: 0 };
-    bucket.revenueCents += cents;
+    // Décision partagée avec le rapport mensuel (2.11) : ici le motif de rejet
+    // ne sert à rien, la ligne est simplement sautée.
+    const normalized = normalizeSaleInvoice(candidate);
+    if (!normalized.ok) continue;
+    const bucket = byMonth.get(normalized.month) ?? { revenueCents: 0, invoiceCount: 0 };
+    bucket.revenueCents += normalized.cents;
     bucket.invoiceCount += 1;
-    byMonth.set(key, bucket);
+    byMonth.set(normalized.month, bucket);
   }
 
   const series: MonthlyRevenuePoint[] = [];

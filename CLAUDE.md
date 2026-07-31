@@ -76,15 +76,21 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > doctrine 2.19), moteur PUR, chaque anomalie porte observed/reference/
 > threshold/sampleSize + phrase déjà chiffrée (le modèle relaie, ne conclut
 > pas) ; MÉDIANE et non moyenne pour la facture inhabituelle (sinon elle masque
-> sa propre référence) ; 4 refus testés et DITS dans `notEvaluated` (historique
-> < 3 mois, dénominateur nul, < 6 factures, aucun impayé de référence) + 2 dans
+> sa propre référence), fenêtre de médiane adossée au MOIS ANALYSÉ jamais à
+> aujourd'hui (sinon le verdict change sans qu'aucune donnée bouge) ; toute
+> règle non exécutée est DITE dans `notEvaluated` (historique < 3 mois,
+> dénominateur nul, < 6 factures ou médiane nulle, aucun impayé de référence,
+> aucun CA du mois, aucune facture rattachée à un client) + 2 refus dans
 > l'outil (mois EN COURS refusé — 3 semaines vs mois pleins = une « baisse » de
-> calendrier ; hors fenêtre 24 mois) ; exclusions PARTAGÉES avec la prévision
-> 3.1 (`EXCLUDED_STATUSES`/`euroToCents` exportés — deux écrans ne comptent
-> jamais la même facture différemment), devise étrangère comptée jamais
-> convertie, troncature DITE ; `build_monthly_report` OWNER-ONLY (CA + nom du
-> premier client) + `GET /rapports/mensuel` par le MÊME outil
-> (`docs/rapport-mensuel.md`).
+> calendrier ; hors fenêtre 24 mois) ; « cette facture compte-t-elle dans un
+> CA ? » = UNE fonction partagée avec 3.1 (`normalizeSaleInvoice` — partager
+> deux constantes ne suffit pas, c'est la SÉQUENCE de décisions qui doit être
+> unique), statuts d'échéance partagés avec la relance (`OVERDUE_STATUSES`,
+> `pending` exclu), devise étrangère comptée jamais convertie, factures non
+> attribuées comptées et DITES (sinon une vraie concentration passe sous le
+> seuil), troncature marquée DANS la phrase de chaque anomalie ;
+> `build_monthly_report` OWNER-ONLY (CA + nom du premier client) +
+> `GET /rapports/mensuel` par le MÊME outil (`docs/rapport-mensuel.md`).
 > **Banque DSP2 (2.15)** : `getBankClient()` = Qonto direct sinon agrégateur Bridge
 > (toutes banques FR) — TOUS les consommateurs bancaires passent par lui, jamais par
 > un client direct ; identifiants Bridge (clientId/clientSecret/userUuid) testés

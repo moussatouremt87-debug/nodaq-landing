@@ -42,7 +42,9 @@ describe("ce que le rapport REFUSE de conclure", () => {
     expect(report.notEvaluated.some((line) => line.includes("historique"))).toBe(true);
   });
 
-  it("référence à zéro : aucune comparaison (« +∞ % » n'est pas un constat)", () => {
+  it("mois de référence sans CA réel : aucune comparaison, et le trou est DIT", () => {
+    // Les lignes à zéro (et les avoirs) ne sont pas du chiffre d'affaires :
+    // elles ne créent donc AUCUNE référence. « +∞ % » n'est pas un constat.
     const months = [
       invoice("2026-01-10", 0),
       invoice("2026-02-10", 0),
@@ -51,7 +53,22 @@ describe("ce que le rapport REFUSE de conclure", () => {
     ];
     const report = buildMonthlyReport(months, "2026-04");
     expect(report.anomalies.some((a) => a.kind === "ca_en_baisse")).toBe(false);
-    expect(report.notEvaluated.some((line) => line.includes("zéro"))).toBe(true);
+    expect(report.referenceRevenueCents).toBeNull();
+    expect(report.excludedCount).toBe(3);
+    expect(report.notEvaluated.some((line) => line.includes("historique"))).toBe(true);
+  });
+
+  it("aucun client rattaché : la concentration n'est pas « sans anomalie », elle est NON ÉVALUÉE", () => {
+    const report = buildMonthlyReport([...HISTORY, invoice("2026-04-10", 9_000)], "2026-04");
+    expect(report.anomalies.some((a) => a.kind === "concentration_client")).toBe(false);
+    expect(report.topCustomer).toBeNull();
+    expect(report.notEvaluated.some((line) => line.includes("Concentration client"))).toBe(true);
+  });
+
+  it("mois sans aucun CA retenu : concentration non évaluée plutôt que « rien à signaler »", () => {
+    const report = buildMonthlyReport(HISTORY, "2026-04");
+    expect(report.revenueCents).toBe(0);
+    expect(report.notEvaluated.some((line) => line.includes("Concentration client"))).toBe(true);
   });
 
   it("trop peu de factures : pas de « facture inhabituelle »", () => {
@@ -194,6 +211,69 @@ describe("invariants", () => {
       expect(anomaly.threshold).toBeGreaterThan(0);
       expect(anomaly.sampleSize).toBeGreaterThan(0);
     }
+  });
+
+  it("statut d'impayé : `overdue` compte comme `late`, `pending` NON", () => {
+    // Ne reconnaître que « late » afficherait « 0 € d'impayés » comme un
+    // constat alors que c'est un défaut de correspondance de statut.
+    const withOverdue = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-03-25", 1_000, { status: "overdue" }),
+        invoice("2026-04-10", 5_000, { status: "overdue" }),
+      ],
+      "2026-04",
+    );
+    expect(withOverdue.overdueCents).toBe(500_000);
+    expect(withOverdue.anomalies.some((a) => a.kind === "impayes_en_hausse")).toBe(true);
+
+    // « pending » = pas encore exigible : ce n'est pas un impayé.
+    const withPending = buildMonthlyReport(
+      [...HISTORY, invoice("2026-04-10", 5_000, { status: "pending" })],
+      "2026-04",
+    );
+    expect(withPending.overdueCents).toBe(0);
+  });
+
+  it("factures non attribuées : comptées au CA, jamais tues", () => {
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-04-10", 5_000, { customer: { id: "c1", name: "Gros Client" } }),
+        invoice("2026-04-11", 4_000),
+      ],
+      "2026-04",
+    );
+    expect(report.revenueCents).toBe(900_000);
+    expect(report.unattributedCount).toBe(1);
+    expect(report.unattributedCents).toBe(400_000);
+    // La part réelle du premier client peut être plus élevée : c'est DIT.
+    const anomaly = report.anomalies.find((a) => a.kind === "concentration_client");
+    expect(anomaly?.reason).toContain("plus élevée");
+  });
+
+  it("médiane : fenêtre adossée au MOIS ANALYSÉ, pas à la date de consultation", () => {
+    // Sinon le même mois change de verdict selon le jour où on l'ouvre.
+    const old = Array.from({ length: 8 }, (_, index) =>
+      invoice(`2024-0${(index % 8) + 1}-05`, 100_000),
+    );
+    const withOld = buildMonthlyReport([...old, ...HISTORY, invoice("2026-04-10", 60_000)], "2026-04");
+    const withoutOld = buildMonthlyReport([...HISTORY, invoice("2026-04-10", 60_000)], "2026-04");
+    // Les factures de 2024 sont hors fenêtre : elles ne déplacent pas la
+    // médiane du rapport d'avril 2026.
+    expect(withOld.anomalies.find((a) => a.kind === "facture_inhabituelle")?.reference).toBe(
+      withoutOld.anomalies.find((a) => a.kind === "facture_inhabituelle")?.reference,
+    );
+  });
+
+  it("lecture tronquée : les anomalies sont MARQUÉES, pas seulement un drapeau ailleurs", () => {
+    const report = buildMonthlyReport([...HISTORY, invoice("2026-04-10", 5_000)], "2026-04", {
+      windowTruncated: true,
+    });
+    expect(report.windowTruncated).toBe(true);
+    expect(report.anomalies.length).toBeGreaterThan(0);
+    for (const anomaly of report.anomalies) expect(anomaly.reason).toContain("tronquée");
+    expect(report.notEvaluated.some((line) => line.includes("tronquée"))).toBe(true);
   });
 
   it("label PERMANENT : un écart mesuré, pas un jugement", () => {

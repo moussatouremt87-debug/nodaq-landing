@@ -35,24 +35,33 @@ Un verdict sans son calcul ne se conteste pas. Ici, l'écran montre le calcul.
 | Anomalie | Déclencheur | Seuil |
 |---|---|---|
 | `ca_en_baisse` | CA du mois vs moyenne des 3 mois précédents | −20 % |
-| `facture_inhabituelle` | plus grosse facture du mois vs **médiane** | ×3 |
+| `facture_inhabituelle` | plus grosse facture du mois vs **médiane** sur 12 mois | ×3 |
 | `concentration_client` | part du CA sur un seul client | 40 % |
 | `impayes_en_hausse` | encours échu vs mois précédent | +30 % |
 
 **Médiane, pas moyenne**, pour la facture inhabituelle : avec une moyenne, une
 grosse facture ferait bouger sa propre référence et se masquerait elle-même.
 
+La fenêtre de la médiane est adossée au **mois analysé**, jamais à la date de
+consultation : le rapport de mars doit dire la même chose en avril et en
+décembre. Une fenêtre calée sur « aujourd'hui » ferait changer un verdict sans
+qu'aucune donnée ait bougé.
+
 ## Ce que le rapport REFUSE de conclure
 
-Quatre refus, chacun testé, chacun **dit** dans `notEvaluated` — parce qu'une
-règle silencieuse se lit comme « rien à signaler » :
+Chaque règle qui ne s'exécute pas **le dit** dans `notEvaluated` — parce
+qu'une règle silencieuse se lit comme « rien à signaler », et qu'un feu vert
+qu'on n'a jamais calculé est pire qu'une absence de rapport :
 
 1. **Historique insuffisant.** Une baisse « vs les 3 mois précédents » quand il
    n'y en a qu'un est une invention. La règle n'est pas évaluée.
 2. **Dénominateur nul.** « +∞ % » n'est pas un constat.
-3. **Échantillon trop petit** (moins de 6 factures) : pas de médiane, donc pas
-   de « facture inhabituelle ».
+3. **Échantillon trop petit** (moins de 6 factures sur 12 mois) : pas de
+   médiane, donc pas de « facture inhabituelle ». Médiane à zéro : idem.
 4. **Aucun impayé le mois précédent** : pas de « hausse » sans référence.
+5. **Aucun CA retenu sur le mois**, ou **aucune facture rattachée à un
+   client** : la concentration n'est pas « sans anomalie », elle est *non
+   évaluée*.
 
 Deux refus supplémentaires vivent dans la route et l'outil :
 
@@ -67,25 +76,41 @@ d'inventer un chiffre (même doctrine que le cockpit conversationnel 2.5).
 
 ## Ce qui est écarté du calcul, et compté
 
-- **Brouillons, devis et factures annulées** : ce ne sont pas des ventes. La
-  liste d'exclusion est **partagée avec la prévision de ventes (3.1)** — deux
-  écrans du même produit ne peuvent pas compter la même facture différemment.
-  Le compte sort en `excludedCount`.
+La décision « cette facture compte-t-elle dans un chiffre d'affaires ? » vit
+dans **une seule fonction partagée** avec la prévision de ventes (3.1),
+`normalizeSaleInvoice`. Partager deux constantes ne suffisait pas : c'est la
+*séquence* de décisions qui doit être unique, sinon un écran tolère « eur » là
+où l'autre l'écarte, et le même mois affiche deux CA.
+
+- **Brouillons, devis, factures annulées et avoirs** : ce ne sont pas des
+  ventes → `excludedCount`.
 - **Devise étrangère** : comptée à part (`unusableCount`), **jamais convertie**
   à un taux inventé.
-- **Montant malformé** : écarté par le parseur strict de 3.1 — « 12abc » lu
-  comme 12 € entrerait dans le rapport comme une donnée sûre.
-- **Fenêtre de lecture tronquée** : signalée (`truncated`). Des mois anciens
-  peuvent manquer, donc la référence porte sur ce qui a été lu — un mois absent
-  ne vaut pas zéro.
+- **Montant malformé** : écarté par le parseur strict — « 12abc » lu comme
+  12 € entrerait dans le rapport comme une donnée sûre.
+- **Factures non rattachées à un client** : comptées au CA, jamais attribuées.
+  Elles **diluent** la part du premier client, donc `unattributedCount` et son
+  montant sont affichés *et* rappelés dans la phrase de l'anomalie — tues,
+  elles feraient passer une vraie concentration sous le seuil.
+- **Fenêtre de lecture tronquée** (`windowTruncated`) : l'ordre de tri du
+  fournisseur n'étant pas contractuel, la coupe peut amputer le mois **cible**
+  lui-même. Les anomalies ne sont pas masquées — les taire serait aussi
+  trompeur — mais elles sont **marquées**, dans leur propre phrase et dans la
+  carte qui les affiche.
 
 ## Une convention dite plutôt que cachée
 
-L'encours échu est le statut `late` **d'aujourd'hui**, rapporté au mois
-d'**émission** de la facture. Une facture récente a eu moins de temps pour
-tomber en retard : le mois courant est donc structurellement défavorisé. Le
-biais joue **contre** l'alerte (jamais en sa faveur), et la phrase le dit —
-« factures émises ce mois-ci aujourd'hui en retard de paiement ».
+L'encours échu est le statut **d'aujourd'hui**, rapporté au mois d'**émission**
+de la facture. Une facture récente a eu moins de temps pour tomber en retard :
+le mois courant est donc structurellement défavorisé. Le biais joue **contre**
+l'alerte (jamais en sa faveur), et la phrase le dit — « factures émises ce
+mois-ci aujourd'hui en retard de paiement ».
+
+Les statuts d'échéance (`late`, `overdue`, `unpaid`) sont une **liste
+partagée** avec la relance : ne reconnaître que `late` afficherait « 0 €
+d'impayés » comme un constat alors que ce serait un défaut de correspondance
+— une affirmation fausse, pas une absence de données. `pending` en est
+volontairement absent : une facture non encore exigible n'est pas un impayé.
 
 ## Surface
 
