@@ -7,7 +7,7 @@ import {
   getKpis,
   getMe,
   getPendingAction,
-  getTaxSchedule,
+  getTaxScheduleIfOwner,
   decidePendingAction,
   listConnectors,
   listPendingActions,
@@ -129,8 +129,11 @@ export default function CockpitPage() {
     getMe()
       .then((session) => setFirstName(session.name?.split(" ")[0] ?? null))
       .catch(() => undefined);
-    getTaxSchedule(3)
+    // Échéancier owner-only côté API : on n'appelle QUE pour un owner, sinon
+    // chaque ouverture du cockpit par un membre produirait un 403 en logs.
+    getTaxScheduleIfOwner()
       .then((schedule) => {
+        if (!schedule) return;
         const upcoming = schedule.deadlines.filter((d) => d.status === "prevu");
         setTaxSchedule({
           next: upcoming[0] ? { label: upcoming[0].label, dueDate: upcoming[0].dueDate } : null,

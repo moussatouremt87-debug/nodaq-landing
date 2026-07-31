@@ -68,6 +68,16 @@ Une surcharge qui ne correspond plus à aucune occurrence est simplement
 ignorée par `applyTaxOverrides` (testé) — elle ne ressuscite pas une échéance
 disparue.
 
+Le revers, assumé : les décisions humaines **survivent**. Un aller-retour de
+régime (paie mensuelle → aucune → mensuelle) fait réapparaître les montants
+DSN saisis avant, tels quels. C'est le comportement attendu d'un registre de
+décisions — les effacer au premier changement de paramètre ferait perdre un
+travail de saisie — mais les montants réaffichés datent d'avant et méritent
+une relecture. Les bornes SQL (`amount_cents` ≥ 0 et ≤ 100 M€, `note` ≤ 500)
+doublent les bornes Zod : un montant négatif écrit hors du chemin API
+*diminuerait* le total à décaisser, soit exactement le montant fantôme que ce
+ticket refuse.
+
 ## Lien trésorerie
 
 `plannedOutflowCents` agrège les échéances **encore à payer dont le montant a

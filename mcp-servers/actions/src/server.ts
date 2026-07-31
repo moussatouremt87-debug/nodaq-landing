@@ -564,9 +564,23 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
     async ({ monthsAhead }) => {
       const now = new Date();
       const from = now.toISOString().slice(0, 10);
-      const horizon = new Date(now);
-      horizon.setUTCMonth(horizon.getUTCMonth() + (monthsAhead ?? 3));
-      const to = horizon.toISOString().slice(0, 10);
+      // Ajout de mois SANS débordement : un 31 janvier + 1 mois donnerait le
+      // 3 mars avec setUTCMonth, et l'horizon annoncé ne serait pas celui
+      // calculé (une échéance de début de mois entrerait ou sortirait).
+      const months = monthsAhead ?? 3;
+      const targetMonth = now.getUTCMonth() + months;
+      const lastDayOfTarget = new Date(
+        Date.UTC(now.getUTCFullYear(), targetMonth + 1, 0),
+      ).getUTCDate();
+      const to = new Date(
+        Date.UTC(
+          now.getUTCFullYear(),
+          targetMonth,
+          Math.min(now.getUTCDate(), lastDayOfTarget),
+        ),
+      )
+        .toISOString()
+        .slice(0, 10);
 
       const { stored, activeStaff, overrides } = await withTenant(tenantId, async (tx) => ({
         stored: await tx.tenantProfile.findFirst({

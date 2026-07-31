@@ -67,6 +67,7 @@ function DeadlineRow({
   const [amount, setAmount] = useState(
     deadline.amountCents === null ? "" : String(deadline.amountCents / 100),
   );
+  const [note, setNote] = useState(deadline.note ?? "");
   const [busy, setBusy] = useState(false);
 
   async function save(status: string): Promise<void> {
@@ -82,7 +83,7 @@ function DeadlineRow({
             ? Math.round(parsed * 100)
             : null,
         status,
-        note: deadline.note,
+        note: note.trim() === "" ? null : note.trim(),
       });
       onSaved();
     } finally {
@@ -113,6 +114,15 @@ function DeadlineRow({
           placeholder="montant €"
           onChange={(event) => setAmount(event.target.value)}
           style={{ width: 110 }}
+        />
+      </td>
+      <td>
+        <input
+          value={note}
+          placeholder="note"
+          maxLength={500}
+          onChange={(event) => setNote(event.target.value)}
+          style={{ width: 140 }}
         />
       </td>
       <td>
@@ -298,6 +308,7 @@ export default function EcheancierPage() {
                     <th>Obligation</th>
                     <th>Type</th>
                     <th>Montant</th>
+                    <th>Note</th>
                     <th>État</th>
                     <th />
                   </tr>

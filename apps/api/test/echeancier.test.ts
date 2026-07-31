@@ -246,3 +246,49 @@ describe("montants — déclarés, jamais dérivés", () => {
     expect(res.headers["cache-control"]).toBe("private, no-store");
   });
 });
+
+describe("robustesse des entrées", () => {
+  it("date non calendaire : 400 — jamais une erreur Prisma qui citerait le montant", async () => {
+    // "2026-02-31" passe un simple regex, devient `Invalid Date`, et l'erreur
+    // Prisma qui s'ensuit rend ses arguments (montant, note) dans les logs.
+    const res = await app.inject({
+      method: "PUT",
+      url: "/echeancier/deadline",
+      headers: { cookie: ownerCookie },
+      payload: {
+        obligationId: "cfe_solde",
+        dueDate: "2026-02-31",
+        amountCents: 999_00,
+        status: "prevu",
+        note: "annotation confidentielle",
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.stringify(res.json())).not.toContain("annotation");
+  });
+
+  it("montant négatif : refusé — il DIMINUERAIT le total à décaisser", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: "/echeancier/deadline",
+      headers: { cookie: ownerCookie },
+      payload: {
+        obligationId: "cfe_solde",
+        dueDate: "2026-12-15",
+        amountCents: -50_000_00,
+        status: "prevu",
+        note: null,
+      },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("profil fiscal : jamais mis en cache", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/echeancier/profil",
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.headers["cache-control"]).toBe("private, no-store");
+  });
+});

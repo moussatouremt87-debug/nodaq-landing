@@ -2545,7 +2545,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // (vertical + effectif RH). Obligations = catalogue versionné sourcé,
   // information générale, jamais un conseil juridique.
 
-  app.get("/reglementaire/profil", { preHandler: ownerRoute }, async (request) => {
+  app.get("/reglementaire/profil", { preHandler: ownerRoute }, async (request, reply) => {
+    // Profil stratégique (vertical, effectif) : même doctrine de cache que le
+    // profil fiscal — l'audit 2.9 a relevé le trou des deux côtés.
+    void reply.header("cache-control", "private, no-store");
     const { profile, activeStaff } = await withTenant(request.tenantId, async (tx) => ({
       profile: await tx.tenantProfile.findFirst({
         select: { vertical: true, headcountOverride: true, updatedAt: true },
@@ -2621,7 +2624,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // changement de régime ne laisse donc pas derrière lui des échéances
   // fantômes. Owner-only de bout en bout : régime fiscal et montants d'impôt.
 
-  app.get("/echeancier/profil", { preHandler: ownerRoute }, async (request) => {
+  app.get("/echeancier/profil", { preHandler: ownerRoute }, async (request, reply) => {
+    // Régime fiscal = donnée de dirigeant : jamais mise en cache par un
+    // intermédiaire (même doctrine que l'échéancier lui-même).
+    void reply.header("cache-control", "private, no-store");
     const profile = await withTenant(request.tenantId, (tx) =>
       tx.tenantProfile.findFirst({
         select: {
@@ -2656,6 +2662,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.put("/echeancier/profil", { preHandler: ownerRoute }, async (request, reply) => {
     const parsed = FiscalProfileBody.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    void reply.header("cache-control", "private, no-store");
     const saved = await withTenant(request.tenantId, (tx) =>
       tx.tenantProfile.upsert({
         where: { tenantId: request.tenantId },
@@ -2705,7 +2712,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const DeadlineBody = z
     .object({
       obligationId: z.enum(Object.keys(TAX_OBLIGATIONS) as [string, ...string[]]),
-      dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      // Date STRICTEMENT calendaire : "2026-02-31" passerait un simple regex,
+      // deviendrait `Invalid Date`, et l'erreur Prisma qui s'ensuit CITE ses
+      // arguments (montant, note) dans les logs. 400 propre plutôt que 500.
+      dueDate: IsoDay,
       // Montant DÉCLARÉ par le dirigeant : le produit n'en dérive jamais un.
       amountCents: z.number().int().min(0).max(100_000_000_00).nullable(),
       status: z.enum(["prevu", "paye", "non_applicable"]),

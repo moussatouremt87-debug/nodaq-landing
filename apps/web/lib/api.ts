@@ -1166,6 +1166,20 @@ export type TaxSchedule = z.infer<typeof TaxSchedule>;
 export const getTaxSchedule = (monthsAhead = 3): Promise<TaxSchedule> =>
   call(TaxSchedule, `/echeancier?monthsAhead=${monthsAhead}`);
 
+/**
+ * Variante pour le cockpit : l'échéancier est owner-only côté API, alors on
+ * ne l'appelle QUE pour un owner. Sans ce garde, chaque ouverture du cockpit
+ * par un membre ou un expert-comptable produirait un 403 dans les logs API.
+ */
+export const getTaxScheduleIfOwner = async (
+  monthsAhead = 3,
+): Promise<TaxSchedule | null> => {
+  const session = await getMe();
+  const active = session.memberships.find((m) => m.tenantId === session.activeOrganizationId);
+  if (active?.role !== "owner") return null;
+  return getTaxSchedule(monthsAhead);
+};
+
 export const getFiscalProfile = (): Promise<FiscalProfile> =>
   call(FiscalProfile, "/echeancier/profil");
 
