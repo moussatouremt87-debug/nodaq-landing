@@ -33,16 +33,37 @@ tri, ni par un filtre, ni par une pagination — un simple `optedOut` masqué à
 l'affichage aurait fini par ressortir dans une requête bien tournée.
 
 S'opposer déclenche une minimisation immédiate : e-mail, téléphone et notes
-sont effacés, et les comptes rendus du journal sont vidés. Ce qui reste est le
-strict nécessaire pour **ne plus recontacter la personne** — supprimer la fiche
-entière la laisserait être réimportée le mois suivant. C'est une liste
-d'exclusion, pas un dossier.
+sont effacés, et les comptes rendus du journal sont vidés.
 
-Trois portes dérobées sont fermées, chacune testée : un `PATCH` ne peut pas
-remettre un e-mail sur une personne opposée (409), un contact ne peut pas être
-consigné sur elle (409), et l'exécuteur de relance **rejoue** le garde à
-l'approbation — la personne a pu s'opposer entre la préparation et la
-validation.
+**Mais effacer les coordonnées détruit la seule clé qui permettrait de
+reconnaître la personne si on la resaisit.** Sans autre mécanisme, la garde
+annoncée n'existerait pas : la même personne serait réenregistrée le lendemain
+et repartirait en tête des relances. C'est ce que l'audit de ce ticket a
+trouvé, et c'est pourquoi il existe une vraie **liste d'exclusion**
+(`prospect_exclusions`) : au moment de l'opposition, un **condensat SHA-256**
+des coordonnées normalisées — salé par le tenant — est dérivé *avant*
+l'effacement, et la création le consulte.
+
+La table ne porte aucune coordonnée en clair (un `CHECK` refuse tout ce qui
+n'est pas un condensat hexadécimal). Limite assumée : l'espace des adresses
+e-mail est énumérable, donc c'est un **verrou anti-réimport, pas un secret** —
+il évite de conserver les coordonnées en clair, il ne rend pas la donnée
+anonyme.
+
+Quatre portes dérobées sont fermées, chacune testée : une **resaisie** de la
+même adresse est refusée (409, y compris écrite en majuscules ou avec des
+espaces), un `PATCH` ne peut pas rattacher cette adresse à une autre fiche
+(409), un contact ne peut pas être consigné sur une personne opposée (409,
+lecture et insertion dans **une seule transaction** — en deux, une opposition
+validée entre les deux passerait), et l'exécuteur de relance **rejoue** le
+garde à l'approbation, en levant (donc la file affiche un échec, pas
+« Exécutée »).
+
+S'opposer **retire aussi de la file** les brouillons de relance encore en
+attente : leur payload porte le nom de la personne, et les laisser reviendrait
+à pouvoir approuver une prospection à laquelle elle vient de s'opposer. Même
+nettoyage à la suppression définitive — sinon l'effacement ne serait que
+partiel, la cascade FK n'atteignant pas `pending_actions`.
 
 L'opposition n'est **pas réversible depuis le produit** : la lever exigerait la
 preuve d'un nouvel accord, que le produit n'a aucun moyen de recueillir ici.
@@ -51,6 +72,12 @@ preuve d'un nouvel accord, que le produit n'a aucun moyen de recueillir ici.
 
 Au-delà de **36 mois sans contact**, la fiche est **signalée**. Le produit ne
 purge jamais en silence — et ne garde jamais sans le dire.
+
+Y compris les fiches **opposées** : sorties du pipeline, elles échappaient
+d'abord à toute alerte, donc elles auraient été conservées indéfiniment sans
+jamais être mentionnées — l'exact contraire de la règle. Elles ont maintenant
+leur propre compteur (`expiredOptedOutCount`), un compte et non une liste : les
+nommer contredirait l'exclusion.
 
 Source : CNIL, « Durées de conservation — prospection commerciale »
 (https://www.cnil.fr/fr/conservation-des-donnees), consultée le 2026-07-31.
@@ -113,10 +140,16 @@ prospecter est le métier d'un commercial, et une fiche prospect ne porte aucun
 chiffre d'affaires. L'effacement définitif, lui, reste au dirigeant. Toutes les
 réponses en `cache-control: private, no-store`.
 
-Deux tables sous RLS (`prospects`, `prospect_interactions`) avec leurs tests
-d'isolation, plus les `CHECK` de défense en profondeur : étape et provenance
-dans le catalogue, bornes de longueur, et une opposition qui ne peut pas
-exister sans sa date.
+Trois tables sous RLS (`prospects`, `prospect_interactions`,
+`prospect_exclusions`) avec leurs tests d'isolation — dont la preuve par
+désactivation de la policy — plus les `CHECK` de défense en profondeur : étape
+et provenance dans le catalogue, bornes de longueur, une opposition qui ne peut
+pas exister sans sa date, et un condensat d'exclusion qui ne peut pas être une
+adresse en clair.
+
+Les listes sont bornées **et la troncature est dite** (`truncated`) : au-delà
+de 500 fiches, une partie du CRM deviendrait invisible sans que personne le
+sache.
 
 ## Limites assumées (V1)
 
@@ -128,6 +161,10 @@ exister sans sa date.
 - **Pas de purge automatique.** Les fiches expirées sont signalées, la
   suppression reste un geste humain. Une purge silencieuse effacerait un jour
   ce qu'il ne fallait pas.
+- **L'exclusion ne reconnaît que les coordonnées.** Une fiche sans e-mail ni
+  téléphone ne laisse aucun condensat : la même personne peut être resaisie
+  sous son seul nom. Hasher un nom bloquerait les homonymes et serait un
+  appariement peu fiable — mieux vaut le dire que le faire mal.
 - **Pas de désinscription en libre-service.** L'opposition est enregistrée par
   l'entreprise quand la personne la demande ; un lien de désabonnement suppose
   un canal d'envoi, donc le même ticket que ci-dessus.

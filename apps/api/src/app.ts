@@ -69,6 +69,7 @@ import {
 } from "./classeurMemory.js";
 import type { MemoryApplication, SupplierMemory } from "./classeurMemory.js";
 import { defaultExecutors } from "./executors.js";
+import { contactHashes } from "./prospectExclusion.js";
 import type { ExecutorRegistry } from "./executors.js";
 import {
   isAllowedPushEndpoint,
@@ -4268,25 +4269,58 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     createdAt: true,
   } as const;
 
+  /**
+   * Retire de la file les brouillons de relance visant ce prospect. Leur
+   * payload porte son nom : ni l'opposition ni l'effacement ne seraient
+   * complets s'ils survivaient dans `pending_actions`.
+   */
+  async function rejectProspectDrafts(
+    tx: Prisma.TransactionClient,
+    prospectId: string,
+  ): Promise<void> {
+    await tx.pendingAction.updateMany({
+      where: {
+        type: "record_prospect_contact",
+        status: "pending",
+        payload: { path: ["prospect", "id"], equals: prospectId },
+      },
+      data: {
+        status: "rejected",
+        // Le payload est RÉDUIT en même temps : rejeter sans réduire
+        // laisserait le brouillon nominatif en base indéfiniment.
+        payload: { reduced: true, prospectId } as Prisma.InputJsonValue,
+      },
+    });
+  }
+
   app.get("/prospects", { preHandler: businessRoute }, async (request, reply) => {
     // Fiches = données personnelles : jamais de cache partagé.
     void reply.header("cache-control", "private, no-store");
+    // Troncature DITE (doctrine maison) : au-delà de la borne, une partie du
+    // CRM deviendrait invisible sans que personne le sache.
+    const PROSPECT_PAGE = 500;
     const prospects = await withTenant(request.tenantId, (tx) =>
       tx.prospect.findMany({
         select: PROSPECT_SELECT,
         orderBy: { createdAt: "desc" },
-        take: 500,
+        take: PROSPECT_PAGE + 1,
       }),
     );
-    return { prospects };
+    return {
+      prospects: prospects.slice(0, PROSPECT_PAGE),
+      truncated: prospects.length > PROSPECT_PAGE,
+    };
   });
 
   const ProspectBody = z
     .object({
       name: z.string().min(1).max(200),
       company: z.string().max(200).optional(),
-      email: z.string().email().max(320).optional(),
-      phone: z.string().max(40).optional(),
+      // `.trim()` AVANT la validation : une adresse collée avec des espaces
+      // est la même adresse, et un 400 ici masquerait le contrôle
+      // d'exclusion qui vient juste après.
+      email: z.string().trim().email().max(320).optional(),
+      phone: z.string().trim().max(40).optional(),
       stage: z.enum(PROSPECT_STAGES).default("nouveau"),
       // Provenance EXIGÉE (art. 14) : pas de valeur par défaut, pas de fiche
       // dont on ne saurait pas dire d'où elle vient.
@@ -4299,6 +4333,21 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const parsed = ProspectBody.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
     void reply.header("cache-control", "private, no-store");
+    // LISTE D'EXCLUSION (audit 2.12) : une personne qui s'est opposée ne doit
+    // pas revenir par une resaisie. Ses coordonnées ayant été effacées, c'est
+    // le condensat qui la reconnaît — sinon la garde annoncée n'existe pas.
+    const hashes = contactHashes(request.tenantId, parsed.data);
+    if (hashes.length > 0) {
+      const excluded = await withTenant(request.tenantId, (tx) =>
+        tx.prospectExclusion.findFirst({
+          where: { contactHash: { in: hashes } },
+          select: { id: true },
+        }),
+      );
+      if (excluded) {
+        return reply.code(409).send({ error: "personne opposée à la prospection" });
+      }
+    }
     const created = await withTenant(request.tenantId, (tx) =>
       tx.prospect.create({
         data: {
@@ -4322,8 +4371,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       stage: z.enum(PROSPECT_STAGES).optional(),
       notes: z.string().max(1_000).optional(),
       company: z.string().max(200).optional(),
-      email: z.string().email().max(320).optional(),
-      phone: z.string().max(40).optional(),
+      // `.trim()` AVANT la validation : une adresse collée avec des espaces
+      // est la même adresse, et un 400 ici masquerait le contrôle
+      // d'exclusion qui vient juste après.
+      email: z.string().trim().email().max(320).optional(),
+      phone: z.string().trim().max(40).optional(),
     })
     .strict();
 
@@ -4343,6 +4395,21 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       ...(parsed.data.email !== undefined ? { email: parsed.data.email } : {}),
       ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone } : {}),
     };
+    // Même garde qu'à la création : rattacher à une AUTRE fiche la coordonnée
+    // d'une personne opposée la ferait revenir dans les relances par la porte
+    // du PATCH.
+    const patchHashes = contactHashes(request.tenantId, parsed.data);
+    if (patchHashes.length > 0) {
+      const excluded = await withTenant(request.tenantId, (tx) =>
+        tx.prospectExclusion.findFirst({
+          where: { contactHash: { in: patchHashes } },
+          select: { id: true },
+        }),
+      );
+      if (excluded) {
+        return reply.code(409).send({ error: "personne opposée à la prospection" });
+      }
+    }
     // `optedOut: false` dans le WHERE : sans lui, un PATCH remettrait un
     // e-mail ou un téléphone sur une personne qui s'y est opposée — la
     // minimisation faite à l'opposition serait défaite en un appel.
@@ -4383,15 +4450,19 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       return reply.code(400).send({ error: "invalid payload" });
     }
     void reply.header("cache-control", "private, no-store");
-    const prospect = await withTenant(request.tenantId, (tx) =>
-      tx.prospect.findUnique({ where: { id: params.data.id }, select: { optedOut: true } }),
-    );
-    if (!prospect) return reply.code(404).send({ error: "prospect not found" });
-    // Consigner un contact sur une personne opposée reviendrait à documenter
-    // une prospection qui n'aurait pas dû avoir lieu : refus net.
-    if (prospect.optedOut) return reply.code(409).send({ error: "prospect opposé" });
-    const created = await withTenant(request.tenantId, (tx) =>
-      tx.prospectInteraction.create({
+    // Lecture ET insertion dans la MÊME transaction (audit 2.12) : en deux
+    // transactions, une opposition validée entre les deux laisserait consigner
+    // un contact sur une personne qui vient de s'y opposer.
+    const created = await withTenant(request.tenantId, async (tx) => {
+      const prospect = await tx.prospect.findUnique({
+        where: { id: params.data.id },
+        select: { optedOut: true },
+      });
+      if (!prospect) return { error: "not-found" as const };
+      // Consigner un contact sur une personne opposée reviendrait à documenter
+      // une prospection qui n'aurait pas dû avoir lieu : refus net.
+      if (prospect.optedOut) return { error: "opposed" as const };
+      const row = await tx.prospectInteraction.create({
         data: {
           tenantId: request.tenantId,
           prospectId: params.data.id,
@@ -4401,8 +4472,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           createdBy: request.authSession.user.id,
         },
         select: { id: true },
-      }),
-    );
+      });
+      return { id: row.id };
+    });
+    if ("error" in created) {
+      return created.error === "not-found"
+        ? reply.code(404).send({ error: "prospect not found" })
+        : reply.code(409).send({ error: "prospect opposé" });
+    }
     return reply.code(201).send(created);
   });
 
@@ -4410,15 +4487,19 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: "invalid payload" });
     void reply.header("cache-control", "private, no-store");
+    const JOURNAL_PAGE = 200;
     const interactions = await withTenant(request.tenantId, (tx) =>
       tx.prospectInteraction.findMany({
         where: { prospectId: params.data.id },
         select: { id: true, kind: true, occurredAt: true, note: true, createdAt: true },
         orderBy: { occurredAt: "desc" },
-        take: 200,
+        take: JOURNAL_PAGE + 1,
       }),
     );
-    return { interactions };
+    return {
+      interactions: interactions.slice(0, JOURNAL_PAGE),
+      truncated: interactions.length > JOURNAL_PAGE,
+    };
   });
 
   // Opposition (art. 21). Elle n'est PAS réversible depuis le produit : lever
@@ -4432,10 +4513,22 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const result = await withTenant(request.tenantId, async (tx) => {
       const prospect = await tx.prospect.findUnique({
         where: { id: params.data.id },
-        select: { id: true, optedOut: true },
+        select: { id: true, optedOut: true, email: true, phone: true },
       });
       if (!prospect) return null;
       if (prospect.optedOut) return { alreadyOptedOut: true };
+
+      // L'exclusion est dérivée AVANT l'effacement : après, la clé n'existe
+      // plus. C'est elle — et non la fiche conservée — qui empêche vraiment
+      // la personne d'être resaisie demain.
+      const hashes = contactHashes(request.tenantId, prospect);
+      if (hashes.length > 0) {
+        await tx.prospectExclusion.createMany({
+          data: hashes.map((hash) => ({ tenantId: request.tenantId, contactHash: hash })),
+          skipDuplicates: true,
+        });
+      }
+
       await tx.prospect.update({
         where: { id: prospect.id },
         data: {
@@ -4455,7 +4548,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         where: { prospectId: prospect.id },
         data: { note: null },
       });
-      return { alreadyOptedOut: false };
+      // Une relance encore EN ATTENTE porte le nom de la personne dans son
+      // brouillon : la laisser en file, c'est garder — et pouvoir approuver —
+      // une prospection à laquelle elle vient de s'opposer.
+      await rejectProspectDrafts(tx, prospect.id);
+      return { alreadyOptedOut: false, hashed: hashes.length > 0 };
     });
     if (result === null) return reply.code(404).send({ error: "prospect not found" });
     return { optedOut: true, ...result };
@@ -4469,9 +4566,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     async (request, reply) => {
       const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
       if (!params.success) return reply.code(400).send({ error: "invalid payload" });
-      const { count } = await withTenant(request.tenantId, (tx) =>
-        tx.prospect.deleteMany({ where: { id: params.data.id } }),
-      );
+      void reply.header("cache-control", "private, no-store");
+      const count = await withTenant(request.tenantId, async (tx) => {
+        // La cascade FK emporte le journal, mais pas la file : un brouillon
+        // nominatif y survivrait à l'effacement, qui ne serait donc que
+        // partiel. On le retire dans la MÊME transaction.
+        await rejectProspectDrafts(tx, params.data.id);
+        const deleted = await tx.prospect.deleteMany({ where: { id: params.data.id } });
+        return deleted.count;
+      });
       if (count === 0) return reply.code(404).send({ error: "prospect not found" });
       return { deleted: true };
     },

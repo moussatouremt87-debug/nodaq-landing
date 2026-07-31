@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { PROSPECT_SOURCES, PROSPECT_STAGES } from "@nodaq/shared";
+
+export { PROSPECT_SOURCES, PROSPECT_STAGES };
 
 /*
  * Typed client for the NODAQ API, through the same-origin /backend proxy
@@ -882,25 +885,9 @@ export const getMonthlyReport = (
     `/rapports/mensuel${month ? `?month=${encodeURIComponent(month)}` : ""}`,
   );
 
-/* Prospection (2.12) — données personnelles de tiers non clients. */
-export const PROSPECT_STAGE_VALUES = [
-  "nouveau",
-  "contacte",
-  "qualifie",
-  "devis_envoye",
-  "gagne",
-  "perdu",
-] as const;
-
-export const PROSPECT_SOURCE_VALUES = [
-  "demande_entrante",
-  "recommandation",
-  "salon",
-  "reseau_pro",
-  "site_web",
-  "saisie_manuelle",
-] as const;
-
+/* Prospection (2.12) — données personnelles de tiers non clients. Le
+ * vocabulaire vient de @nodaq/shared : recopié ici, un ajout de provenance
+ * laisserait le formulaire silencieusement obsolète. */
 export const Prospect = z.object({
   id: z.string(),
   name: z.string(),
@@ -916,8 +903,11 @@ export const Prospect = z.object({
 });
 export type Prospect = z.infer<typeof Prospect>;
 
-export const getProspects = (): Promise<{ prospects: Prospect[] }> =>
-  call(z.object({ prospects: z.array(Prospect) }), "/prospects");
+export const getProspects = (): Promise<{ prospects: Prospect[]; truncated: boolean }> =>
+  call(
+    z.object({ prospects: z.array(Prospect), truncated: z.boolean() }),
+    "/prospects",
+  );
 
 export const createProspect = (input: {
   name: string;
@@ -980,10 +970,9 @@ export const ProspectionPlan = z.object({
       reason: z.string().min(1),
     }),
   ),
-  retentionAlerts: z.array(
-    z.object({ id: z.string(), name: z.string(), daysSinceContact: z.number() }),
-  ),
+  retentionAlerts: z.array(z.object({ id: z.string(), daysSinceContact: z.number() })),
   optedOutCount: z.number(),
+  expiredOptedOutCount: z.number(),
   unusableCount: z.number(),
   label: z.string().min(1),
   truncated: z.boolean().optional(),

@@ -8,8 +8,8 @@ import {
   getProspects,
   logProspectInteraction,
   opposeProspect,
-  PROSPECT_SOURCE_VALUES,
-  PROSPECT_STAGE_VALUES,
+  PROSPECT_SOURCES,
+  PROSPECT_STAGES,
   updateProspect,
 } from "../../lib/api";
 import type { Prospect, ProspectionPlan } from "../../lib/api";
@@ -53,6 +53,7 @@ function today(): string {
 
 export default function ProspectsPage() {
   const [prospects, setProspects] = useState<Prospect[]>([]);
+  const [truncated, setTruncated] = useState(false);
   const [plan, setPlan] = useState<ProspectionPlan | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -62,7 +63,9 @@ export default function ProspectsPage() {
 
   const refresh = useCallback(async () => {
     try {
-      setProspects((await getProspects()).prospects);
+      const list = await getProspects();
+      setProspects(list.prospects);
+      setTruncated(list.truncated);
       setPlan(await getProspectionPlan().catch(() => null));
     } catch {
       setError("prospection indisponible — réessayez");
@@ -156,7 +159,7 @@ export default function ProspectsPage() {
             Provenance :{" "}
             <select value={source} onChange={(e) => setSource(e.target.value)}>
               <option value="">— obligatoire —</option>
-              {PROSPECT_SOURCE_VALUES.map((value) => (
+              {PROSPECT_SOURCES.map((value) => (
                 <option key={value} value={value}>
                   {SOURCE_LABELS[value] ?? value}
                 </option>
@@ -199,7 +202,7 @@ export default function ProspectsPage() {
           )}
           <p className="muted">
             Pipeline :{" "}
-            {PROSPECT_STAGE_VALUES.map(
+            {PROSPECT_STAGES.map(
               (stage) => `${STAGE_LABELS[stage] ?? stage} ${plan.pipeline[stage] ?? 0}`,
             ).join(" · ")}
             {plan.optedOutCount > 0 &&
@@ -207,8 +210,10 @@ export default function ProspectsPage() {
           </p>
           {plan.retentionAlerts.length > 0 && (
             <p className="warn">
-              {plan.retentionAlerts.length} fiche(s) sans contact depuis plus de 3 ans : à
+              {plan.retentionAlerts.length} fiche(s) sans contact depuis plus de 36 mois : à
               supprimer, la durée de conservation recommandée est dépassée.
+              {plan.expiredOptedOutCount > 0 &&
+                ` S'y ajoutent ${plan.expiredOptedOutCount} fiche(s) opposée(s) également périmée(s).`}
             </p>
           )}
           <p className="warn">
@@ -219,6 +224,11 @@ export default function ProspectsPage() {
 
       <section className="card">
         <h2>Fiches ({prospects.length})</h2>
+        {truncated && (
+          <p className="warn">
+            Liste tronquée : seules les 500 fiches les plus récentes sont affichées.
+          </p>
+        )}
         <ul className="device-list">
           {prospects.map((prospect) => (
             <li key={prospect.id} className="device-row">
@@ -228,6 +238,14 @@ export default function ProspectsPage() {
                   {prospect.company ? `${prospect.company} · ` : ""}
                   {SOURCE_LABELS[prospect.source] ?? prospect.source}
                 </span>
+                {(prospect.email || prospect.phone || prospect.notes) && (
+                  <>
+                    <br />
+                    <span className="muted">
+                      {[prospect.email, prospect.phone, prospect.notes].filter(Boolean).join(" · ")}
+                    </span>
+                  </>
+                )}
                 {prospect.optedOut ? (
                   <>
                     <br />
@@ -242,7 +260,7 @@ export default function ProspectsPage() {
                       value={prospect.stage}
                       onChange={(e) => void moveStage(prospect, e.target.value)}
                     >
-                      {PROSPECT_STAGE_VALUES.map((stage) => (
+                      {PROSPECT_STAGES.map((stage) => (
                         <option key={stage} value={stage}>
                           {STAGE_LABELS[stage] ?? stage}
                         </option>

@@ -145,6 +145,66 @@ describe("opposition (art. 21) — une sortie, pas un filtre", () => {
     expect(interactions[0]?.note).toBeNull();
   });
 
+  it("BLOQUANT corrigé : la personne opposée ne revient pas par une resaisie", async () => {
+    // La fiche opposée était gardée AU MOTIF d'empêcher le réimport — mais
+    // l'opposition efface l'e-mail, et la création ne consultait rien. La
+    // liste d'exclusion (condensats) est ce qui tient réellement la garde.
+    const email = `revient-${RUN}@example.com`;
+    const created = await createProspect(memberCookie, {
+      name: `Revenant ${RUN}`,
+      email,
+      source: "salon",
+    });
+    await app.inject({
+      method: "POST",
+      url: `/prospects/${created.json().id}/opposition`,
+      headers: { cookie: memberCookie },
+    });
+
+    // Même adresse, écrite autrement : la normalisation doit la reconnaître.
+    const again = await createProspect(memberCookie, {
+      name: `Revenant bis ${RUN}`,
+      email: `  ${email.toUpperCase()} `,
+      source: "site_web",
+    });
+    expect(again.statusCode).toBe(409);
+
+    // Et rattacher l'adresse à une AUTRE fiche par PATCH est fermé aussi.
+    const other = await createProspect(memberCookie, {
+      name: `Tiers ${RUN}`,
+      source: "reseau_pro",
+    });
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/prospects/${other.json().id}`,
+      headers: { cookie: memberCookie },
+      payload: { email },
+    });
+    expect(patched.statusCode).toBe(409);
+  });
+
+  it("la liste d'exclusion ne porte aucune coordonnée en clair", async () => {
+    const email = `hash-${RUN}@example.com`;
+    const created = await createProspect(memberCookie, {
+      name: `Hashé ${RUN}`,
+      email,
+      phone: "06 12 34 56 78",
+      source: "salon",
+    });
+    await app.inject({
+      method: "POST",
+      url: `/prospects/${created.json().id}/opposition`,
+      headers: { cookie: memberCookie },
+    });
+    const exclusions = await admin.prospectExclusion.findMany({ where: { tenantId: orgId } });
+    expect(exclusions.length).toBeGreaterThanOrEqual(2);
+    for (const exclusion of exclusions) {
+      expect(exclusion.contactHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(exclusion.contactHash).not.toContain("@");
+    }
+    expect(JSON.stringify(exclusions)).not.toContain(email);
+  });
+
   it("un PATCH ne peut pas remettre un e-mail sur une personne opposée : 409", async () => {
     const created = await createProspect(memberCookie, {
       name: `Patch Opposé ${RUN}`,
@@ -310,6 +370,58 @@ describe("cloisonnement", () => {
     });
     expect(deleted.statusCode).toBe(200);
     expect(await admin.prospect.findUnique({ where: { id } })).toBeNull();
+  });
+
+  it("s'opposer retire de la file la relance encore en attente", async () => {
+    // Le brouillon porte le nom de la personne : le laisser en file, c'est
+    // garder — et pouvoir approuver — une prospection à laquelle elle vient
+    // de s'opposer.
+    const created = await createProspect(memberCookie, {
+      name: `File Opposée ${RUN}`,
+      source: "salon",
+    });
+    const { id } = created.json();
+    const pending = await admin.pendingAction.create({
+      data: {
+        tenantId: orgId,
+        type: "record_prospect_contact",
+        payload: { prospect: { id, stage: "contacte" }, draft: `Bonjour File Opposée ${RUN}…` },
+      },
+    });
+
+    await app.inject({
+      method: "POST",
+      url: `/prospects/${id}/opposition`,
+      headers: { cookie: memberCookie },
+    });
+
+    const after = await admin.pendingAction.findUniqueOrThrow({ where: { id: pending.id } });
+    expect(after.status).toBe("rejected");
+    expect(JSON.stringify(after.payload)).not.toContain(`File Opposée ${RUN}`);
+  });
+
+  it("l'effacement définitif emporte aussi le brouillon en file", async () => {
+    const created = await createProspect(memberCookie, {
+      name: `Effacé ${RUN}`,
+      source: "salon",
+    });
+    const { id } = created.json();
+    const pending = await admin.pendingAction.create({
+      data: {
+        tenantId: orgId,
+        type: "record_prospect_contact",
+        payload: { prospect: { id, stage: "nouveau" }, draft: `Bonjour Effacé ${RUN}…` },
+      },
+    });
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/prospects/${id}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(deleted.statusCode).toBe(200);
+    const after = await admin.pendingAction.findUniqueOrThrow({ where: { id: pending.id } });
+    expect(JSON.stringify(after.payload)).not.toContain(`Effacé ${RUN}`);
   });
 
   it("anonyme : 401 sur tout", async () => {

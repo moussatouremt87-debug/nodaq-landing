@@ -98,6 +98,7 @@ beforeAll(async () => {
   // FK order: interactions before prospects.
   await admin.prospectInteraction.deleteMany();
   await admin.prospect.deleteMany();
+  await admin.prospectExclusion.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -921,8 +922,8 @@ describe("garde-fou préalable", () => {
     expect(rows[0]?.relforcerowsecurity).toBe(true);
   });
 
-  it("la RLS est activée ET forcée sur prospects et prospect_interactions", async () => {
-    for (const table of ["prospects", "prospect_interactions"]) {
+  it("la RLS est activée ET forcée sur prospects, prospect_interactions et prospect_exclusions", async () => {
+    for (const table of ["prospects", "prospect_interactions", "prospect_exclusions"]) {
       const rows = await admin.$queryRawUnsafe<
         { relrowsecurity: boolean; relforcerowsecurity: boolean }[]
       >(`SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = '${table}'`);
@@ -1809,6 +1810,32 @@ describe("isolation tenant (RLS) — prospects (2.12)", () => {
     ).rejects.toThrow();
   });
 
+  it("test 5bis (prospect_exclusions) — la liste d'exclusion d'un tenant est invisible de l'autre", async () => {
+    // Un condensat fictif : la table ne porte JAMAIS de coordonnée en clair.
+    const hashA = "a".repeat(64);
+    await withTenant(tenantA, (tx) =>
+      tx.prospectExclusion.create({ data: { tenantId: tenantA, contactHash: hashA } }),
+    );
+    const fromB = await withTenant(tenantB, (tx) => tx.prospectExclusion.findMany());
+    expect(fromB).toHaveLength(0);
+    expect(await prisma.prospectExclusion.findMany()).toHaveLength(0);
+    await expect(
+      withTenant(tenantB, (tx) =>
+        tx.prospectExclusion.create({ data: { tenantId: tenantA, contactHash: "b".repeat(64) } }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 5ter — une coordonnée en clair dans la liste d'exclusion est refusée EN BASE", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.prospectExclusion.create({
+          data: { tenantId: tenantA, contactHash: "contact@exemple.fr" },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
   it("test 6 — une provenance hors catalogue est refusée EN BASE (défense en profondeur)", async () => {
     await expect(
       withTenant(tenantA, (tx) =>
@@ -1826,6 +1853,24 @@ describe("isolation tenant (RLS) — prospects (2.12)", () => {
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
+  it("policy désactivée sur prospect_interactions => la fuite se produit aussi (les comptes rendus des deux tenants)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "prospect_interactions" DISABLE ROW LEVEL SECURITY`);
+    try {
+      const leaked = await withTenant(tenantA, (tx) => tx.prospectInteraction.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((i) => i.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.prospectInteraction.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "prospect_interactions" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "prospect_interactions" FORCE ROW LEVEL SECURITY`);
+    }
+
+    const journal = await withTenant(tenantA, (tx) => tx.prospectInteraction.findMany());
+    expect(journal).toHaveLength(1);
+  });
+
   it("policy désactivée sur prospects => la fuite se produit (les fiches des DEUX tenants deviennent visibles)", async () => {
     await admin.$executeRawUnsafe(`ALTER TABLE "prospects" DISABLE ROW LEVEL SECURITY`);
     try {

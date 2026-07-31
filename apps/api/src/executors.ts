@@ -385,9 +385,10 @@ export const defaultExecutors: ExecutorRegistry = {
       });
       if (!target) throw new Error("prospect not found");
       if (target.optedOut) {
-        // Refus, pas un enregistrement silencieux : l'opposition prime sur
-        // une approbation antérieure.
-        return { recorded: false, refused: true, reason: "prospect opposé à la prospection" };
+        // On LÈVE au lieu de renvoyer un refus : un retour normal ferait
+        // afficher « Exécutée » dans la file pour une relance qui a été
+        // refusée, et l'information ne vivrait que dans `result`.
+        throw new Error("prospect opposé à la prospection");
       }
       await tx.prospectInteraction.create({
         data: {

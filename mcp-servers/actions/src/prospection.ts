@@ -58,6 +58,10 @@ export const FOLLOWUP_AFTER_DAYS: Partial<Record<ProspectStage, number>> = {
  */
 export const RETENTION_MONTHS = 36;
 
+/** La même durée en jours — c'est elle qui est comparée, et c'est elle que
+ * l'écran doit annoncer (mois "de 30 jours" : 36 mois = 1 080 jours). */
+export const RETENTION_DAYS = RETENTION_MONTHS * 30;
+
 export const ProspectRecord = z.object({
   id: z.string(),
   name: z.string(),
@@ -108,13 +112,24 @@ export interface ProspectionPlan {
   pipeline: Record<ProspectStage, number>;
   /** À relancer, du plus ancien contact au plus récent. */
   followups: ProspectFollowup[];
-  /** Fiches au-delà de la durée de conservation : à purger, jamais en silence. */
-  retentionAlerts: { id: string; name: string; daysSinceContact: number }[];
+  /**
+   * Fiches au-delà de la durée de conservation : à purger, jamais en silence.
+   * IDS SEULEMENT — l'écran a déjà les noms, et c'est le seul endroit du plan
+   * où une personne serait nommée à côté d'un verdict de suppression.
+   */
+  retentionAlerts: { id: string; daysSinceContact: number }[];
   /**
    * Prospects opposés à la prospection : comptés, JAMAIS listés. Le compte
    * prouve que l'exclusion a eu lieu ; la liste rouvrirait la porte.
    */
   optedOutCount: number;
+  /**
+   * Fiches OPPOSÉES elles aussi périmées (audit 2.12). Sorties du pipeline,
+   * elles échappaient à toute alerte : conservées indéfiniment sans jamais
+   * être signalées, l'exact contraire de « ne jamais garder sans le dire ».
+   * Un compte suffit — les nommer contredirait l'exclusion.
+   */
+  expiredOptedOutCount: number;
   /** Fiches ignorées faute de données lisibles (étape ou date invalide). */
   unusableCount: number;
   label: string;
@@ -161,31 +176,33 @@ export function buildProspectionPlan(
   const followups: ProspectFollowup[] = [];
   const retentionAlerts: ProspectionPlan["retentionAlerts"] = [];
   let optedOutCount = 0;
+  let expiredOptedOutCount = 0;
   let unusableCount = 0;
 
   for (const prospect of prospects) {
-    // Opposition (art. 21) : sortie IMMÉDIATE. Aucune branche en aval ne peut
-    // le remettre dans une liste — c'est la seule garantie qui tienne.
-    if (prospect.optedOut) {
-      optedOutCount += 1;
-      continue;
-    }
     const createdAt = parseDay(prospect.createdAt);
     if (createdAt === null) {
       unusableCount += 1;
       continue;
     }
-    pipeline[prospect.stage] += 1;
-
     const contactedAt = lastContact.get(prospect.id) ?? null;
-    const referenceAt = contactedAt ?? createdAt;
-    const daysSinceContact = daysBetween(referenceAt, nowMs);
-
     // Rétention : comptée depuis le dernier contact (ou la création si la
     // personne n'a jamais été contactée), comme la recommandation CNIL.
-    if (daysSinceContact >= RETENTION_MONTHS * 30) {
-      retentionAlerts.push({ id: prospect.id, name: prospect.name, daysSinceContact });
+    const daysSinceContact = daysBetween(contactedAt ?? createdAt, nowMs);
+    const expired = daysSinceContact >= RETENTION_DAYS;
+
+    // Opposition (art. 21) : sortie IMMÉDIATE de toute liste de relance.
+    // Aucune branche en aval ne peut la remettre dedans — c'est la seule
+    // garantie qui tienne. Elle reste comptée dans l'expiration : sortir du
+    // pipeline ne doit pas valoir droit d'être conservée pour toujours.
+    if (prospect.optedOut) {
+      optedOutCount += 1;
+      if (expired) expiredOptedOutCount += 1;
+      continue;
     }
+    pipeline[prospect.stage] += 1;
+
+    if (expired) retentionAlerts.push({ id: prospect.id, daysSinceContact });
 
     const thresholdDays = FOLLOWUP_AFTER_DAYS[prospect.stage] ?? null;
     let verdict: FollowupVerdict;
@@ -236,6 +253,7 @@ export function buildProspectionPlan(
     followups,
     retentionAlerts,
     optedOutCount,
+    expiredOptedOutCount,
     unusableCount,
     label:
       "Relances proposées sur un délai écoulé, pas sur une intention supposée. " +

@@ -4,6 +4,7 @@ import {
   FOLLOWUP_AFTER_DAYS,
   PROSPECT_SOURCES,
   PROSPECTION_RULES_VERSION,
+  RETENTION_DAYS,
   RETENTION_MONTHS,
 } from "../src/prospection.js";
 import type { InteractionRecord, ProspectRecord } from "../src/prospection.js";
@@ -147,13 +148,28 @@ describe("relance = un délai écoulé, jamais une intention supposée", () => {
 });
 
 describe("rétention — garder sans le dire est une faute", () => {
-  it("au-delà de la durée de conservation : la fiche est SIGNALÉE", () => {
+  it("au-delà de la durée de conservation : la fiche est SIGNALÉE, par son id seul", () => {
     const plan = buildProspectionPlan(
-      [prospect({ id: "vieux", createdAt: daysAgo(RETENTION_MONTHS * 30 + 10) })],
+      [prospect({ id: "vieux", name: "Nom Périmé", createdAt: daysAgo(RETENTION_DAYS + 10) })],
       [],
       NOW,
     );
     expect(plan.retentionAlerts.map((alert) => alert.id)).toEqual(["vieux"]);
+    // Seul endroit du plan où une personne serait nommée à côté d'un verdict
+    // de suppression : l'écran a déjà les noms, le plan n'en a pas besoin.
+    expect(JSON.stringify(plan.retentionAlerts)).not.toContain("Nom Périmé");
+  });
+
+  it("une fiche OPPOSÉE périmée est comptée : sortir du pipeline ne vaut pas droit d'être gardé pour toujours", () => {
+    // Sans ce compteur, l'opposé était conservé indéfiniment SANS jamais être
+    // signalé — l'exact contraire de « ne jamais garder sans le dire ».
+    const plan = buildProspectionPlan(
+      [prospect({ optedOut: true, createdAt: daysAgo(RETENTION_DAYS + 10) })],
+      [],
+      NOW,
+    );
+    expect(plan.expiredOptedOutCount).toBe(1);
+    expect(plan.retentionAlerts).toEqual([]);
   });
 
   it("un contact récent relance la durée : pas d'alerte sur un dossier vivant", () => {

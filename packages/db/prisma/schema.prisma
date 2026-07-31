@@ -54,6 +54,7 @@ model Tenant {
   taxDeadlines        TaxDeadline[]
   prospects           Prospect[]
   prospectInteractions ProspectInteraction[]
+  prospectExclusions  ProspectExclusion[]
 
   @@map("tenants")
   @@schema("public")
@@ -949,6 +950,29 @@ model Prospect {
   @@index([tenantId, stage])
   @@index([tenantId, optedOut])
   @@map("prospects")
+  @@schema("public")
+}
+
+/// Ticket 2.12 — LISTE D'EXCLUSION. C'est elle, et non la fiche conservée, qui
+/// empêche réellement de recontacter une personne opposée : l'opposition efface
+/// e-mail et téléphone, donc sans cette table la même personne serait resaisie
+/// le lendemain et repartirait en tête des relances.
+///
+/// Ne porte AUCUNE donnée en clair : uniquement un condensat SHA-256 de la
+/// coordonnée normalisée, salé par le `tenantId` (deux tenants ne peuvent pas
+/// rapprocher leurs listes, et un condensat volé ne redonne pas l'adresse).
+/// Limite assumée : l'espace des adresses e-mail reste énumérable — c'est un
+/// verrou anti-réimport, pas un secret. Sealed by RLS (see `rls_prospects`).
+model ProspectExclusion {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  /// SHA-256(tenantId + ':' + coordonnée normalisée). Jamais la coordonnée.
+  contactHash String   @map("contact_hash")
+  createdAt   DateTime @default(now()) @map("created_at")
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, contactHash])
+  @@map("prospect_exclusions")
   @@schema("public")
 }
 

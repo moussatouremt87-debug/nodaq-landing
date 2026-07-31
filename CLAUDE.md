@@ -78,9 +78,16 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > SORTIE en tête de boucle du moteur (jamais un filtre d'affichage), avec
 > minimisation immédiate (e-mail/téléphone/notes effacés, comptes rendus
 > vidés) et 3 portes fermées testées (PATCH 409, contact 409, garde REJOUÉ par
-> l'exécuteur) — fiche gardée MINIMALE (la supprimer la ferait réimporter
-> demain) ; rétention 36 mois SIGNALÉE jamais purgée en silence (config
-> versionnée datée sourcée CNIL). Relance = DÉLAI ÉCOULÉ vs seuil d'étape
+> l'exécuteur, qui LÈVE — sinon la file afficherait « Exécutée » pour une
+> relance refusée) ; l'effacement des coordonnées détruisant la clé
+> d'appariement, la garde anti-réimport tient par une VRAIE liste d'exclusion
+> `prospect_exclusions` (SHA-256 salé par tenant dérivé AVANT effacement, CHECK
+> hexadécimal — verrou anti-réimport, PAS un secret : l'espace des e-mails est
+> énumérable) consultée à la création ET au PATCH ; opposition et suppression
+> retirent aussi les brouillons EN FILE (payload nominatif, hors cascade FK) ;
+> rétention 36 mois SIGNALÉE jamais purgée en silence, y compris pour les
+> OPPOSÉS (`expiredOptedOutCount` — sortir du pipeline ne vaut pas droit d'être
+> gardé pour toujours) ; config versionnée datée sourcée CNIL. Relance = DÉLAI ÉCOULÉ vs seuil d'étape
 > (moteur pur `prospection.ts`), dernier contact DÉRIVÉ du journal append-only
 > (2.9/2.16b — un champ modifiable mentirait et déciderait seul qui est
 > relancé) ; minimisation par TYPE : le modèle pur ne reçoit ni e-mail ni
