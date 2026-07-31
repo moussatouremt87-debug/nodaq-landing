@@ -27,16 +27,27 @@ booléennes ignorées.
 
 ## Effet réel d'une désactivation
 
-1. **Navigation** : la page du module sort du menu (shell, fail-open en cas
-   d'erreur réseau — la visibilité est du confort produit).
+1. **Navigation** : la page du module sort du menu (shell, filtrage par
+   préfixe d'URL, fail-open en cas d'erreur réseau — la visibilité est du
+   confort produit).
 2. **Agent** : les outils du module sortent du toolset (`buildToolset` lit le
    profil et filtre — même mécanique fail-closed que le gate owner : absent
    du routage ⇒ `unknown tool`). Sans profil : tout actif (un profil manquant
-   n'ampute jamais l'employé virtuel).
+   n'ampute jamais l'employé virtuel). En revanche une **erreur DB** dans
+   cette lecture fait échouer la construction du toolset entier — fail-closed
+   global assumé, comme le reste de la chaîne.
+3. **Routes API** : les autorisations ne changent JAMAIS (pas une frontière
+   de sécurité), mais l'effet varie selon l'implémentation — les routes
+   adossées à un outil du toolset (`/rh/plan`, `/rh/performance`,
+   `/reglementaire`, `/avis/reputation`, `/avis/:id/reponse`) répondent
+   **409 « module désactivé »** explicite ; `GET /rgpd` dégrade son audit à
+   `null` ; les routes CRUD directes (équipe, avis, registre…) restent
+   pleinement fonctionnelles. La cohérence outil↔catalogue est figée par un
+   test (tout nom orphelin fait échouer la CI).
 
-**PAS une frontière de sécurité** (documenté et assumé) : les routes API du
-module restent accessibles avec les autorisations habituelles, et **aucune
-donnée n'est supprimée** — réactiver un module retrouve tout.
+**Aucune donnée n'est supprimée** — réactiver un module retrouve tout. Le
+vertical et la source des états sont OWNER-ONLY dans `GET /modules` (donnée
+stratégique 3.7) : les membres ne reçoivent que `{id, titre, href, actif}`.
 
 ## Stockage, routes, UI
 

@@ -6,6 +6,7 @@ import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
 import { ComptaAgent } from "../src/agent.js";
 import type { AgentEvent } from "../src/agent.js";
+import { MODULES } from "@nodaq/shared";
 import { buildToolset, OWNER_ONLY_TOOLS } from "../src/tools.js";
 import { createLangfuseTracer } from "../src/tracing.js";
 import type { AgentRunTrace, AgentTracer } from "../src/tracing.js";
@@ -287,6 +288,18 @@ describe("ComptaAgent — the full loop", () => {
       }
       await toolset.close();
     }
+  });
+
+  it("catalogue 3.11 : chaque outil référencé par un module EXISTE côté MCP (pas de dérive)", async () => {
+    // Un renommage d'outil MCP non répercuté au catalogue échouerait en
+    // silence côté OUVERT (module « désactivé » mais outil toujours exposé) :
+    // ce test échoue sur tout nom orphelin.
+    const toolset = await buildToolset({ tenantId, secretProvider: vault, role: "owner" });
+    const names = new Set(toolset.definitions.map((d) => d.name));
+    for (const tool of MODULES.flatMap((module) => module.tools)) {
+      expect(names.has(tool), `outil de catalogue inconnu côté MCP : ${tool}`).toBe(true);
+    }
+    await toolset.close();
   });
 
   it("module désactivé (3.11) : ses outils sortent du toolset, fail-open sans profil", async () => {

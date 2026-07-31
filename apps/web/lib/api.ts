@@ -978,7 +978,9 @@ export const deleteActivity = (id: string): Promise<{ deleted: boolean }> =>
 
 export const ModuleStates = z.object({
   version: z.string(),
-  vertical: z.string(),
+  // Vertical + source : OWNER-ONLY (donnée stratégique 3.7) — absents pour
+  // les membres, dont la nav n'a besoin que de {id, href, active}.
+  vertical: z.string().optional(),
   modules: z.array(
     z.object({
       id: z.string(),
@@ -986,7 +988,7 @@ export const ModuleStates = z.object({
       description: z.string(),
       href: z.string(),
       active: z.boolean(),
-      source: z.string(),
+      source: z.string().optional(),
     }),
   ),
 });

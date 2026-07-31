@@ -69,7 +69,7 @@ afterAll(async () => {
 });
 
 describe("modules par vertical", () => {
-  it("lecture membre OK (fail-open sans profil : vertical « autre », tout actif)", async () => {
+  it("lecture membre OK mais MINIMISÉE : ni vertical ni source (donnée stratégique 3.7)", async () => {
     const res = await app.inject({
       method: "GET",
       url: "/modules",
@@ -78,15 +78,26 @@ describe("modules par vertical", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json() as {
       version: string;
-      vertical: string;
-      modules: { id: string; active: boolean; source: string }[];
+      vertical?: string;
+      modules: { id: string; active: boolean; source?: string }[];
     };
     expect(body.version).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(body.vertical).toBe("autre");
+    expect(body.vertical).toBeUndefined();
     expect(body.modules.length).toBeGreaterThanOrEqual(6);
     expect(body.modules.every((m) => m.active)).toBe(true);
+    expect(body.modules.every((m) => m.source === undefined)).toBe(true);
     // La liste d'outils internes ne traverse pas la frontière HTTP.
     expect(JSON.stringify(body)).not.toContain("check_stock_alerts");
+
+    // L'owner, lui, voit vertical et sources.
+    const ownerRes = await app.inject({
+      method: "GET",
+      url: "/modules",
+      headers: { cookie: ownerCookie },
+    });
+    const ownerBody = ownerRes.json() as { vertical?: string; modules: { source?: string }[] };
+    expect(ownerBody.vertical).toBe("autre");
+    expect(ownerBody.modules.every((m) => typeof m.source === "string")).toBe(true);
   });
 
   it("bascule membre : 403 ; module inconnu : 404 ; payload invalide : 400", async () => {
@@ -143,12 +154,23 @@ describe("modules par vertical", () => {
       payload: { active: true },
     });
     expect(enable.statusCode).toBe(200);
-    const after = await app.inject({
+    // Le membre voit l'état effectif (nav) mais PAS la source ; l'owner voit tout.
+    const memberAfter = await app.inject({
       method: "GET",
       url: "/modules",
       headers: { cookie: memberCookie },
     });
-    const stocksAfter = (after.json() as { modules: { id: string; active: boolean; source: string }[] }).modules.find(
+    const memberStocks = (memberAfter.json() as { modules: { id: string; active: boolean; source?: string }[] }).modules.find(
+      (m) => m.id === "stocks",
+    );
+    expect(memberStocks).toMatchObject({ active: true });
+    expect(memberStocks?.source).toBeUndefined();
+    const after = await app.inject({
+      method: "GET",
+      url: "/modules",
+      headers: { cookie: ownerCookie },
+    });
+    const stocksAfter = (after.json() as { modules: { id: string; active: boolean; source?: string }[] }).modules.find(
       (m) => m.id === "stocks",
     );
     expect(stocksAfter).toMatchObject({ active: true, source: "choix" });
@@ -159,5 +181,31 @@ describe("modules par vertical", () => {
       headers: { cookie: ownerCookie },
     });
     expect((kept.json() as { vertical: string }).vertical).toBe("services");
+  });
+
+  it("module désactivé : la route adossée à son outil répond 409 explicite, jamais un 503 opaque", async () => {
+    const disable = await app.inject({
+      method: "PUT",
+      url: "/modules/reglementaire",
+      headers: { cookie: ownerCookie },
+      payload: { active: false },
+    });
+    expect(disable.statusCode).toBe(200);
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/reglementaire",
+        headers: { cookie: ownerCookie },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: "module désactivé" });
+    } finally {
+      await app.inject({
+        method: "PUT",
+        url: "/modules/reglementaire",
+        headers: { cookie: ownerCookie },
+        payload: { active: true },
+      });
+    }
   });
 });

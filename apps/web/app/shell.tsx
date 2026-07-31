@@ -180,7 +180,12 @@ export function Shell({ children }: { children: ReactNode }) {
           <span className="pill-souverain">Souverain</span>
         </div>
         <nav className="nav">
-          {LINKS.filter((link) => !inactiveHrefs.has(link.href)).map((link) => (
+          {LINKS.filter(
+            (link) =>
+              ![...inactiveHrefs].some(
+                (href) => link.href === href || link.href.startsWith(`${href}/`),
+              ),
+          ).map((link) => (
             <Link
               key={link.href}
               href={link.href}

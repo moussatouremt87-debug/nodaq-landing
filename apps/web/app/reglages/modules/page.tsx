@@ -55,10 +55,11 @@ export default function ModulesPage() {
         ) : (
           <>
             <p className="muted">
-              Défauts proposés pour votre vertical (« {state.vertical} », page Veille
-              réglementaire) — chaque module reste activable ou désactivable ici. Désactiver un
-              module retire sa page du menu et ses outils de l&apos;employé virtuel ; aucune
-              donnée n&apos;est supprimée.
+              {state.vertical
+                ? `Défauts proposés pour votre vertical (« ${state.vertical} », page Veille réglementaire) — chaque module reste activable ou désactivable ici. `
+                : "Réglage réservé au dirigeant — état des modules en lecture seule. "}
+              Désactiver un module retire sa page du menu, ses outils de l&apos;employé virtuel
+              et rend ses écrans « module désactivé » ; aucune donnée n&apos;est supprimée.
             </p>
             <ul className="device-list">
               {state.modules.map((module) => (
@@ -66,8 +67,9 @@ export default function ModulesPage() {
                   <div>
                     <strong>{module.title}</strong>{" "}
                     <span className="muted">
-                      {module.active ? "activé" : "désactivé"} (
-                      {module.source === "choix" ? "votre choix" : "défaut du vertical"})
+                      {module.active ? "activé" : "désactivé"}
+                      {module.source &&
+                        ` (${module.source === "choix" ? "votre choix" : "défaut du vertical"})`}
                     </span>
                     <br />
                     <span className="muted">{module.description}</span>

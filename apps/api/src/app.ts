@@ -2396,6 +2396,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return { deleted: true };
   });
 
+  // Une route adossée à un outil d'un module DÉSACTIVÉ (3.11) répond un
+  // motif explicite — jamais un 503 opaque (l'outil sort du toolset, donc
+  // « unknown tool » côté exécution).
+  const isUnknownTool = (error: unknown): boolean =>
+    error instanceof Error && /unknown tool/i.test(error.message);
+
   // Plan capacité vs charge : MÊME chemin que l'agent (outil owner-gated du
   // toolset lié au tenant) — une seule implémentation, deux consommateurs.
   app.get("/rh/plan", { preHandler: ownerRoute }, async (request, reply) => {
@@ -2417,6 +2423,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       });
       return JSON.parse(result) as unknown;
     } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "module désactivé" });
+      }
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },
         "staffing plan unavailable",
@@ -2452,6 +2461,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       });
       return JSON.parse(result) as unknown;
     } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "module désactivé" });
+      }
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },
         "hourly performance unavailable",
@@ -2522,6 +2534,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       const result = await toolset.execute("check_regulatory_watch", {});
       return JSON.parse(result) as unknown;
     } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "module désactivé" });
+      }
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },
         "regulatory watch unavailable",
@@ -2892,11 +2907,18 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   app.get("/modules", { preHandler: businessRoute }, async (request) => {
     const { vertical, overrides } = await readModuleState(request.tenantId);
+    // Le vertical est une donnée stratégique OWNER-ONLY (3.7) : la nav des
+    // membres n'a besoin que de {id, href, active} — ni vertical ni source
+    // (les défauts du vertical resteraient inférables sinon).
+    const isOwner = request.membershipRole === "owner";
     return {
       version: MODULE_CATALOG_VERSION,
-      vertical,
+      ...(isOwner ? { vertical } : {}),
       modules: resolveModules(vertical, overrides).map(
-        ({ tools: _tools, ...module }) => module,
+        ({ tools: _tools, source, ...module }) => ({
+          ...module,
+          ...(isOwner ? { source } : {}),
+        }),
       ),
     };
   });
@@ -2912,23 +2934,32 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     if (!MODULES.some((module) => module.id === params.data.id)) {
       return reply.code(404).send({ error: "unknown module" });
     }
-    const { overrides } = await readModuleState(request.tenantId);
-    // Assainissement en map booléenne pure : seules les surcharges valides
-    // de modules CONNUS sont réécrites (et Prisma exige un InputJsonValue).
-    const nextOverrides: Record<string, boolean> = {};
-    for (const module of MODULES) {
-      const value = overrides[module.id];
-      if (typeof value === "boolean") nextOverrides[module.id] = value;
-    }
-    nextOverrides[params.data.id] = body.data.active;
-    await withTenant(request.tenantId, (tx) =>
-      tx.tenantProfile.upsert({
+    // Lecture-modification-écriture dans UNE transaction : deux bascules
+    // concurrentes ne se perdent pas. Assainissement en map booléenne pure
+    // (modules CONNUS seulement — Prisma exige un InputJsonValue).
+    await withTenant(request.tenantId, async (tx) => {
+      const profile = await tx.tenantProfile.findFirst({
+        select: { moduleOverrides: true },
+      });
+      const stored =
+        profile?.moduleOverrides !== null &&
+        typeof profile?.moduleOverrides === "object" &&
+        !Array.isArray(profile?.moduleOverrides)
+          ? (profile?.moduleOverrides as Record<string, unknown>)
+          : {};
+      const nextOverrides: Record<string, boolean> = {};
+      for (const module of MODULES) {
+        const value = stored[module.id];
+        if (typeof value === "boolean") nextOverrides[module.id] = value;
+      }
+      nextOverrides[params.data.id] = body.data.active;
+      await tx.tenantProfile.upsert({
         where: { tenantId: request.tenantId },
         create: { tenantId: request.tenantId, moduleOverrides: nextOverrides },
         update: { moduleOverrides: nextOverrides },
         select: { id: true },
-      }),
-    );
+      });
+    });
     return { id: params.data.id, active: body.data.active };
   });
 
@@ -3233,6 +3264,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       const result = await toolset.execute("analyze_reputation", {});
       return JSON.parse(result) as unknown;
     } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "module désactivé" });
+      }
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },
         "reputation unavailable",
@@ -3267,6 +3301,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       const result = await toolset.execute("draft_review_reply", { reviewId: params.data.id });
       return JSON.parse(result) as unknown;
     } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "module désactivé" });
+      }
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },
         "review reply draft failed",
