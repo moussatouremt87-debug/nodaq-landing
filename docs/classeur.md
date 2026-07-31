@@ -59,12 +59,51 @@ par proximité de date (±7 j = « date proche »), top 5 — via le client Qont
 existant (fixtures en mode démo). Confirmation 1 clic → statut `rapproche` +
 `matchedTransactionId`. Détachable à tout moment.
 
-## Apprentissage (fondation V1)
+## Boucle d'apprentissage (ticket 2.16b)
 
-`originalExtraction` est **figée** au premier classement ; chaque correction
-est journalisée en **append-only** (`corrections[] {by, at, fields}`). C'est
-le futur jeu d'apprentissage (comparaison extraction/verité terrain) — le
-réentraînement effectif est un ticket V2.
+2.16 journalisait les corrections « pour plus tard ». 2.16b ferme la boucle :
+le classeur apprend **votre** entreprise, et il dit ce qu'il a appris.
+
+`originalExtraction` reste **figée** sur la lecture BRUTE du modèle ; chaque
+correction est journalisée en **append-only** (`corrections[] {by, at,
+fields}`). De là, `classeurMemory.ts` dérive une **mémoire fournisseur** :
+comment vos fournisseurs s'écrivent, quel type de document ils envoient, dans
+quelle devise. Rien de plus — **aucun montant n'est jamais appris** (la facture
+suivante peut porter n'importe quel montant ; le pré-remplir serait une
+invention).
+
+Ce n'est **pas** du réentraînement de modèle : pas de vecteur, pas de fine-
+tuning, pas une ligne qui sort du tenant. Une agrégation pure, recalculée à
+la lecture — même doctrine que l'échéancier (2.9) : ce qui est dérivable
+n'est pas conservé comme vérité.
+
+### Quatre refus, tous testés
+
+1. **Une correction n'est pas une règle.** Il en faut au moins deux
+   concordantes : sinon une faute de frappe corrigée une fois ferait loi.
+2. **Une contradiction gèle le champ.** Si vous avez tranché différemment sur
+   le même champ, il n'est pas appris — il est signalé « à trancher ». Le
+   produit n'arbitre pas à votre place.
+3. **La mémoire n'écrase jamais une lecture du modèle.** Elle comble un champ
+   vide, ou signale un désaccord. Une mémoire qui écraserait la lecture
+   rendrait le classeur plus sûr de lui à chaque erreur.
+4. **Un tenant n'apprend jamais d'un autre.** La mémoire est construite dans
+   `withTenant`, sur les seuls documents du tenant — testé explicitement : le
+   tenant B repart de zéro sur un fournisseur que le tenant A connaît par cœur.
+
+### Explicabilité
+
+`learned` (colonne JSONB) journalise ce que la mémoire a appliqué à ce
+document : champ comblé ou désaccord, avec le **nombre de corrections** qui le
+fonde. La page l'affiche (« pré-rempli d'après vos 3 corrections — vérifiez »),
+et `GET /classeur/memoire` rend la mémoire entière consultable. « Il apprend
+votre entreprise » n'a de valeur que si vous pouvez voir ce qu'il a appris —
+et le contredire.
+
+Le regroupement fournisseur normalise casse, accents et ponctuation
+(« S.A.R.L. » = « SARL ») mais **ne retire pas les formes juridiques** :
+« Martin SARL » et « Martin SAS » sont deux entreprises, et les fusionner
+attribuerait à l'une les corrections de l'autre.
 
 ## À ne pas faire
 

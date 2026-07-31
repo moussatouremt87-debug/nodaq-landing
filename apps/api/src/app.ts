@@ -59,6 +59,13 @@ import {
 import type { RegistryAsset } from "@nodaq/shared";
 import { auth } from "./auth.js";
 import { DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.js";
+import {
+  applySupplierMemory,
+  buildSupplierMemory,
+  MEMORY_WINDOW,
+  MIN_EVIDENCE,
+} from "./classeurMemory.js";
+import type { MemoryApplication, SupplierMemory } from "./classeurMemory.js";
 import type { DocExtraction } from "./classeur.js";
 import { defaultExecutors } from "./executors.js";
 import type { ExecutorRegistry } from "./executors.js";
@@ -991,11 +998,46 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     extraction: true,
     originalExtraction: true,
     corrections: true,
+    learned: true,
     matchedTransactionId: true,
     matchedAt: true,
     createdAt: true,
     updatedAt: true,
   } as const; // jamais `photo` dans une liste — servie par la route dédiée
+
+  /**
+   * Mémoire fournisseur du tenant (2.16b) — DÉRIVÉE, jamais stockée.
+   *
+   * Lecture STRICTEMENT tenant-scopée (`withTenant`) : les corrections d'un
+   * tenant ne peuvent pas influencer le classement d'un autre. C'est la
+   * propriété la plus importante de la boucle d'apprentissage, et elle est
+   * testée. Fenêtre bornée : une mémoire ne relit pas tout l'historique.
+   */
+  const loadSupplierMemory = async (tenantId: string): Promise<SupplierMemory[]> => {
+    const rows = await withTenant(tenantId, (tx) =>
+      tx.classeurDocument.findMany({
+        where: { status: { in: ["verifie", "rapproche"] } },
+        orderBy: { updatedAt: "desc" },
+        take: MEMORY_WINDOW,
+        select: { extraction: true, originalExtraction: true, corrections: true },
+      }),
+    );
+    return buildSupplierMemory(
+      rows.map((row) => ({
+        original: (row.originalExtraction ?? null) as DocExtraction | null,
+        final: (row.extraction ?? null) as DocExtraction | null,
+        correctionCount: Array.isArray(row.corrections) ? row.corrections.length : 0,
+      })),
+    );
+  };
+
+  /** Ce que le classeur a appris de VOTRE entreprise — et rien d'autre. */
+  app.get("/classeur/memoire", { preHandler: businessRoute }, async (request, reply) => {
+    const memories = await loadSupplierMemory(request.tenantId);
+    // Noms de fournisseurs : donnée d'entreprise, jamais mise en cache.
+    void reply.header("cache-control", "private, no-store");
+    return { suppliers: memories, minEvidence: MIN_EVIDENCE, window: MEMORY_WINDOW };
+  });
 
   /** Formats photo acceptés, détectés sur les OCTETS (jamais l'extension). */
   function sniffImageMime(buffer: Buffer): "image/jpeg" | "image/png" | "image/webp" | null {
@@ -1100,6 +1142,26 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           );
         }
 
+        // Boucle d'apprentissage (2.16b) : la mémoire fournisseur, DÉRIVÉE des
+        // corrections déjà validées par ce tenant, comble les trous de
+        // l'extraction et signale les désaccords. Elle n'écrase jamais une
+        // lecture du modèle, et `originalExtraction` reste la lecture BRUTE —
+        // c'est elle la vérité terrain du prochain apprentissage.
+        let learning: MemoryApplication | null = null;
+        if (extraction) {
+          try {
+            const memories = await loadSupplierMemory(request.tenantId);
+            learning = applySupplierMemory(extraction, memories);
+          } catch (error) {
+            // L'apprentissage est un CONFORT : son échec ne perd pas un
+            // document. Nom d'erreur seulement (le contenu est confidentiel).
+            request.log.warn(
+              { err: error instanceof Error ? error.name : "Error" },
+              "classeur memory unavailable",
+            );
+          }
+        }
+
         try {
           const document = await withTenant(request.tenantId, (tx) =>
             tx.classeurDocument.create({
@@ -1112,9 +1174,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
                 photo: new Uint8Array(body),
                 ...(extraction
                   ? {
-                      docType: extraction.docType,
-                      extraction,
+                      docType: learning?.extraction.docType ?? extraction.docType,
+                      extraction: learning?.extraction ?? extraction,
+                      // Lecture BRUTE du modèle, jamais enrichie : sans elle,
+                      // la mémoire s'auto-alimenterait de ses propres
+                      // suggestions et se croirait de mieux en mieux fondée.
                       originalExtraction: extraction,
+                      ...(learning && learning.applied.length > 0
+                        ? { learned: learning.applied as unknown as Prisma.InputJsonValue }
+                        : {}),
                     }
                   : {}),
               },

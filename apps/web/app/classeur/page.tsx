@@ -7,11 +7,17 @@ import {
   correctClasseurDocument,
   deleteClasseurDocument,
   getClasseurCandidates,
+  getClasseurMemory,
   listClasseurDocuments,
   matchClasseurDocument,
   uploadClasseurDocument,
 } from "../../lib/api";
-import type { ClasseurCorrection, ClasseurDocument, MatchCandidate } from "../../lib/api";
+import type {
+  ClasseurCorrection,
+  ClasseurDocument,
+  ClasseurMemory,
+  MatchCandidate,
+} from "../../lib/api";
 
 /*
  * Classeur documentaire photo (ticket 2.16) : on photographie un reçu ou une
@@ -69,6 +75,9 @@ function formFrom(document: ClasseurDocument): FormState {
 
 export default function ClasseurPage() {
   const [documents, setDocuments] = useState<ClasseurDocument[]>([]);
+  // Boucle d'apprentissage (2.16b) : ce que le classeur a retenu de VOTRE
+  // entreprise, avec le nombre de corrections qui le fondent.
+  const [memory, setMemory] = useState<ClasseurMemory | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
   const [candidates, setCandidates] = useState<MatchCandidate[] | null>(null);
@@ -81,6 +90,9 @@ export default function ClasseurPage() {
   const selected = documents.find((d) => d.id === selectedId) ?? null;
 
   const refresh = useCallback(() => {
+    getClasseurMemory()
+      .then(setMemory)
+      .catch(() => undefined);
     listClasseurDocuments()
       .then(setDocuments)
       .catch(() => undefined);
@@ -236,6 +248,34 @@ export default function ClasseurPage() {
         {notice && <p className="error-line">{notice}</p>}
       </div>
 
+      {memory && memory.suppliers.length > 0 && (
+        <div className="card" style={{ maxWidth: 430, marginBottom: 18 }}>
+          <span className="overline">Ce que le classeur a appris</span>
+          <p className="hint" style={{ margin: "4px 0 10px" }}>
+            Déduit de vos corrections — il faut au moins {memory.minEvidence} corrections
+            concordantes pour qu&apos;une règle s&apos;applique, et un désaccord la gèle.
+          </p>
+          <ul className="hint" style={{ margin: 0, paddingLeft: 18 }}>
+            {memory.suppliers.slice(0, 8).map((supplier) => (
+              <li key={supplier.key}>
+                <b>{supplier.displayName}</b>
+                {supplier.fields.length > 0 && (
+                  <>
+                    {" — "}
+                    {supplier.fields
+                      .map((field) => `${field.field} : ${field.value} (${field.evidence})`)
+                      .join(", ")}
+                  </>
+                )}
+                {supplier.conflicts.length > 0 && (
+                  <> · à trancher : {supplier.conflicts.join(", ")}</>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 340px", minWidth: 300 }}>
           {documents.length === 0 && (
@@ -294,6 +334,25 @@ export default function ClasseurPage() {
               alt="Document"
               style={{ width: "100%", maxHeight: 260, objectFit: "contain", margin: "10px 0", borderRadius: 10 }}
             />
+            {selected.learned && selected.learned.length > 0 && (
+              <div className="hint" style={{ margin: "8px 0" }}>
+                {selected.learned.map((entry) => (
+                  <div key={`${entry.field}-${entry.kind}`}>
+                    {entry.kind === "comble" ? (
+                      <>
+                        <b>{entry.field}</b> pré-rempli d&apos;après vos {entry.evidence}{" "}
+                        corrections sur ce fournisseur — vérifiez.
+                      </>
+                    ) : (
+                      <>
+                        <b>{entry.field}</b> : lu « {entry.modelValue} », mais vos{" "}
+                        {entry.evidence} corrections disent « {entry.value} ». À trancher.
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
             <label>
               <span className="overline">Type</span>
               <select
