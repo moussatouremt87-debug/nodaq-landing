@@ -38,9 +38,21 @@ import {
   wrapEmailBody,
 } from "./quoteRequest.js";
 import type { CatalogItem } from "./quoteRequest.js";
+import {
+  buildMonthlyReport,
+  MAX_REPORT_AGE_MONTHS,
+  MEDIAN_WINDOW_MONTHS,
+  monthsBetween,
+  previousMonthKey,
+} from "./monthlyReport.js";
 import { simulateMaterialPrices } from "./materialScenario.js";
 import { analyzeHourlyPerformance } from "./hourlyPerformance.js";
-import { buildMonthlySeries, fetchInvoiceWindow, forecastSales } from "./salesForecast.js";
+import {
+  buildMonthlySeries,
+  fetchInvoiceWindow,
+  forecastSales,
+  UNPAID_STATUSES,
+} from "./salesForecast.js";
 import type { MonthlyRevenuePoint } from "./salesForecast.js";
 import { buildStaffingPlan } from "./staffingPlan.js";
 import { forecastTreasury } from "./treasury.js";
@@ -93,6 +105,7 @@ export const TOOL_POLICIES = {
   compute_treasury_forecast: { requiresValidation: false },
   forecast_sales: { requiresValidation: false },
   analyze_customer_signals: { requiresValidation: false },
+  build_monthly_report: { requiresValidation: false },
   plan_staffing: { requiresValidation: false },
   analyze_hourly_performance: { requiresValidation: false },
   check_regulatory_watch: { requiresValidation: false },
@@ -323,6 +336,74 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
             }),
           },
         ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "build_monthly_report",
+    {
+      description:
+        "Rapport mensuel (lecture seule, ticket 2.11) : chiffre d'affaires, factures, " +
+        "encours échu et meilleur client d'un mois, plus les anomalies détectées — " +
+        "baisse du CA, facture inhabituelle, concentration client, hausse des impayés. " +
+        "Chaque anomalie est un ÉCART MESURÉ portant sa valeur, sa référence, son seuil " +
+        "et son échantillon ; les règles non évaluables faute de données sont dites, " +
+        "jamais comblées. Défaut : le dernier mois COMPLET.",
+      inputSchema: {
+        month: z
+          .string()
+          .regex(/^\d{4}-\d{2}$/)
+          .optional()
+          .describe("Mois analysé au format YYYY-MM (défaut : dernier mois complet)"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ month }) => {
+      const now = new Date();
+      const currentMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+      // Défaut = dernier mois COMPLET. Rapporter le mois en cours reviendrait à
+      // comparer trois semaines à des mois pleins et à annoncer une « baisse »
+      // qui n'est que du calendrier.
+      const target = month ?? previousMonthKey(currentMonth);
+      const monthsAgo = monthsBetween(target, currentMonth);
+      // `<= 0` : le mois en cours est REFUSÉ au même titre qu'un mois futur.
+      // Trois semaines comparées à des mois pleins produiraient une « baisse »
+      // qui n'est que du calendrier.
+      if (monthsAgo === null || monthsAgo <= 0 || monthsAgo > MAX_REPORT_AGE_MONTHS) {
+        // Un refus est une RÉPONSE motivée : le modèle reformule au lieu
+        // d'inventer un rapport sur un mois que personne n'a lu.
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                refused: true,
+                reason:
+                  monthsAgo !== null && monthsAgo <= 0
+                    ? "Ce mois n'est pas terminé : aucun rapport mensuel n'est produit sur un mois en cours."
+                    : `Mois hors de la fenêtre de lecture (${MAX_REPORT_AGE_MONTHS} mois).`,
+              }),
+            },
+          ],
+        };
+      }
+      // Fenêtre = le mois visé + l'historique de référence, jamais un crawl
+      // complet ; la troncature est remontée (un mois manquant ne vaut pas
+      // zéro).
+      const pennylane = await getPennylaneClient(tenantId, context);
+      // Fenêtre = mois visé + la profondeur FIXE dont les règles ont besoin
+      // (médiane sur 12 mois). Elle ne dépend donc que du mois demandé : le
+      // rapport d'un mois donné dit la même chose quel que soit le jour où on
+      // l'ouvre.
+      const { invoices, truncated } = await fetchInvoiceWindow(pennylane, now, {
+        monthsBack: monthsAgo + MEDIAN_WINDOW_MONTHS,
+      });
+      // La troncature entre DANS le modèle : elle marque les anomalies, au
+      // lieu d'être un drapeau affiché dans un autre coin de l'écran.
+      const report = buildMonthlyReport(invoices, target, { windowTruncated: truncated });
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(report) }],
       };
     },
   );
@@ -1253,7 +1334,8 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       // Financial data feeding a write action is validated, never defaulted:
       // a silent "0 EUR / 0 days overdue" pending action would mislead the
       // human validator (RGPD audit 1.5).
-      const UNPAID_STATUSES = new Set(["late", "overdue", "unpaid", "pending"]);
+      // Liste partagée (2.11) : un statut reconnu ici et pas dans le rapport
+      // mensuel produirait deux vérités sur la même facture.
       if (!invoice.status || !UNPAID_STATUSES.has(invoice.status)) {
         throw new Error(
           `invoice "${invoiceId}" is not eligible for dunning (status: ${invoice.status ?? "unknown"})`,

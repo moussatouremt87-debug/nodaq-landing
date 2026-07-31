@@ -41,6 +41,9 @@ export const OWNER_ONLY_TOOLS = new Set([
   "forecast_sales",
   // CA par client + noms clients (PII) : même statut que les factures (3.4).
   "analyze_customer_signals",
+  // CA du mois, encours échu et nom du meilleur client (PII) : même statut
+  // que les factures dont le rapport est tiré (2.11).
+  "build_monthly_report",
   // Noms des salariés (PII RH) + charge dérivée du CA : owner-only (3.5).
   "plan_staffing",
   // CA réalisé + heures RH : même statut que le plan de charge (3.6).

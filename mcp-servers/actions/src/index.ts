@@ -8,6 +8,16 @@ export {
   ForecastInvoice,
 } from "./salesForecast.js";
 export type { InvoiceLister, InvoiceWindow, MonthlyRevenuePoint, SalesForecast } from "./salesForecast.js";
+export {
+  ANOMALY_RULES_VERSION,
+  ANOMALY_THRESHOLDS,
+  buildMonthlyReport,
+  MAX_REPORT_AGE_MONTHS,
+  monthsBetween,
+  previousMonthKey,
+  ReportInvoice,
+} from "./monthlyReport.js";
+export type { Anomaly, AnomalyKind, MonthlyReport } from "./monthlyReport.js";
 export { scoreLatePayment, ScorableInvoice } from "./dunning.js";
 export type { LatePaymentScore, RiskBand } from "./dunning.js";
 export type { ActionsServerContext } from "./server.js";

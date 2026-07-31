@@ -832,6 +832,56 @@ export const getHourlyPerformance = (targetRateEur?: number): Promise<HourlyPerf
     `/rh/performance${targetRateEur ? `?targetRateEur=${encodeURIComponent(targetRateEur)}` : ""}`,
   );
 
+/* Rapport mensuel (2.11) — une anomalie est un écart MESURÉ : le schéma exige
+ * la valeur, la référence, le seuil et l'échantillon. Une anomalie sans ses
+ * chiffres serait un jugement, et le front la refuse. */
+export const MonthlyReport = z.object({
+  month: z.string(),
+  rulesVersion: z.string(),
+  revenueCents: z.number(),
+  invoiceCount: z.number(),
+  overdueCents: z.number(),
+  overdueCount: z.number(),
+  referenceRevenueCents: z.number().nullable(),
+  referenceMonths: z.number(),
+  topCustomer: z
+    .object({
+      name: z.string().nullable(),
+      totalCents: z.number(),
+      share: z.number(),
+    })
+    .nullable(),
+  unattributedCount: z.number(),
+  unattributedCents: z.number(),
+  anomalies: z.array(
+    z.object({
+      kind: z.string(),
+      observed: z.number(),
+      reference: z.number(),
+      threshold: z.number(),
+      sampleSize: z.number(),
+      reason: z.string().min(1),
+    }),
+  ),
+  notEvaluated: z.array(z.string()),
+  unusableCount: z.number(),
+  excludedCount: z.number(),
+  windowTruncated: z.boolean(),
+  label: z.string().min(1),
+});
+export type MonthlyReport = z.infer<typeof MonthlyReport>;
+
+/** Refus motivé (mois en cours ou hors fenêtre) — jamais un rapport vide. */
+export const MonthlyReportRefusal = z.object({ refused: z.literal(true), reason: z.string() });
+
+export const getMonthlyReport = (
+  month?: string,
+): Promise<MonthlyReport | z.infer<typeof MonthlyReportRefusal>> =>
+  call(
+    z.union([MonthlyReportRefusal, MonthlyReport]),
+    `/rapports/mensuel${month ? `?month=${encodeURIComponent(month)}` : ""}`,
+  );
+
 export const ComplianceProfile = z.object({
   vertical: z.string(),
   headcountOverride: z.number().nullable(),
