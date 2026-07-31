@@ -6,6 +6,7 @@ import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
 import { ComptaAgent } from "../src/agent.js";
 import type { AgentEvent } from "../src/agent.js";
+import { MODULES } from "@nodaq/shared";
 import { buildToolset, OWNER_ONLY_TOOLS } from "../src/tools.js";
 import { createLangfuseTracer } from "../src/tracing.js";
 import type { AgentRunTrace, AgentTracer } from "../src/tracing.js";
@@ -287,6 +288,48 @@ describe("ComptaAgent — the full loop", () => {
       }
       await toolset.close();
     }
+  });
+
+  it("catalogue 3.11 : chaque outil référencé par un module EXISTE côté MCP (pas de dérive)", async () => {
+    // Un renommage d'outil MCP non répercuté au catalogue échouerait en
+    // silence côté OUVERT (module « désactivé » mais outil toujours exposé) :
+    // ce test échoue sur tout nom orphelin.
+    const toolset = await buildToolset({ tenantId, secretProvider: vault, role: "owner" });
+    const names = new Set(toolset.definitions.map((d) => d.name));
+    for (const tool of MODULES.flatMap((module) => module.tools)) {
+      expect(names.has(tool), `outil de catalogue inconnu côté MCP : ${tool}`).toBe(true);
+    }
+    await toolset.close();
+  });
+
+  it("module désactivé (3.11) : ses outils sortent du toolset, fail-open sans profil", async () => {
+    // Profil avec RH et stocks désactivés : les outils rattachés disparaissent
+    // même pour l'owner (absent du routage => unknown tool).
+    await withTenant(tenantId, (tx) =>
+      tx.tenantProfile.upsert({
+        where: { tenantId },
+        create: { tenantId, moduleOverrides: { rh: false, stocks: false } },
+        update: { moduleOverrides: { rh: false, stocks: false } },
+      }),
+    );
+    try {
+      const toolset = await buildToolset({ tenantId, secretProvider: vault, role: "owner" });
+      const names = toolset.definitions.map((d) => d.name);
+      for (const tool of ["plan_staffing", "silae_get_employees", "check_stock_alerts", "adjust_stock"]) {
+        expect(names.includes(tool)).toBe(false);
+        await expect(toolset.execute(tool, {})).rejects.toThrow(/unknown tool/);
+      }
+      // Les modules restés actifs et le cœur compta ne bougent pas.
+      expect(names).toContain("check_regulatory_watch");
+      expect(names).toContain("compute_treasury_forecast");
+      await toolset.close();
+    } finally {
+      // Fail-open vérifié : sans profil, tout revient.
+      await withTenant(tenantId, (tx) => tx.tenantProfile.deleteMany({}));
+    }
+    const restored = await buildToolset({ tenantId, secretProvider: vault, role: "owner" });
+    expect(restored.definitions.map((d) => d.name)).toContain("plan_staffing");
+    await restored.close();
   });
 
   it("traces a run to Langfuse — METADATA ONLY, never content", async () => {

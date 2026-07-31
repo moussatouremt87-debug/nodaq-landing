@@ -976,6 +976,33 @@ export const deleteActivity = (id: string): Promise<{ deleted: boolean }> =>
     method: "DELETE",
   });
 
+export const ModuleStates = z.object({
+  version: z.string(),
+  // Vertical + source : OWNER-ONLY (donnée stratégique 3.7) — absents pour
+  // les membres, dont la nav n'a besoin que de {id, href, active}.
+  vertical: z.string().optional(),
+  modules: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      description: z.string(),
+      href: z.string(),
+      active: z.boolean(),
+      source: z.string().optional(),
+    }),
+  ),
+});
+export type ModuleStates = z.infer<typeof ModuleStates>;
+
+export const getModules = (): Promise<ModuleStates> => call(ModuleStates, "/modules");
+
+export const setModule = (id: string, active: boolean): Promise<{ active: boolean }> =>
+  call(
+    z.object({ id: z.string(), active: z.boolean() }),
+    `/modules/${encodeURIComponent(id)}`,
+    { method: "PUT", body: JSON.stringify({ active }) },
+  );
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {

@@ -31,7 +31,10 @@ import {
   buildDepreciationPlan,
   DATA_CATEGORIES,
   LEGAL_BASES,
+  MODULE_CATALOG_VERSION,
+  MODULES,
   PROCESSING_TEMPLATES,
+  resolveModules,
   renewalWall,
   TenantId,
   Uuid,
@@ -2393,6 +2396,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return { deleted: true };
   });
 
+  // Une route adossée à un outil d'un module DÉSACTIVÉ (3.11) répond un
+  // motif explicite — jamais un 503 opaque (l'outil sort du toolset, donc
+  // « unknown tool » côté exécution).
+  const isUnknownTool = (error: unknown): boolean =>
+    error instanceof Error && /unknown tool/i.test(error.message);
+
   // Plan capacité vs charge : MÊME chemin que l'agent (outil owner-gated du
   // toolset lié au tenant) — une seule implémentation, deux consommateurs.
   app.get("/rh/plan", { preHandler: ownerRoute }, async (request, reply) => {
@@ -2414,6 +2423,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       });
       return JSON.parse(result) as unknown;
     } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "module désactivé" });
+      }
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },
         "staffing plan unavailable",
@@ -2449,6 +2461,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       });
       return JSON.parse(result) as unknown;
     } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "module désactivé" });
+      }
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },
         "hourly performance unavailable",
@@ -2519,6 +2534,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       const result = await toolset.execute("check_regulatory_watch", {});
       return JSON.parse(result) as unknown;
     } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "module désactivé" });
+      }
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },
         "regulatory watch unavailable",
@@ -2862,6 +2880,89 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     }
   });
 
+  // --- Modules par vertical (3.11) ----------------------------------------
+  // État effectif = défauts du catalogue versionné (vertical du profil 3.7)
+  // + surcharges explicites de l'owner. Lecture pour TOUS les membres (la
+  // navigation en dépend) ; bascule owner-only. La (dés)activation est une
+  // surface produit, PAS une frontière de sécurité : les autorisations des
+  // routes restent inchangées, seuls nav et outils agent suivent.
+
+  const readModuleState = async (tenantId: string) => {
+    const profile = await withTenant(tenantId, (tx) =>
+      tx.tenantProfile.findFirst({
+        select: { vertical: true, moduleOverrides: true },
+      }),
+    );
+    const vertical = (VERTICALS as readonly string[]).includes(profile?.vertical ?? "")
+      ? (profile?.vertical as (typeof VERTICALS)[number])
+      : "autre";
+    const overrides =
+      profile?.moduleOverrides !== null &&
+      typeof profile?.moduleOverrides === "object" &&
+      !Array.isArray(profile?.moduleOverrides)
+        ? (profile?.moduleOverrides as Record<string, unknown>)
+        : {};
+    return { vertical, overrides };
+  };
+
+  app.get("/modules", { preHandler: businessRoute }, async (request) => {
+    const { vertical, overrides } = await readModuleState(request.tenantId);
+    // Le vertical est une donnée stratégique OWNER-ONLY (3.7) : la nav des
+    // membres n'a besoin que de {id, href, active} — ni vertical ni source
+    // (les défauts du vertical resteraient inférables sinon).
+    const isOwner = request.membershipRole === "owner";
+    return {
+      version: MODULE_CATALOG_VERSION,
+      ...(isOwner ? { vertical } : {}),
+      modules: resolveModules(vertical, overrides).map(
+        ({ tools: _tools, source, ...module }) => ({
+          ...module,
+          ...(isOwner ? { source } : {}),
+        }),
+      ),
+    };
+  });
+
+  app.put("/modules/:id", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z
+      .object({ id: z.string().min(1).max(50) })
+      .safeParse(request.params);
+    const body = z.object({ active: z.boolean() }).strict().safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    if (!MODULES.some((module) => module.id === params.data.id)) {
+      return reply.code(404).send({ error: "unknown module" });
+    }
+    // Lecture-modification-écriture dans UNE transaction : deux bascules
+    // concurrentes ne se perdent pas. Assainissement en map booléenne pure
+    // (modules CONNUS seulement — Prisma exige un InputJsonValue).
+    await withTenant(request.tenantId, async (tx) => {
+      const profile = await tx.tenantProfile.findFirst({
+        select: { moduleOverrides: true },
+      });
+      const stored =
+        profile?.moduleOverrides !== null &&
+        typeof profile?.moduleOverrides === "object" &&
+        !Array.isArray(profile?.moduleOverrides)
+          ? (profile?.moduleOverrides as Record<string, unknown>)
+          : {};
+      const nextOverrides: Record<string, boolean> = {};
+      for (const module of MODULES) {
+        const value = stored[module.id];
+        if (typeof value === "boolean") nextOverrides[module.id] = value;
+      }
+      nextOverrides[params.data.id] = body.data.active;
+      await tx.tenantProfile.upsert({
+        where: { tenantId: request.tenantId },
+        create: { tenantId: request.tenantId, moduleOverrides: nextOverrides },
+        update: { moduleOverrides: nextOverrides },
+        select: { id: true },
+      });
+    });
+    return { id: params.data.id, active: body.data.active };
+  });
+
   // --- Assistant RGPD (3.9) — owner-only : registre des traitements -------
   // (art. 30, document de conformité stratégique). Modèles CNIL versionnés
   // sourcés ; audit déterministe ; jamais un conseil juridique.
@@ -3163,6 +3264,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       const result = await toolset.execute("analyze_reputation", {});
       return JSON.parse(result) as unknown;
     } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "module désactivé" });
+      }
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },
         "reputation unavailable",
@@ -3197,6 +3301,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       const result = await toolset.execute("draft_review_reply", { reviewId: params.data.id });
       return JSON.parse(result) as unknown;
     } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "module désactivé" });
+      }
       request.log.warn(
         { err: error instanceof Error ? error.name : "Error" },
         "review reply draft failed",

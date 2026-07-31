@@ -664,6 +664,9 @@ model TenantProfile {
   tenantId          String   @unique @map("tenant_id") @db.Uuid
   vertical          String   @default("autre")
   headcountOverride Int?     @map("headcount_override")
+  /// Surcharges de modules (3.11) : map moduleId -> bool, choix explicites de
+  /// l'owner par-dessus les défauts du vertical (moduleCatalog.ts).
+  moduleOverrides   Json?    @map("module_overrides")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
   tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)

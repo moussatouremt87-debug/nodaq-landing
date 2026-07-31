@@ -105,6 +105,14 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > `externalRef` unique sur staff, absences dédupliquées, conflits comptés jamais
 > écrasés ; salaires/bulletins JAMAIS lus (minimisation à la source)
 > (`docs/silae.md`).
+> **Modules par vertical (3.11)** : catalogue versionné `moduleCatalog.ts`
+> (7 modules, défauts par vertical — stocks off en `services`, cœur jamais
+> désactivable) ; moteur pur `resolveModules` (défaut vertical + surcharges
+> owner, source affichée) ; désactivation = nav masquée + outils RETIRÉS du
+> toolset (`buildToolset` filtre, fail-open sans profil) — PAS une frontière
+> de sécurité (routes/autorisations inchangées, données conservées) ;
+> `tenant_profiles.module_overrides` (JSONB), `GET /modules` (membres) /
+> `PUT /modules/:id` (owner), page Réglages → Modules (`docs/modules.md`).
 > **Support (2.18)** : schéma Postgres `ops` (tables `support_tickets`/`support_issues`)
 > hors RLS métier MAIS sous RLS gated `app.ops_operator` — accès UNIQUEMENT via
 > `withOps()` + routes OPERATOR (allowlist `OPS_OPERATOR_USER_IDS`, 404 sinon) ;
