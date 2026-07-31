@@ -11,6 +11,7 @@ import {
   getHourlyPerformance,
   getRh,
   getStaffingPlan,
+  syncSilae,
   updateStaff,
 } from "../../lib/api";
 import type { HourlyPerformance, StaffAbsence, StaffMember, StaffingPlan } from "../../lib/api";
@@ -38,6 +39,8 @@ export default function RhPage() {
   const [staffForm, setStaffForm] = useState({ name: "", role: "", weeklyHours: "35" });
   const [absenceForm, setAbsenceForm] = useState({ staffId: "", type: "conges", startDate: "", endDate: "" });
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
 
   const refresh = useCallback(async (hourlyRate?: number) => {
     try {
@@ -58,6 +61,41 @@ export default function RhPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  async function runSilaeSync(): Promise<void> {
+    setSyncing(true);
+    setSyncNotice(null);
+    setError(null);
+    try {
+      const result = await syncSilae();
+      setSyncNotice(
+        `Silae : ${result.employeesCreated} créé(s), ${result.employeesUpdated} mis à jour, ` +
+          `${result.absencesCreated} absence(s) importée(s)` +
+          (result.employeesSkipped > 0 ? ` · ${result.employeesSkipped} ignoré(s) (conflit)` : "") +
+          ((result.employeesDeactivated ?? 0) > 0
+            ? ` · ${result.employeesDeactivated} fiche(s) désactivée(s) (sorties de Silae)`
+            : "") +
+          ((result.absencesUpdated ?? 0) > 0
+            ? ` · ${result.absencesUpdated} absence(s) mise(s) à jour`
+            : "") +
+          ((result.absencesRemoved ?? 0) > 0
+            ? ` · ${result.absencesRemoved} absence(s) retirée(s) (annulées à la source)`
+            : "") +
+          (result.truncated ? " · lecture partielle (bornes atteintes)" : ""),
+      );
+      await refresh();
+    } catch (err) {
+      setSyncNotice(
+        err instanceof ApiError && err.status === 409
+          ? "Connecteur Silae non configuré — reliez-le depuis la page Connecteurs."
+          : err instanceof ApiError && err.status === 403
+            ? "Synchronisation réservée au dirigeant."
+            : "Synchronisation impossible — réessayez.",
+      );
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   async function addStaff(event: FormEvent): Promise<void> {
     event.preventDefault();
@@ -240,6 +278,16 @@ export default function RhPage() {
 
       <section className="card">
         <h3>Équipe ({staff.filter((m) => m.active).length} actifs)</h3>
+        <p>
+          <button
+            disabled={syncing}
+            onClick={() => void runSilaeSync()}
+            title="Importe salariés et absences depuis Silae (connecteur requis — page Connecteurs)"
+          >
+            {syncing ? "Synchronisation…" : "Synchroniser depuis Silae"}
+          </button>{" "}
+          {syncNotice && <span className="hint">{syncNotice}</span>}
+        </p>
         <ul className="device-list">
           {staff.map((member) => (
             <li key={member.id} className="device-row">

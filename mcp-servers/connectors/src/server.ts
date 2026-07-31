@@ -1,8 +1,40 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { TenantId } from "@nodaq/shared";
-import { getBankClient, getPennylaneClient } from "./registry.js";
+import { getBankClient, getPennylaneClient, getSilaeClient } from "./registry.js";
 import type { RegistryOptions } from "./registry.js";
+
+/** Bornes de lecture Silae (RH/paie, 3.10) : évite qu'une page mal configurée
+ * côté middleware partenaire renvoie une liste sans fin dans le contexte
+ * modèle — dépassement SIGNALÉ (`truncated`), jamais tu. */
+const SILAE_EMPLOYEES_BOUND = 500;
+const SILAE_ABSENCES_BOUND = 2000;
+const SILAE_PAGE_SIZE_MAX = 100;
+
+/**
+ * Consomme une source paginée (curseur) jusqu'à `bound` éléments : demande
+ * toujours UN élément de plus que nécessaire pour distinguer « pile la
+ * borne » de « la borne a coupé une liste plus longue ».
+ */
+async function fetchBounded<T>(
+  fetchPage: (
+    cursor: string | undefined,
+    limit: number,
+  ) => Promise<{ items: T[]; next_cursor?: string | null | undefined }>,
+  bound: number,
+): Promise<{ items: T[]; truncated: boolean }> {
+  const items: T[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const remaining = bound + 1 - items.length;
+    if (remaining <= 0) break;
+    const page = await fetchPage(cursor, Math.min(remaining, SILAE_PAGE_SIZE_MAX));
+    items.push(...page.items);
+    if (!page.next_cursor) break;
+    cursor = page.next_cursor;
+  }
+  return { items: items.slice(0, bound), truncated: items.length > bound };
+}
 
 /*
  * MCP server exposing the SaaS connectors as READ-ONLY tools (blueprint §5.5).
@@ -134,6 +166,80 @@ export function createConnectorsMcpServer(context: ConnectorsServerContext): Mcp
           ...(perPage !== undefined ? { perPage } : {}),
         }),
       );
+    },
+  );
+
+  server.registerTool(
+    "silae_get_employees",
+    {
+      description:
+        "Liste les salariés Silae du tenant (RH/paie, lecture seule) : id, nom " +
+        `(prénom + nom), heures hebdomadaires, actif. Bornée à ${SILAE_EMPLOYEES_BOUND} ` +
+        "(dépassement signalé par `truncated`).",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const client = await getSilaeClient(tenantId, context);
+      const { items, truncated } = await fetchBounded(
+        (cursor, limit) => client.listEmployees({ limit, ...(cursor ? { cursor } : {}) }),
+        SILAE_EMPLOYEES_BOUND,
+      );
+      return asJsonContent({
+        employees: items.map((employee) => ({
+          id: employee.id,
+          name: [employee.first_name, employee.last_name].filter(Boolean).join(" ") || null,
+          weeklyHours: employee.weekly_hours ?? null,
+          active: employee.active ?? null,
+        })),
+        truncated,
+      });
+    },
+  );
+
+  server.registerTool(
+    "silae_get_absences",
+    {
+      description:
+        "Liste les absences Silae du tenant (RH/paie, lecture seule), filtrable par " +
+        `période : id, salarié, type, dates de début/fin. Bornée à ${SILAE_ABSENCES_BOUND} ` +
+        "(dépassement signalé par `truncated`).",
+      inputSchema: {
+        from: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, "format attendu YYYY-MM-DD")
+          .optional()
+          .describe("Borne de début (YYYY-MM-DD)"),
+        to: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, "format attendu YYYY-MM-DD")
+          .optional()
+          .describe("Borne de fin (YYYY-MM-DD)"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ from, to }) => {
+      const client = await getSilaeClient(tenantId, context);
+      const { items, truncated } = await fetchBounded(
+        (cursor, limit) =>
+          client.listAbsences({
+            limit,
+            ...(cursor ? { cursor } : {}),
+            ...(from !== undefined ? { from } : {}),
+            ...(to !== undefined ? { to } : {}),
+          }),
+        SILAE_ABSENCES_BOUND,
+      );
+      return asJsonContent({
+        absences: items.map((absence) => ({
+          id: absence.id,
+          employeeId: absence.employee_id,
+          type: absence.type ?? null,
+          startDate: absence.start_date,
+          endDate: absence.end_date,
+        })),
+        truncated,
+      });
     },
   );
 

@@ -98,6 +98,13 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > construction) ; outil `check_rgpd_register` + routes `/rgpd*` + page
 > OWNER-ONLY ; label « ni conseil juridique ni DPO » PERMANENT ; AIPD/droits/
 > violations + RAG CNIL = V2 (`docs/assistant-rgpd.md`).
+> **Silae (3.10)** : connecteur SIRH/paie lecture SEULE (`silae.ts`, API partenaire
+> — base URL configurable, identifiants testés avant coffre, mode démo) ; outils
+> `silae_get_employees`/`silae_get_absences` OWNER-ONLY (PII RH) ; sync HUMAINE
+> `POST /connectors/silae/sync` (owner, précédent FEC) idempotente —
+> `externalRef` unique sur staff, absences dédupliquées, conflits comptés jamais
+> écrasés ; salaires/bulletins JAMAIS lus (minimisation à la source)
+> (`docs/silae.md`).
 > **Support (2.18)** : schéma Postgres `ops` (tables `support_tickets`/`support_issues`)
 > hors RLS métier MAIS sous RLS gated `app.ops_operator` — accès UNIQUEMENT via
 > `withOps()` + routes OPERATOR (allowlist `OPS_OPERATOR_USER_IDS`, 404 sinon) ;
