@@ -454,6 +454,11 @@ model ClasseurDocument {
   originalExtraction    Json?     @map("original_extraction")
   /// Append-only list of human corrections: [{by, at, fields}].
   corrections           Json      @default("[]")
+  /// Apprentissage appliqué au classement (2.16b) : liste des champs comblés
+  /// ou signalés en désaccord par la mémoire fournisseur, avec le nombre de
+  /// corrections humaines qui les fondent. Trace d'EXPLICABILITÉ — la mémoire
+  /// elle-même est dérivée à la volée, jamais stockée.
+  learned               Json?
   matchedTransactionId  String?   @map("matched_transaction_id")
   matchedAt             DateTime? @map("matched_at")
   createdAt             DateTime  @default(now()) @map("created_at")

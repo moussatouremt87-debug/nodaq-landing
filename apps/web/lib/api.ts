@@ -286,6 +286,19 @@ export const ClasseurDocument = z.object({
   extraction: ClasseurExtraction,
   originalExtraction: ClasseurExtraction,
   corrections: z.array(z.unknown()),
+  /** Apprentissage appliqué au classement (2.16b) — explicabilité. */
+  learned: z
+    .array(
+      z.object({
+        field: z.string(),
+        value: z.string(),
+        evidence: z.number(),
+        kind: z.string(),
+        modelValue: z.string().optional(),
+      }),
+    )
+    .nullable()
+    .optional(),
   matchedTransactionId: z.string().nullable(),
   matchedAt: z.string().nullable(),
   createdAt: z.string(),
@@ -294,6 +307,27 @@ export const ClasseurDocument = z.object({
 export type ClasseurDocument = z.infer<typeof ClasseurDocument>;
 
 const ClasseurDocumentEnvelope = z.object({ document: ClasseurDocument });
+
+/** Ce que le classeur a appris de l'entreprise (2.16b) — dérivé, non stocké. */
+export const ClasseurMemory = z.object({
+  suppliers: z.array(
+    z.object({
+      key: z.string(),
+      displayName: z.string(),
+      fields: z.array(
+        z.object({ field: z.string(), value: z.string(), evidence: z.number() }),
+      ),
+      conflicts: z.array(z.string()),
+      documents: z.number(),
+    }),
+  ),
+  minEvidence: z.number(),
+  window: z.number(),
+});
+export type ClasseurMemory = z.infer<typeof ClasseurMemory>;
+
+export const getClasseurMemory = (): Promise<ClasseurMemory> =>
+  call(ClasseurMemory, "/classeur/memoire");
 
 export const listClasseurDocuments = (): Promise<ClasseurDocument[]> =>
   call(z.object({ documents: z.array(ClasseurDocument) }), "/classeur/documents").then(

@@ -58,8 +58,15 @@ import {
 } from "@nodaq/shared";
 import type { RegistryAsset } from "@nodaq/shared";
 import { auth } from "./auth.js";
-import { DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.js";
-import type { DocExtraction } from "./classeur.js";
+import { DocExtraction, DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.js";
+import {
+  applySupplierMemory,
+  buildSupplierMemory,
+  humanFieldsOf,
+  MEMORY_WINDOW,
+  MIN_EVIDENCE,
+} from "./classeurMemory.js";
+import type { MemoryApplication, SupplierMemory } from "./classeurMemory.js";
 import { defaultExecutors } from "./executors.js";
 import type { ExecutorRegistry } from "./executors.js";
 import {
@@ -991,11 +998,50 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     extraction: true,
     originalExtraction: true,
     corrections: true,
+    learned: true,
     matchedTransactionId: true,
     matchedAt: true,
     createdAt: true,
     updatedAt: true,
   } as const; // jamais `photo` dans une liste — servie par la route dédiée
+
+  /**
+   * Mémoire fournisseur du tenant (2.16b) — DÉRIVÉE, jamais stockée.
+   *
+   * Lecture STRICTEMENT tenant-scopée (`withTenant`) : les corrections d'un
+   * tenant ne peuvent pas influencer le classement d'un autre. C'est la
+   * propriété la plus importante de la boucle d'apprentissage, et elle est
+   * testée. Fenêtre bornée : une mémoire ne relit pas tout l'historique.
+   */
+  const loadSupplierMemory = async (tenantId: string): Promise<SupplierMemory[]> => {
+    const rows = await withTenant(tenantId, (tx) =>
+      tx.classeurDocument.findMany({
+        // Seuls les documents PORTANT une correction humaine : les autres
+        // n'apprennent rien et coûteraient une lecture pour rien.
+        where: { status: { in: ["verifie", "rapproche"] }, NOT: { corrections: { equals: [] } } },
+        orderBy: { updatedAt: "desc" },
+        take: MEMORY_WINDOW,
+        // `originalExtraction` n'est PAS relue : la preuve vient du journal
+        // des corrections, pas d'une comparaison avec la lecture du modèle.
+        select: { extraction: true, corrections: true },
+      }),
+    );
+    return buildSupplierMemory(
+      rows.map((row) => ({
+        // JSONB relu depuis la base : validé, jamais casté (frontières typées).
+        final: DocExtraction.partial().safeParse(row.extraction).data ?? null,
+        humanFields: humanFieldsOf(row.corrections),
+      })),
+    );
+  };
+
+  /** Ce que le classeur a appris de VOTRE entreprise — et rien d'autre. */
+  app.get("/classeur/memoire", { preHandler: businessRoute }, async (request, reply) => {
+    const memories = await loadSupplierMemory(request.tenantId);
+    // Noms de fournisseurs : donnée d'entreprise, jamais mise en cache.
+    void reply.header("cache-control", "private, no-store");
+    return { suppliers: memories, minEvidence: MIN_EVIDENCE, window: MEMORY_WINDOW };
+  });
 
   /** Formats photo acceptés, détectés sur les OCTETS (jamais l'extension). */
   function sniffImageMime(buffer: Buffer): "image/jpeg" | "image/png" | "image/webp" | null {
@@ -1014,7 +1060,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return null;
   }
 
-  app.get("/classeur/documents", { preHandler: businessRoute }, async (request) => {
+  app.get("/classeur/documents", { preHandler: businessRoute }, async (request, reply) => {
+    // Noms de fournisseurs et montants : jamais mis en cache par un
+    // intermédiaire (même doctrine que la mémoire et l'échéancier).
+    void reply.header("cache-control", "private, no-store");
     const documents = await withTenant(request.tenantId, (tx) =>
       tx.classeurDocument.findMany({
         orderBy: { createdAt: "desc" },
@@ -1100,6 +1149,26 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           );
         }
 
+        // Boucle d'apprentissage (2.16b) : la mémoire fournisseur, DÉRIVÉE des
+        // corrections déjà validées par ce tenant, comble les trous de
+        // l'extraction et signale les désaccords. Elle n'écrase jamais une
+        // lecture du modèle, et `originalExtraction` reste la lecture BRUTE —
+        // c'est elle la vérité terrain du prochain apprentissage.
+        let learning: MemoryApplication | null = null;
+        if (extraction) {
+          try {
+            const memories = await loadSupplierMemory(request.tenantId);
+            learning = applySupplierMemory(extraction, memories);
+          } catch (error) {
+            // L'apprentissage est un CONFORT : son échec ne perd pas un
+            // document. Nom d'erreur seulement (le contenu est confidentiel).
+            request.log.warn(
+              { err: error instanceof Error ? error.name : "Error" },
+              "classeur memory unavailable",
+            );
+          }
+        }
+
         try {
           const document = await withTenant(request.tenantId, (tx) =>
             tx.classeurDocument.create({
@@ -1112,9 +1181,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
                 photo: new Uint8Array(body),
                 ...(extraction
                   ? {
-                      docType: extraction.docType,
-                      extraction,
+                      docType: learning?.extraction.docType ?? extraction.docType,
+                      extraction: learning?.extraction ?? extraction,
+                      // Lecture BRUTE du modèle, jamais enrichie : sans elle,
+                      // la mémoire s'auto-alimenterait de ses propres
+                      // suggestions et se croirait de mieux en mieux fondée.
                       originalExtraction: extraction,
+                      ...(learning && learning.applied.length > 0
+                        ? { learned: learning.applied as unknown as Prisma.InputJsonValue }
+                        : {}),
                     }
                   : {}),
               },
@@ -1243,7 +1318,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       updated = await withTenant(request.tenantId, async (tx) => {
         const document = await tx.classeurDocument.findUnique({
           where: { id },
-          select: { extraction: true, corrections: true, docType: true, status: true },
+          select: {
+            extraction: true,
+            corrections: true,
+            docType: true,
+            status: true,
+            learned: true,
+          },
         });
         if (!document) return null;
         // Append-only FAIL-CLOSED : un historique corrompu (pas un tableau)
@@ -1262,11 +1343,23 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           ...document.corrections,
           { by: request.authSession.user.id, at: new Date().toISOString(), fields },
         ] as Prisma.InputJsonValue;
+        // L'humain a tranché : la suggestion de la mémoire sur CE champ n'a
+        // plus à s'afficher (« à trancher » resterait au présent pour
+        // toujours). Les autres traces d'explicabilité restent.
+        const remainingLearned = Array.isArray(document.learned)
+          ? document.learned.filter(
+              (entry) =>
+                typeof entry !== "object" ||
+                entry === null ||
+                !((entry as { field?: unknown }).field as string in fields),
+            )
+          : document.learned;
         return tx.classeurDocument.update({
           where: { id },
           data: {
             extraction,
             corrections,
+            learned: (remainingLearned ?? Prisma.DbNull) as Prisma.InputJsonValue,
             docType: fields.docType ?? document.docType,
             // Un document rapproché RESTE rapproché : corriger un champ ne
             // défait pas silencieusement le rapprochement fait par l'owner.
