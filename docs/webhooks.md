@@ -44,7 +44,7 @@ hmac = HMAC_SHA256(secret, "<t>.<octets bruts du corps>")
   vérifiée avant comparaison.
 - **Corps borné** à 1 Mo : un fournisseur ne dicte pas notre mémoire.
 
-## Réponses — pas d'oracle
+## Réponses — pas d'oracle (en réponse)
 
 Tout échec d'authentification (endpoint inconnu, inactif, provider qui ne
 correspond pas, secret absent, signature fausse, horodatage hors fenêtre)
@@ -52,8 +52,29 @@ répond un **401 constant** `{"error":"unauthorized"}`. La raison réelle reste
 dans le log serveur (ops), jamais dans la réponse : un appelant ne peut pas
 énumérer les endpoints ni distinguer « n'existe pas » de « mal signé ».
 
-Corps illisible ou sans identifiant d'événement : 400 (la requête est
-authentifiée, elle est simplement inexploitable).
+**Nuance assumée** : l'égalité vaut pour le *contenu* de la réponse, pas pour
+la *latence*. Un endpoint inconnu s'arrête après une lecture DB ; un endpoint
+connu mal signé passe en plus par le coffre et le HMAC. Cet écart est un
+oracle d'existence théorique, sans portée pratique (l'identifiant d'endpoint
+est un UUID v4 non devinable) — un délai plancher serait le correctif si le
+besoin apparaît.
+
+Corps illisible, sans identifiant d'événement, ou refusé à l'insertion :
+400 (la requête est authentifiée, elle est simplement inexploitable).
+
+## Débit borné (disponibilité, art. 32)
+
+C'est la seule route anonyme du produit : un flood de POST non signés
+ouvrirait une transaction chacun et viderait le pool Postgres — l'API
+tomberait **pour tous les tenants**. Un limiteur en mémoire (60 requêtes par
+minute et par IP, nombre de clés suivies plafonné) s'exécute donc **avant
+toute I/O**, et répond 429 au-delà. Per-process comme le balayage push : la
+version partagée viendra avec le travail multi-réplicas (Redis).
+
+Le secret d'endpoint est mis en cache 60 s (invalidé à la rotation) : sans
+cela, chaque livraison déclencherait un appel au Secret Manager, provocable
+par quiconque détient l'identifiant d'endpoint — qui est justement partagé
+avec un tiers.
 
 ## Idempotence et traitement
 
@@ -66,6 +87,21 @@ authentifiée, elle est simplement inexploitable).
   vérité pour un rejeu. Statuts : `received → processed | ignored | failed`
   (sans handler = `ignored`, jamais perdu ; échec = nom d'erreur seulement,
   jamais un message qui citerait le payload).
+
+## Minimisation et rétention
+
+- **Le payload n'est collecté que s'il va être traité** : sans handler
+  enregistré pour le provider, la trace de réception est conservée (id
+  d'événement, type, statut) mais **le corps fournisseur ne l'est pas** —
+  transactions bancaires et factures nominatives n'ont aucune finalité tant
+  que rien ne les consomme (art. 5.1.b/c). Brancher un handler (2.4, Bridge)
+  ouvre la collecte pour ce provider, et pour lui seul.
+- **Rétention 90 jours** : les réceptions plus anciennes sont purgées
+  opportunément à chaque traitement (art. 5.1.e), sans balayeur dédié.
+- **La rotation d'un secret ne détruit rien** : l'endpoint est mis à jour
+  (même identifiant, donc même URL déjà configurée chez le fournisseur) et le
+  journal des réceptions est conservé — une piste d'audit ne doit pas
+  s'effacer d'un clic. Seule la révocation explicite supprime.
 
 ## Secrets
 
@@ -88,11 +124,22 @@ révocation purge le coffre.
 
 UI : section « Webhooks entrants » de la page Connecteurs.
 
+## Contrat fournisseur
+
+- En-tête `X-Nodaq-Signature: t=<unix>,v1=<hex>` — `t` en secondes, **sans
+  zéros de tête** (la matière signée est reconstruite à partir de l'entier).
+- `Content-Type: application/json`, corps ≤ 1 Mo.
+- Un identifiant d'événement stable (`id`, `event_id` ou `eventId`) : c'est la
+  clé d'idempotence, sans elle la livraison est refusée.
+- L'URL à configurer est renvoyée à la création de l'endpoint ; elle est
+  absolue dès que `PUBLIC_API_URL` est défini côté API.
+
 ## Limites V1 (assumées)
 
-- Pas de re-tentative automatique côté NODAQ (`failed` reste `failed`) : le
-  rejeu se fait à la demande du fournisseur ou par un futur balayage.
-- Pas de purge automatique des événements traités (rétention à définir avec
-  les premiers volumes réels).
+- Pas de re-tentative automatique côté NODAQ (`failed` reste `failed`), et un
+  arrêt du process laisse les `received` en l'état : le rejeu se fait à la
+  demande du fournisseur ou par un futur balayeur de reprise.
+- Limiteur et cache de secrets **par process** : un déploiement multi-réplicas
+  multiplie le quota effectif d'autant (Redis avec le ticket T.2).
 - Un endpoint par provider et par tenant ; pas d'allowlist d'IP source (la
   signature est la garde, l'IP n'ajouterait qu'une contrainte d'exploitation).

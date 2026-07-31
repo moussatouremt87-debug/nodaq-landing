@@ -4,7 +4,11 @@ import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
 import { buildApp } from "../src/app.js";
-import { signWebhookPayload, WEBHOOK_TOLERANCE_SECONDS } from "../src/webhooks.js";
+import {
+  signWebhookPayload,
+  WEBHOOK_TOLERANCE_SECONDS,
+  WebhookRateLimiter,
+} from "../src/webhooks.js";
 
 /*
  * Socle webhooks entrants (2.13). Une requête webhook n'a AUCUNE session :
@@ -288,6 +292,109 @@ describe("réception webhook — signature, idempotence, tenant", () => {
     expect(body.events.length).toBeGreaterThan(0);
     expect(JSON.stringify(body)).not.toContain("payload");
     expect(JSON.stringify(body)).not.toContain("invoice.paid" + '","payload');
+  });
+
+  it("rotation du secret : l'URL et le JOURNAL survivent, l'ancien secret cesse de marcher", async () => {
+    const before = await admin.webhookEvent.count({ where: { tenantId: orgId, provider: "test" } });
+    expect(before).toBeGreaterThan(0);
+    const oldSecret = secret;
+
+    const rotated = await app.inject({
+      method: "POST",
+      url: "/webhooks/endpoints",
+      headers: { cookie: ownerCookie },
+      payload: { provider: "test" },
+    });
+    expect(rotated.statusCode).toBe(201);
+    const next = rotated.json() as { id: string; secret: string };
+    // Même endpoint (l'URL configurée chez le fournisseur reste valable)…
+    expect(next.id).toBe(endpointId);
+    expect(next.secret).not.toBe(oldSecret);
+    // …et la piste d'audit n'est pas effacée par une rotation.
+    expect(await admin.webhookEvent.count({ where: { tenantId: orgId, provider: "test" } })).toBe(
+      before,
+    );
+
+    // L'ancien secret est révoqué (cache invalidé compris).
+    const body = Buffer.from(JSON.stringify({ id: `evt-${RUN}-old`, type: "x" }));
+    const now = Math.floor(Date.now() / 1000);
+    const stale = await deliver(
+      `/webhooks/test/${endpointId}`,
+      body,
+      signWebhookPayload(oldSecret, now, body),
+    );
+    expect(stale.statusCode).toBe(401);
+    const fresh = await deliver(
+      `/webhooks/test/${endpointId}`,
+      body,
+      signWebhookPayload(next.secret, now, body),
+    );
+    expect(fresh.statusCode).toBe(202);
+    secret = next.secret;
+  });
+
+  it("MINIMISATION : sans handler pour le provider, le payload n'est PAS collecté", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/webhooks/endpoints",
+      headers: { cookie: ownerCookie },
+      payload: { provider: "bridge" },
+    });
+    const { id, secret: bridgeSecret } = created.json() as { id: string; secret: string };
+    // Corps chargé de données bancaires : aucune finalité tant qu'aucun
+    // handler ne les traite -> la trace de réception reste, la donnée non.
+    const body = Buffer.from(
+      JSON.stringify({
+        id: `evt-${RUN}-minim`,
+        type: "account.updated",
+        iban: "FR7616798000010000012345678",
+        holder: "Jean Dupont",
+      }),
+    );
+    const res = await deliver(
+      `/webhooks/bridge/${id}`,
+      body,
+      signWebhookPayload(bridgeSecret, Math.floor(Date.now() / 1000), body),
+    );
+    expect(res.statusCode).toBe(202);
+    const stored = await admin.webhookEvent.findFirst({
+      where: { tenantId: orgId, externalId: `evt-${RUN}-minim` },
+    });
+    expect(stored?.status).toBe("ignored");
+    expect(JSON.stringify(stored?.payload)).not.toContain("FR7616798000010000012345678");
+    expect(JSON.stringify(stored?.payload)).not.toContain("Jean Dupont");
+    expect(stored?.payload).toEqual({});
+  });
+
+  it("débit borné : au-delà du quota, 429 — le pool de connexions est protégé", async () => {
+    const limited = buildApp({
+      vault: {
+        get: (name) => Promise.resolve(vaultStore.get(name)),
+        set: () => Promise.resolve(),
+        delete: () => Promise.resolve(),
+      },
+      webhookRateLimiter: new WebhookRateLimiter(2, 60_000),
+    });
+    await limited.ready();
+    try {
+      const body = Buffer.from(JSON.stringify({ id: "evt-flood", type: "x" }));
+      const codes: number[] = [];
+      for (let i = 0; i < 4; i++) {
+        const res = await limited.inject({
+          method: "POST",
+          url: `/webhooks/test/11111111-2222-4333-8444-555555555555`,
+          headers: { "content-type": "application/json" },
+          payload: body,
+        });
+        codes.push(res.statusCode);
+      }
+      // Les deux premières sont traitées (et refusées en 401, endpoint
+      // inconnu), les suivantes n'atteignent JAMAIS la base.
+      expect(codes.slice(0, 2)).toEqual([401, 401]);
+      expect(codes.slice(2)).toEqual([429, 429]);
+    } finally {
+      await limited.close();
+    }
   });
 
   it("sans handler enregistré : l'événement est marqué « ignored », jamais perdu", async () => {

@@ -121,7 +121,10 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > 401 CONSTANT sur tout échec (pas d'oracle) ; idempotence
 > `(tenant, provider, externalId)` → re-livraison = 202 `duplicate` sans écriture ;
 > handlers métier APRÈS la réponse (`received→processed|ignored|failed`) ; secret
-> serveur au coffre, renvoyé UNE fois (`docs/webhooks.md`).
+> serveur au coffre, renvoyé UNE fois, cache 60 s ; débit borné AVANT toute I/O
+> (429, sinon un flood anonyme vide le pool) ; payload collecté SEULEMENT si un
+> handler existe (minimisation) + rétention 90 j ; rotation NON destructive
+> (même id/URL, journal conservé) (`docs/webhooks.md`).
 > **Support (2.18)** : schéma Postgres `ops` (tables `support_tickets`/`support_issues`)
 > hors RLS métier MAIS sous RLS gated `app.ops_operator` — accès UNIQUEMENT via
 > `withOps()` + routes OPERATOR (allowlist `OPS_OPERATOR_USER_IDS`, 404 sinon) ;

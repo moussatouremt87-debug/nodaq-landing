@@ -146,3 +146,73 @@ export type WebhookHandler = (event: {
 }) => Promise<void>;
 
 export type WebhookHandlerRegistry = Partial<Record<string, WebhookHandler>>;
+
+/**
+ * In-memory rate limiter for the ONLY anonymous route of the product. It runs
+ * BEFORE any I/O: without it, a flood of unsigned POSTs would open one DB
+ * transaction each and drain the Prisma pool — taking the whole API down for
+ * every tenant (availability, art. 32). Per-process by design, like the push
+ * sweep: a Redis-backed limiter comes with the multi-replica work.
+ */
+export class WebhookRateLimiter {
+  private readonly hits = new Map<string, { count: number; resetAt: number }>();
+
+  constructor(
+    private readonly max = 60,
+    private readonly windowMs = 60_000,
+    /** Hard cap on tracked keys: a spoofed-IP flood must not grow the map. */
+    private readonly maxKeys = 10_000,
+  ) {}
+
+  /** True when the call is allowed. */
+  take(key: string, now = Date.now()): boolean {
+    const entry = this.hits.get(key);
+    if (entry && entry.resetAt > now) {
+      if (entry.count >= this.max) return false;
+      entry.count += 1;
+      return true;
+    }
+    if (this.hits.size >= this.maxKeys) {
+      for (const [candidate, value] of this.hits) {
+        if (value.resetAt <= now) this.hits.delete(candidate);
+      }
+      // Still saturated: refuse rather than grow unbounded. Legitimate
+      // providers retry; an unbounded map would end the process.
+      if (this.hits.size >= this.maxKeys) return false;
+    }
+    this.hits.set(key, { count: 1, resetAt: now + this.windowMs });
+    return true;
+  }
+}
+
+/**
+ * Short-lived endpoint-secret cache. Every delivery would otherwise hit the
+ * Secret Manager — a network call triggerable by anyone holding the endpoint
+ * id, which is by definition shared with a third party.
+ */
+export class WebhookSecretCache {
+  private readonly entries = new Map<string, { secret: string; expiresAt: number }>();
+
+  constructor(private readonly ttlMs = 60_000) {}
+
+  get(ref: string, now = Date.now()): string | undefined {
+    const entry = this.entries.get(ref);
+    if (!entry || entry.expiresAt <= now) {
+      this.entries.delete(ref);
+      return undefined;
+    }
+    return entry.secret;
+  }
+
+  set(ref: string, secret: string, now = Date.now()): void {
+    this.entries.set(ref, { secret, expiresAt: now + this.ttlMs });
+  }
+
+  /** Called on rotation and revocation: a stale secret must never survive. */
+  invalidate(ref: string): void {
+    this.entries.delete(ref);
+  }
+}
+
+/** Webhook events are purged after this delay (art. 5.1.e — retention). */
+export const WEBHOOK_EVENT_RETENTION_DAYS = 90;

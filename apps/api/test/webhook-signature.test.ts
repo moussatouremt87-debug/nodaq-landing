@@ -6,6 +6,8 @@ import {
   signWebhookPayload,
   verifyWebhookSignature,
   WEBHOOK_TOLERANCE_SECONDS,
+  WebhookRateLimiter,
+  WebhookSecretCache,
 } from "../src/webhooks.js";
 
 /*
@@ -108,6 +110,46 @@ describe("verifyWebhookSignature", () => {
         now: NOW,
       }),
     ).toMatchObject({ ok: false, reason: "signature" });
+  });
+});
+
+describe("WebhookRateLimiter", () => {
+  it("borne le débit par clé et rouvre après la fenêtre", () => {
+    const limiter = new WebhookRateLimiter(3, 1_000);
+    const t0 = 1_000_000;
+    expect([limiter.take("ip-a", t0), limiter.take("ip-a", t0), limiter.take("ip-a", t0)]).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    expect(limiter.take("ip-a", t0)).toBe(false);
+    // Une autre source n'est pas pénalisée.
+    expect(limiter.take("ip-b", t0)).toBe(true);
+    // Fenêtre suivante : le quota est rendu.
+    expect(limiter.take("ip-a", t0 + 1_200)).toBe(true);
+  });
+
+  it("plafonne le nombre de clés suivies : une inondation d'IP ne fait pas grossir la mémoire", () => {
+    const limiter = new WebhookRateLimiter(5, 60_000, 10);
+    const t0 = 2_000_000;
+    for (let i = 0; i < 10; i++) expect(limiter.take(`ip-${i}`, t0)).toBe(true);
+    // Table pleine d'entrées ENCORE valides : on refuse plutôt que de croître.
+    expect(limiter.take("ip-nouvelle", t0)).toBe(false);
+    // Une fois la fenêtre passée, les entrées expirées sont recyclées.
+    expect(limiter.take("ip-nouvelle", t0 + 60_001)).toBe(true);
+  });
+});
+
+describe("WebhookSecretCache", () => {
+  it("sert le secret pendant sa durée de vie, l'oublie ensuite, et s'invalide à la rotation", () => {
+    const cache = new WebhookSecretCache(1_000);
+    const t0 = 3_000_000;
+    cache.set("webhook/t/pdp", "s1", t0);
+    expect(cache.get("webhook/t/pdp", t0 + 500)).toBe("s1");
+    expect(cache.get("webhook/t/pdp", t0 + 1_500)).toBeUndefined();
+    cache.set("webhook/t/pdp", "s2", t0);
+    cache.invalidate("webhook/t/pdp");
+    expect(cache.get("webhook/t/pdp", t0)).toBeUndefined();
   });
 });
 

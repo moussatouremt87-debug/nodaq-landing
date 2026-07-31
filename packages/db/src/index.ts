@@ -98,3 +98,29 @@ export async function withWebhookResolver<T>(fn: (tx: TenantClient) => Promise<T
     return fn(tx);
   });
 }
+
+/** What the webhook route is allowed to learn before authenticating. */
+export interface ResolvedWebhookEndpoint {
+  id: string;
+  tenantId: string;
+  provider: string;
+  secretRef: string;
+}
+
+/**
+ * The ONLY intended use of the resolver gate: turn a (endpointId, provider)
+ * pair from an unauthenticated request into its tenant. Deliberately narrow —
+ * callers get one row or null, never a client they could use to enumerate
+ * every tenant's endpoints. Inactive endpoints resolve to null (fail-closed).
+ */
+export async function resolveWebhookEndpoint(
+  endpointId: string,
+  provider: string,
+): Promise<ResolvedWebhookEndpoint | null> {
+  return withWebhookResolver((tx) =>
+    tx.webhookEndpoint.findFirst({
+      where: { id: endpointId, provider, active: true },
+      select: { id: true, tenantId: true, provider: true, secretRef: true },
+    }),
+  );
+}
