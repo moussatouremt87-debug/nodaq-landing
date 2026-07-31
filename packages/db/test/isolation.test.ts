@@ -61,6 +61,10 @@ let einvoiceSubmissionAId: string;
 let einvoiceSubmissionBId: string;
 let taxDeadlineAId: string;
 let taxDeadlineBId: string;
+let prospectAId: string;
+let prospectBId: string;
+let interactionAId: string;
+let interactionBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -91,6 +95,9 @@ beforeAll(async () => {
   await admin.webhookEndpoint.deleteMany();
   await admin.eInvoiceSubmission.deleteMany();
   await admin.taxDeadline.deleteMany();
+  // FK order: interactions before prospects.
+  await admin.prospectInteraction.deleteMany();
+  await admin.prospect.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -653,6 +660,59 @@ beforeAll(async () => {
   );
   taxDeadlineAId = taxDeadlineA.id;
   taxDeadlineBId = taxDeadlineB.id;
+
+  // Prospects (2.12) : données personnelles de TIERS non clients. Les noms de
+  // test restent fictifs — jamais de PII réelle dans un jeu de test.
+  const prospectA = await withTenant(tenantA, (tx) =>
+    tx.prospect.create({
+      data: {
+        tenantId: tenantA,
+        name: "Prospect A",
+        company: "Alpha SARL",
+        email: "contact@alpha.example",
+        stage: "contacte",
+        source: "salon",
+      },
+    }),
+  );
+  const prospectB = await withTenant(tenantB, (tx) =>
+    tx.prospect.create({
+      data: {
+        tenantId: tenantB,
+        name: "Prospect B",
+        company: "Beta SAS",
+        stage: "qualifie",
+        source: "recommandation",
+      },
+    }),
+  );
+  prospectAId = prospectA.id;
+  prospectBId = prospectB.id;
+
+  const interactionA = await withTenant(tenantA, (tx) =>
+    tx.prospectInteraction.create({
+      data: {
+        tenantId: tenantA,
+        prospectId: prospectAId,
+        kind: "appel",
+        occurredAt: new Date("2026-07-01"),
+        note: "compte rendu A",
+      },
+    }),
+  );
+  const interactionB = await withTenant(tenantB, (tx) =>
+    tx.prospectInteraction.create({
+      data: {
+        tenantId: tenantB,
+        prospectId: prospectBId,
+        kind: "rdv",
+        occurredAt: new Date("2026-07-02"),
+        note: "compte rendu B",
+      },
+    }),
+  );
+  interactionAId = interactionA.id;
+  interactionBId = interactionB.id;
 });
 
 afterAll(async () => {
@@ -859,6 +919,16 @@ describe("garde-fou préalable", () => {
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur prospects et prospect_interactions", async () => {
+    for (const table of ["prospects", "prospect_interactions"]) {
+      const rows = await admin.$queryRawUnsafe<
+        { relrowsecurity: boolean; relforcerowsecurity: boolean }[]
+      >(`SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = '${table}'`);
+      expect(rows[0]?.relrowsecurity).toBe(true);
+      expect(rows[0]?.relforcerowsecurity).toBe(true);
+    }
   });
 
   it("la RLS est activée ET forcée sur tax_deadlines", async () => {
@@ -1689,7 +1759,91 @@ describe("isolation tenant (RLS)", () => {
   });
 });
 
+describe("isolation tenant (RLS) — prospects (2.12)", () => {
+  it("test 1 (prospects) — withTenant(A) ne voit QUE le prospect de A", async () => {
+    const prospects = await withTenant(tenantA, (tx) => tx.prospect.findMany());
+    expect(prospects).toHaveLength(1);
+    expect(prospects[0]?.id).toBe(prospectAId);
+    expect(prospects.some((p) => p.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (prospects) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    expect(await prisma.prospect.findMany()).toHaveLength(0);
+    expect(await prisma.prospectInteraction.findMany()).toHaveLength(0);
+  });
+
+  it("test 3 (prospects) — lire le prospect de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.prospect.findUnique({ where: { id: prospectBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (prospects) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.prospect.create({
+          data: { tenantId: tenantB, name: "intrusion", stage: "nouveau", source: "salon" },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 4 (prospect_interactions) — le journal de B est invisible depuis A", async () => {
+    const journal = await withTenant(tenantA, (tx) => tx.prospectInteraction.findMany());
+    expect(journal).toHaveLength(1);
+    expect(journal[0]?.id).toBe(interactionAId);
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.prospectInteraction.findUnique({ where: { id: interactionBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 5 — l'opposition exige sa date (CHECK) : pas d'opposition sans preuve de date", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.$executeRawUnsafe(
+          `UPDATE "prospects" SET "opted_out" = true WHERE "id" = '${prospectAId}'`,
+        ),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 6 — une provenance hors catalogue est refusée EN BASE (défense en profondeur)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.prospect.create({
+          data: {
+            tenantId: tenantA,
+            name: "Fichier acheté",
+            stage: "nouveau",
+            source: "achat_fichier",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+});
+
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
+  it("policy désactivée sur prospects => la fuite se produit (les fiches des DEUX tenants deviennent visibles)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "prospects" DISABLE ROW LEVEL SECURITY`);
+    try {
+      const leaked = await withTenant(tenantA, (tx) => tx.prospect.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((p) => p.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.prospect.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "prospects" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "prospects" FORCE ROW LEVEL SECURITY`);
+    }
+
+    const prospects = await withTenant(tenantA, (tx) => tx.prospect.findMany());
+    expect(prospects).toHaveLength(1);
+  });
+
   it("policy désactivée => la fuite se produit (donc les tests ci-dessus reposent bien sur la RLS)", async () => {
     await admin.$executeRawUnsafe(`ALTER TABLE "notes" DISABLE ROW LEVEL SECURITY`);
     try {

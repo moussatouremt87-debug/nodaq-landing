@@ -882,6 +882,117 @@ export const getMonthlyReport = (
     `/rapports/mensuel${month ? `?month=${encodeURIComponent(month)}` : ""}`,
   );
 
+/* Prospection (2.12) — données personnelles de tiers non clients. */
+export const PROSPECT_STAGE_VALUES = [
+  "nouveau",
+  "contacte",
+  "qualifie",
+  "devis_envoye",
+  "gagne",
+  "perdu",
+] as const;
+
+export const PROSPECT_SOURCE_VALUES = [
+  "demande_entrante",
+  "recommandation",
+  "salon",
+  "reseau_pro",
+  "site_web",
+  "saisie_manuelle",
+] as const;
+
+export const Prospect = z.object({
+  id: z.string(),
+  name: z.string(),
+  company: z.string().nullable(),
+  email: z.string().nullable(),
+  phone: z.string().nullable(),
+  stage: z.string(),
+  source: z.string(),
+  optedOut: z.boolean(),
+  optedOutAt: z.string().nullable(),
+  notes: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type Prospect = z.infer<typeof Prospect>;
+
+export const getProspects = (): Promise<{ prospects: Prospect[] }> =>
+  call(z.object({ prospects: z.array(Prospect) }), "/prospects");
+
+export const createProspect = (input: {
+  name: string;
+  source: string;
+  company?: string;
+  email?: string;
+  phone?: string;
+  notes?: string;
+}): Promise<{ id: string }> =>
+  call(z.object({ id: z.string() }), "/prospects", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+export const updateProspect = (
+  id: string,
+  input: { stage?: string; notes?: string },
+): Promise<{ updated: boolean }> =>
+  call(z.object({ updated: z.boolean() }), `/prospects/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+
+export const logProspectInteraction = (
+  id: string,
+  input: { kind: string; occurredAt: string; note?: string },
+): Promise<{ id: string }> =>
+  call(z.object({ id: z.string() }), `/prospects/${encodeURIComponent(id)}/interactions`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+/** Opposition (art. 21) : non réversible depuis le produit. */
+export const opposeProspect = (id: string): Promise<{ optedOut: boolean }> =>
+  call(
+    z.object({ optedOut: z.boolean(), alreadyOptedOut: z.boolean().optional() }),
+    `/prospects/${encodeURIComponent(id)}/opposition`,
+    { method: "POST" },
+  );
+
+export const deleteProspect = (id: string): Promise<{ deleted: boolean }> =>
+  call(z.object({ deleted: z.boolean() }), `/prospects/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+export const ProspectionPlan = z.object({
+  rulesVersion: z.string(),
+  pipeline: z.record(z.string(), z.number()),
+  followups: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      company: z.string().nullable(),
+      stage: z.string(),
+      source: z.string(),
+      lastContactAt: z.string().nullable(),
+      daysSinceContact: z.number(),
+      thresholdDays: z.number().nullable(),
+      verdict: z.string(),
+      reason: z.string().min(1),
+    }),
+  ),
+  retentionAlerts: z.array(
+    z.object({ id: z.string(), name: z.string(), daysSinceContact: z.number() }),
+  ),
+  optedOutCount: z.number(),
+  unusableCount: z.number(),
+  label: z.string().min(1),
+  truncated: z.boolean().optional(),
+});
+export type ProspectionPlan = z.infer<typeof ProspectionPlan>;
+
+export const getProspectionPlan = (): Promise<ProspectionPlan> =>
+  call(ProspectionPlan, "/prospection/suivi");
+
 export const ComplianceProfile = z.object({
   vertical: z.string(),
   headcountOverride: z.number().nullable(),

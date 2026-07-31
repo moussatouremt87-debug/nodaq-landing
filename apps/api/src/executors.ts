@@ -72,6 +72,14 @@ const RecordReviewReplyPayload = z.object({
   draft: z.string().min(1).max(4_000),
 });
 
+/** Relance prospect (2.12) — le brouillon validé est consigné au journal des
+ * contacts. Ce que le produit enregistre est la VALIDATION humaine, pas une
+ * preuve d'envoi : il n'a aucune API de messagerie en V1, et la note le dit. */
+const RecordProspectContactPayload = z.object({
+  prospect: z.object({ id: z.string().uuid() }),
+  draft: z.string().min(1).max(4_000),
+});
+
 /** Proposition d'immobilisation (2.19) — FEC, classeur ou saisie assistée.
  * Bornes larges mais réelles : base <= 100 M€, durée 1 mois..50 ans. */
 const CreateFixedAssetPayload = z
@@ -357,6 +365,53 @@ export const defaultExecutors: ExecutorRegistry = {
       }
       // La réponse est stockée : l'owner la copie sur la plateforme (V1).
       return { recorded: true, publishManually: true };
+    });
+  },
+  // Relance prospect (2.12) : consigne le contact au journal APPEND-ONLY, qui
+  // est la seule source du « dernier contact ». Le produit n'a aucune API de
+  // messagerie : il enregistre la VALIDATION, pas une preuve d'envoi — et la
+  // note le dit, pour que personne ne lise cette ligne comme un accusé de
+  // réception. Le garde d'opposition est REJOUÉ ici : la personne a pu s'y
+  // opposer entre la préparation et l'approbation.
+  record_prospect_contact: async (payload, { tenantId, userId }) => {
+    const parsed = RecordProspectContactPayload.safeParse(payload);
+    // Message générique : une ZodError citerait le brouillon dans `result`.
+    if (!parsed.success) throw new Error("invalid record_prospect_contact payload");
+    const { prospect, draft } = parsed.data;
+    return withTenant(tenantId, async (tx) => {
+      const target = await tx.prospect.findUnique({
+        where: { id: prospect.id },
+        select: { id: true, optedOut: true, stage: true },
+      });
+      if (!target) throw new Error("prospect not found");
+      if (target.optedOut) {
+        // Refus, pas un enregistrement silencieux : l'opposition prime sur
+        // une approbation antérieure.
+        return { recorded: false, refused: true, reason: "prospect opposé à la prospection" };
+      }
+      await tx.prospectInteraction.create({
+        data: {
+          tenantId,
+          prospectId: target.id,
+          kind: "email",
+          occurredAt: new Date(),
+          // Le texte validé vit ICI, pas indéfiniment dans la file : c'est
+          // l'historique du dossier (et il suit donc la vie de la fiche —
+          // supprimer le prospect efface aussi ses messages). Borne alignée
+          // sur le CHECK de la colonne.
+          note: `Brouillon validé (envoi manuel) : ${draft}`.slice(0, 1_000),
+          createdBy: userId ?? null,
+        },
+      });
+      // Le prospect entre en étape « contacté » s'il était encore « nouveau ».
+      if (target.stage === "nouveau") {
+        await tx.prospect.update({ where: { id: target.id }, data: { stage: "contacte" } });
+      }
+      return {
+        recorded: true,
+        sent: false,
+        next: "envoyez le message depuis votre messagerie",
+      };
     });
   },
   submit_reconciliation: () => Promise.resolve({ submitted: true, simulated: true }),

@@ -18,6 +18,23 @@ export {
   ReportInvoice,
 } from "./monthlyReport.js";
 export type { Anomaly, AnomalyKind, MonthlyReport } from "./monthlyReport.js";
+export {
+  buildProspectionPlan,
+  FOLLOWUP_AFTER_DAYS,
+  INTERACTION_KINDS,
+  PROSPECT_SOURCES,
+  PROSPECT_STAGES,
+  PROSPECTION_RULES_VERSION,
+  RETENTION_MONTHS,
+} from "./prospection.js";
+export type {
+  FollowupVerdict,
+  InteractionKind,
+  ProspectFollowup,
+  ProspectionPlan,
+  ProspectSource,
+  ProspectStage,
+} from "./prospection.js";
 export { scoreLatePayment, ScorableInvoice } from "./dunning.js";
 export type { LatePaymentScore, RiskBand } from "./dunning.js";
 export type { ActionsServerContext } from "./server.js";

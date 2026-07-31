@@ -70,6 +70,25 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > effacés, compteurs gardés) ; la file affiche provenance + lignes + non
 > reconnues avant validation ; corps jamais logué ni renvoyé
 > (`docs/devis-email.md`).
+> **CRM & prospection (2.12)** : premier ticket qui stocke des données de
+> personnes NON clientes — le risque n'est ni l'injection ni l'affirmation,
+> c'est la LÉGITIMITÉ DE LA DÉTENTION. 3 gardes STRUCTURELLES : provenance
+> EXIGÉE (`source` enum fermé, Zod + CHECK ; `achat_fichier` volontairement
+> ABSENT — sa licéité se juge fichier par fichier) ; opposition art. 21 =
+> SORTIE en tête de boucle du moteur (jamais un filtre d'affichage), avec
+> minimisation immédiate (e-mail/téléphone/notes effacés, comptes rendus
+> vidés) et 3 portes fermées testées (PATCH 409, contact 409, garde REJOUÉ par
+> l'exécuteur) — fiche gardée MINIMALE (la supprimer la ferait réimporter
+> demain) ; rétention 36 mois SIGNALÉE jamais purgée en silence (config
+> versionnée datée sourcée CNIL). Relance = DÉLAI ÉCOULÉ vs seuil d'étape
+> (moteur pur `prospection.ts`), dernier contact DÉRIVÉ du journal append-only
+> (2.9/2.16b — un champ modifiable mentirait et déciderait seul qui est
+> relancé) ; minimisation par TYPE : le modèle pur ne reçoit ni e-mail ni
+> téléphone ni notes (test : aucune arobase dans le plan) ; brouillon
+> `draft_prospect_email` HITL → `record_prospect_contact` consigne la
+> VALIDATION, jamais une preuve d'envoi (`sent: false`) ; routes `/prospects*`
+> MEMBRES (prospecter est leur métier, aucun CA sur la fiche — contrairement à
+> 3.4), suppression owner (`docs/prospection.md`).
 > **Rapport mensuel (2.11)** : premier ticket qui SYNTHÉTISE — le risque n'est
 > plus la fuite mais l'AFFIRMATION. Une anomalie est un écart MESURÉ, jamais un
 > jugement de modèle : seuils en CONFIG VERSIONNÉE (`monthlyReport.ts`,

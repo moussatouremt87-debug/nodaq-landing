@@ -52,6 +52,8 @@ model Tenant {
   webhookEvents       WebhookEvent[]
   einvoiceSubmissions EInvoiceSubmission[]
   taxDeadlines        TaxDeadline[]
+  prospects           Prospect[]
+  prospectInteractions ProspectInteraction[]
 
   @@map("tenants")
   @@schema("public")
@@ -906,6 +908,70 @@ model TaxDeadline {
   @@unique([tenantId, obligationId, dueDate])
   @@index([tenantId, dueDate])
   @@map("tax_deadlines")
+  @@schema("public")
+}
+
+/// Ticket 2.12 — CRM & prospection. PREMIÈRE table qui porte les données de
+/// personnes qui ne sont PAS clientes : `name`, `company`, `email` et `phone`
+/// sont des données personnelles de tiers. D'où deux colonnes qui ne sont pas
+/// du confort produit mais des obligations :
+///   - `source` : provenance DÉCLARÉE, non nullable (art. 14 — on doit pouvoir
+///     dire d'où vient une donnée non collectée auprès de la personne) ;
+///   - `optedOut` / `optedOutAt` : opposition (art. 21). La fiche opposée est
+///     retirée de toute liste par le moteur (`prospection.ts`) ; on la GARDE
+///     minimale plutôt que de la supprimer, sinon la même personne serait
+///     réimportée demain — c'est une liste d'exclusion.
+/// Le dernier contact n'est PAS une colonne : il est DÉRIVÉ du journal
+/// append-only `prospect_interactions` (doctrine 2.9/2.16b). Sealed by RLS
+/// (see the migration `rls_prospects`).
+model Prospect {
+  id          String                @id @default(uuid()) @db.Uuid
+  tenantId    String                @map("tenant_id") @db.Uuid
+  /// Donnée personnelle d'un tiers — bornée côté app, jamais loguée.
+  name        String
+  company     String?
+  email       String?
+  phone       String?
+  /// Étape du pipeline : 'nouveau'|'contacte'|'qualifie'|'devis_envoye'|'gagne'|'perdu'.
+  stage       String                @default("nouveau")
+  /// Provenance de la fiche — enum fermé validé par Zod, CHECK en base.
+  source      String
+  /// Opposition à la prospection : exclusion structurelle des relances.
+  optedOut    Boolean               @default(false) @map("opted_out")
+  optedOutAt  DateTime?             @map("opted_out_at")
+  /// Annotation libre — bornée côté app à 1 000 caractères.
+  notes       String?
+  createdAt   DateTime              @default(now()) @map("created_at")
+  updatedAt   DateTime              @default(now()) @updatedAt @map("updated_at")
+  tenant      Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  interactions ProspectInteraction[]
+
+  @@index([tenantId, stage])
+  @@index([tenantId, optedOut])
+  @@map("prospects")
+  @@schema("public")
+}
+
+/// Ticket 2.12 — journal des contacts, APPEND-ONLY. C'est la SEULE source du
+/// « dernier contact » : un champ modifiable sur la fiche finirait par mentir
+/// (et déciderait alors, seul, qui est relancé).
+model ProspectInteraction {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  prospectId String   @map("prospect_id") @db.Uuid
+  /// 'appel' | 'email' | 'rdv' | 'autre' — Zod côté app, CHECK en base.
+  kind       String
+  occurredAt DateTime @map("occurred_at")
+  /// Compte rendu court — borné côté app à 1 000 caractères.
+  note       String?
+  /// Utilisateur qui a consigné le contact (attribution).
+  createdBy  String?  @map("created_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  prospect   Prospect @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, prospectId, occurredAt])
+  @@map("prospect_interactions")
   @@schema("public")
 }
 

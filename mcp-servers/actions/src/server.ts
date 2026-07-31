@@ -45,6 +45,8 @@ import {
   monthsBetween,
   previousMonthKey,
 } from "./monthlyReport.js";
+import { buildProspectionPlan } from "./prospection.js";
+import type { InteractionKind, ProspectSource, ProspectStage } from "./prospection.js";
 import { simulateMaterialPrices } from "./materialScenario.js";
 import { analyzeHourlyPerformance } from "./hourlyPerformance.js";
 import {
@@ -106,6 +108,8 @@ export const TOOL_POLICIES = {
   forecast_sales: { requiresValidation: false },
   analyze_customer_signals: { requiresValidation: false },
   build_monthly_report: { requiresValidation: false },
+  list_prospection_followups: { requiresValidation: false },
+  draft_prospect_email: { requiresValidation: true },
   plan_staffing: { requiresValidation: false },
   analyze_hourly_performance: { requiresValidation: false },
   check_regulatory_watch: { requiresValidation: false },
@@ -135,6 +139,26 @@ const REVIEW_REPLY_PROMPT =
  * generated draft (the executor enforces the same cap at approval time). */
 const REVIEW_TEXT_MAX = 4_000;
 const REVIEW_DRAFT_MAX = 4_000;
+
+/*
+ * Prospection (2.12). Le prompt ne reçoit ni e-mail, ni téléphone, ni notes :
+ * un message de relance n'a pas besoin du dossier complet d'une personne qui
+ * n'est pas cliente. Et il n'invente aucun chiffre — un prix glissé dans une
+ * relance engagerait commercialement sans que personne l'ait décidé.
+ */
+const PROSPECT_EMAIL_PROMPT =
+  "Rédige un court message de relance commerciale en français, pour le compte d'une PME " +
+  "française, à destination d'un prospect déjà en contact. Ton professionnel et direct, " +
+  "sans familiarité, sans flatterie. Rappelle brièvement la reprise de contact et propose " +
+  "un échange. N'INVENTE AUCUN PRIX, aucune remise, aucun délai, aucune référence de " +
+  "produit et aucun engagement : tu ne les connais pas. Mentionne en dernière ligne que le " +
+  "destinataire peut demander à ne plus être contacté. " +
+  "Réponds UNIQUEMENT avec le texte du message (pas de commentaire).\n\n";
+
+/** Bornes défensives : brouillon et lectures de prospection. */
+const PROSPECT_DRAFT_MAX = 4_000;
+const PROSPECT_READ_LIMIT = 2_000;
+const INTERACTION_READ_LIMIT = 10_000;
 
 const DUNNING_PROMPT =
   "Rédige un e-mail de relance courtois mais ferme pour une facture impayée d'une PME " +
@@ -1125,6 +1149,151 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
               // Même plafond que l'exécuteur : un brouillon trop long doit
               // être tronqué ICI, pas échouer opaquement à l'approbation.
               draft: draft.text.slice(0, REVIEW_DRAFT_MAX),
+            },
+          },
+        }),
+      );
+      context.onPendingAction?.();
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              pendingActionId: pendingAction.id,
+              status: "pending_validation",
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "list_prospection_followups",
+    {
+      description:
+        "Prospection (lecture seule, ticket 2.12) : prospects à relancer selon un " +
+        "DÉLAI ÉCOULÉ (jours depuis le dernier contact vs seuil de l'étape), pipeline " +
+        "par étape, et fiches au-delà de la durée de conservation. Un prospect opposé " +
+        "à la prospection n'apparaît dans AUCUNE liste. Ni e-mail ni téléphone ne " +
+        "sortent de cet outil : décider qui relancer ne demande pas de savoir comment " +
+        "le joindre.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      // Sélection MINIMISÉE : le modèle pur ne reçoit ni e-mail, ni téléphone,
+      // ni notes — la minimisation est structurelle, pas une consigne de
+      // prompt. Bornes de lecture explicites, dépassement SIGNALÉ.
+      const prospects = await withTenant(tenantId, (tx) =>
+        tx.prospect.findMany({
+          select: {
+            id: true,
+            name: true,
+            company: true,
+            stage: true,
+            source: true,
+            optedOut: true,
+            createdAt: true,
+          },
+          orderBy: { id: "asc" },
+          take: PROSPECT_READ_LIMIT + 1,
+        }),
+      );
+      const interactions = await withTenant(tenantId, (tx) =>
+        tx.prospectInteraction.findMany({
+          select: { prospectId: true, kind: true, occurredAt: true },
+          orderBy: { occurredAt: "desc" },
+          take: INTERACTION_READ_LIMIT + 1,
+        }),
+      );
+      const truncated =
+        prospects.length > PROSPECT_READ_LIMIT || interactions.length > INTERACTION_READ_LIMIT;
+      const plan = buildProspectionPlan(
+        prospects.slice(0, PROSPECT_READ_LIMIT).map((row) => ({
+          ...row,
+          stage: row.stage as ProspectStage,
+          source: row.source as ProspectSource,
+          createdAt: row.createdAt.toISOString(),
+        })),
+        interactions.slice(0, INTERACTION_READ_LIMIT).map((row) => ({
+          prospectId: row.prospectId,
+          kind: row.kind as InteractionKind,
+          occurredAt: row.occurredAt.toISOString(),
+        })),
+        new Date(),
+      );
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ ...plan, truncated }) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "draft_prospect_email",
+    {
+      description:
+        "Prépare un message de relance commerciale pour un prospect : brouillon " +
+        "généré en tier souverain, déposé dans la file de validation. N'ENVOIE " +
+        "JAMAIS — un humain valide, puis envoie depuis sa messagerie. Refuse net un " +
+        "prospect opposé à la prospection.",
+      inputSchema: {
+        prospectId: z.string().uuid().describe("Id NODAQ du prospect"),
+      },
+      annotations,
+    },
+    async ({ prospectId }) => {
+      // L'e-mail, le téléphone et les notes ne sont PAS sélectionnés : ils
+      // n'entrent jamais dans le processus de l'outil, donc jamais dans un
+      // prompt ni dans un payload de file.
+      const prospect = await withTenant(tenantId, (tx) =>
+        tx.prospect.findUnique({
+          where: { id: prospectId },
+          select: { id: true, name: true, company: true, stage: true, optedOut: true },
+        }),
+      );
+      if (!prospect) throw new Error("prospect not found");
+      // Opposition (art. 21) : refus NET, avant tout appel modèle. Le garde
+      // est ici ET dans le moteur de relance — deux chemins, une seule règle.
+      if (prospect.optedOut) {
+        throw new Error("prospect opposed to commercial prospecting");
+      }
+      const alreadyPending = await withTenant(tenantId, (tx) =>
+        tx.pendingAction.findFirst({
+          where: {
+            type: "record_prospect_contact",
+            status: "pending",
+            payload: { path: ["prospect", "id"], equals: prospectId },
+          },
+          select: { id: true },
+        }),
+      );
+      if (alreadyPending) throw new Error("a draft is already pending for this prospect");
+
+      const requestId = `prospect-email-${randomUUID()}`;
+      const draft = await route({
+        text:
+          PROSPECT_EMAIL_PROMPT +
+          `Interlocuteur : ${prospect.name}` +
+          (prospect.company ? ` (${prospect.company})` : "") +
+          `\nÉtape du suivi : ${prospect.stage}`,
+        // Données personnelles d'un tiers non client : tier souverain imposé.
+        category: "confidentiel",
+        tenantId,
+        requestId,
+      });
+
+      const pendingAction = await withTenant(tenantId, (tx) =>
+        tx.pendingAction.create({
+          data: {
+            tenantId,
+            type: "record_prospect_contact",
+            requestedBy: context.requestedBy ?? null,
+            employee: context.employee ?? null,
+            payload: {
+              prospect: { id: prospect.id, stage: prospect.stage },
+              draft: draft.text.slice(0, PROSPECT_DRAFT_MAX),
             },
           },
         }),

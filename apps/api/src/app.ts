@@ -57,6 +57,7 @@ import {
   VERTICALS,
 } from "@nodaq/shared";
 import type { RegistryAsset } from "@nodaq/shared";
+import { INTERACTION_KINDS, PROSPECT_SOURCES, PROSPECT_STAGES } from "@nodaq/shared";
 import { auth } from "./auth.js";
 import { DocExtraction, DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.js";
 import {
@@ -4247,6 +4248,261 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     replyText: true,
     repliedAt: true,
   } as const;
+
+  // --- CRM & prospection (2.12) — données personnelles de TIERS non clients.
+  // Accessible aux MEMBRES : prospecter est leur métier, et la fiche ne porte
+  // aucun chiffre d'affaires (contrairement aux signaux clients 3.4, owner-
+  // only). La suppression définitive, elle, reste à l'owner.
+
+  const PROSPECT_SELECT = {
+    id: true,
+    name: true,
+    company: true,
+    email: true,
+    phone: true,
+    stage: true,
+    source: true,
+    optedOut: true,
+    optedOutAt: true,
+    notes: true,
+    createdAt: true,
+  } as const;
+
+  app.get("/prospects", { preHandler: businessRoute }, async (request, reply) => {
+    // Fiches = données personnelles : jamais de cache partagé.
+    void reply.header("cache-control", "private, no-store");
+    const prospects = await withTenant(request.tenantId, (tx) =>
+      tx.prospect.findMany({
+        select: PROSPECT_SELECT,
+        orderBy: { createdAt: "desc" },
+        take: 500,
+      }),
+    );
+    return { prospects };
+  });
+
+  const ProspectBody = z
+    .object({
+      name: z.string().min(1).max(200),
+      company: z.string().max(200).optional(),
+      email: z.string().email().max(320).optional(),
+      phone: z.string().max(40).optional(),
+      stage: z.enum(PROSPECT_STAGES).default("nouveau"),
+      // Provenance EXIGÉE (art. 14) : pas de valeur par défaut, pas de fiche
+      // dont on ne saurait pas dire d'où elle vient.
+      source: z.enum(PROSPECT_SOURCES),
+      notes: z.string().max(1_000).optional(),
+    })
+    .strict();
+
+  app.post("/prospects", { preHandler: businessRoute }, async (request, reply) => {
+    const parsed = ProspectBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    void reply.header("cache-control", "private, no-store");
+    const created = await withTenant(request.tenantId, (tx) =>
+      tx.prospect.create({
+        data: {
+          tenantId: request.tenantId,
+          name: parsed.data.name,
+          company: parsed.data.company ?? null,
+          email: parsed.data.email ?? null,
+          phone: parsed.data.phone ?? null,
+          stage: parsed.data.stage,
+          source: parsed.data.source,
+          notes: parsed.data.notes ?? null,
+        },
+        select: { id: true },
+      }),
+    );
+    return reply.code(201).send(created);
+  });
+
+  const ProspectPatchBody = z
+    .object({
+      stage: z.enum(PROSPECT_STAGES).optional(),
+      notes: z.string().max(1_000).optional(),
+      company: z.string().max(200).optional(),
+      email: z.string().email().max(320).optional(),
+      phone: z.string().max(40).optional(),
+    })
+    .strict();
+
+  app.patch("/prospects/:id", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    const parsed = ProspectPatchBody.safeParse(request.body);
+    if (!params.success || !parsed.success) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    void reply.header("cache-control", "private, no-store");
+    // `optedOut` n'est PAS modifiable ici (schéma strict) : lever une
+    // opposition par un PATCH générique serait trop facile — elle a sa route.
+    const data = {
+      ...(parsed.data.stage !== undefined ? { stage: parsed.data.stage } : {}),
+      ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes } : {}),
+      ...(parsed.data.company !== undefined ? { company: parsed.data.company } : {}),
+      ...(parsed.data.email !== undefined ? { email: parsed.data.email } : {}),
+      ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone } : {}),
+    };
+    // `optedOut: false` dans le WHERE : sans lui, un PATCH remettrait un
+    // e-mail ou un téléphone sur une personne qui s'y est opposée — la
+    // minimisation faite à l'opposition serait défaite en un appel.
+    const { count } = await withTenant(request.tenantId, (tx) =>
+      tx.prospect.updateMany({ where: { id: params.data.id, optedOut: false }, data }),
+    );
+    if (count === 0) {
+      const exists = await withTenant(request.tenantId, (tx) =>
+        tx.prospect.findUnique({ where: { id: params.data.id }, select: { optedOut: true } }),
+      );
+      if (!exists) return reply.code(404).send({ error: "prospect not found" });
+      return reply.code(409).send({ error: "prospect opposé" });
+    }
+    return { updated: true };
+  });
+
+  const InteractionBody = z
+    .object({
+      kind: z.enum(INTERACTION_KINDS),
+      occurredAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      note: z.string().max(1_000).optional(),
+    })
+    .strict();
+
+  app.post("/prospects/:id/interactions", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    const parsed = InteractionBody.safeParse(request.body);
+    if (!params.success || !parsed.success) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    // Date STRICTEMENT calendaire : "2026-02-31" glisserait au 3 mars et
+    // décalerait un « dernier contact », donc une relance.
+    const occurredAt = new Date(`${parsed.data.occurredAt}T00:00:00Z`);
+    if (
+      Number.isNaN(occurredAt.getTime()) ||
+      occurredAt.toISOString().slice(0, 10) !== parsed.data.occurredAt
+    ) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+    void reply.header("cache-control", "private, no-store");
+    const prospect = await withTenant(request.tenantId, (tx) =>
+      tx.prospect.findUnique({ where: { id: params.data.id }, select: { optedOut: true } }),
+    );
+    if (!prospect) return reply.code(404).send({ error: "prospect not found" });
+    // Consigner un contact sur une personne opposée reviendrait à documenter
+    // une prospection qui n'aurait pas dû avoir lieu : refus net.
+    if (prospect.optedOut) return reply.code(409).send({ error: "prospect opposé" });
+    const created = await withTenant(request.tenantId, (tx) =>
+      tx.prospectInteraction.create({
+        data: {
+          tenantId: request.tenantId,
+          prospectId: params.data.id,
+          kind: parsed.data.kind,
+          occurredAt,
+          note: parsed.data.note ?? null,
+          createdBy: request.authSession.user.id,
+        },
+        select: { id: true },
+      }),
+    );
+    return reply.code(201).send(created);
+  });
+
+  app.get("/prospects/:id/interactions", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    void reply.header("cache-control", "private, no-store");
+    const interactions = await withTenant(request.tenantId, (tx) =>
+      tx.prospectInteraction.findMany({
+        where: { prospectId: params.data.id },
+        select: { id: true, kind: true, occurredAt: true, note: true, createdAt: true },
+        orderBy: { occurredAt: "desc" },
+        take: 200,
+      }),
+    );
+    return { interactions };
+  });
+
+  // Opposition (art. 21). Elle n'est PAS réversible depuis le produit : lever
+  // une opposition demanderait la preuve d'un nouveau consentement, que le
+  // produit n'a aucun moyen de recueillir ici. On garde la fiche MINIMALE —
+  // la supprimer laisserait la même personne être réimportée demain.
+  app.post("/prospects/:id/opposition", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    void reply.header("cache-control", "private, no-store");
+    const result = await withTenant(request.tenantId, async (tx) => {
+      const prospect = await tx.prospect.findUnique({
+        where: { id: params.data.id },
+        select: { id: true, optedOut: true },
+      });
+      if (!prospect) return null;
+      if (prospect.optedOut) return { alreadyOptedOut: true };
+      await tx.prospect.update({
+        where: { id: prospect.id },
+        data: {
+          optedOut: true,
+          optedOutAt: new Date(),
+          // Minimisation immédiate : on ne garde que de quoi ne PAS
+          // recontacter la personne. Les coordonnées et les notes n'ont plus
+          // de finalité une fois l'opposition exprimée.
+          email: null,
+          phone: null,
+          notes: null,
+        },
+      });
+      // Les comptes rendus de contacts perdent aussi leur finalité : le
+      // journal reste (il prouve la chronologie) mais vidé de son contenu.
+      await tx.prospectInteraction.updateMany({
+        where: { prospectId: prospect.id },
+        data: { note: null },
+      });
+      return { alreadyOptedOut: false };
+    });
+    if (result === null) return reply.code(404).send({ error: "prospect not found" });
+    return { optedOut: true, ...result };
+  });
+
+  // Suppression définitive : OWNER. Effacer une fiche efface aussi son
+  // journal (cascade) — c'est le droit à l'effacement, pas un archivage.
+  app.delete(
+    "/prospects/:id",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+      if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+      const { count } = await withTenant(request.tenantId, (tx) =>
+        tx.prospect.deleteMany({ where: { id: params.data.id } }),
+      );
+      if (count === 0) return reply.code(404).send({ error: "prospect not found" });
+      return { deleted: true };
+    },
+  );
+
+  // Plan de relance : même chemin que l'agent (outil du toolset lié au
+  // tenant) — une implémentation, un seul jeu de seuils.
+  app.get("/prospection/suivi", { preHandler: businessRoute }, async (request, reply) => {
+    void reply.header("cache-control", "private, no-store");
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+      });
+      const result = await toolset.execute("list_prospection_followups", {});
+      return JSON.parse(result) as unknown;
+    } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "outil indisponible pour ce tenant" });
+      }
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "prospection plan unavailable",
+      );
+      return reply.code(503).send({ error: "suivi indisponible" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
 
   app.get("/avis", { preHandler: businessRoute }, async (request) => {
     const reviews = await withTenant(request.tenantId, (tx) =>

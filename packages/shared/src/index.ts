@@ -55,4 +55,5 @@ export * from "./regulatoryWatch.js";
 export * from "./dataCatalog.js";
 export * from "./taxCalendar.js";
 export * from "./rgpdRegister.js";
+export * from "./prospection.js";
 export * from "./moduleCatalog.js";
