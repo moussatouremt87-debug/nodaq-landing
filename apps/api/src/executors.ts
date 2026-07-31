@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { withTenant } from "@nodaq/db";
-import type { Prisma } from "@nodaq/db";
+import { Prisma, withTenant } from "@nodaq/db";
 import {
   auditInvoice,
   buildCiiXml,
@@ -12,6 +11,7 @@ import {
 import { getPdpClient } from "@nodaq/mcp-connectors";
 import type { RegistryOptions } from "@nodaq/mcp-connectors";
 import { ASSET_CATEGORIES } from "@nodaq/shared";
+import { appendHistory, REDEPOSITABLE_STATUSES } from "./einvoice.js";
 
 /*
  * Executors of validated pending actions (ticket 1.6). Runs ONLY after a human
@@ -95,6 +95,106 @@ const CreateFixedAssetPayload = z
 // (strip, pas strict : le payload transporte aussi des champs d'AFFICHAGE
 // pour la file — warnings de dérivation — que l'exécuteur ignore.)
 
+/**
+ * Prend la place dans le registre AVANT tout appel réseau (2.4). L'unicité
+ * (tenant, numéro, direction) est la seule garantie qui tienne face à deux
+ * approbations concurrentes ; une lecture préalable n'en est pas une.
+ */
+async function reserveSubmission(
+  tenantId: string,
+  input: {
+    invoiceNumber: string;
+    profile: string;
+    direction: "emission" | "ereporting";
+    documentHash: string;
+    amountCents: number;
+    currency: string;
+  },
+): Promise<{ id: string }> {
+  return withTenant(tenantId, async (tx) => {
+    try {
+      return await tx.eInvoiceSubmission.create({
+        data: { tenantId, status: "prete", ...input },
+        select: { id: true },
+      });
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") {
+        throw error;
+      }
+      const existing = await tx.eInvoiceSubmission.findFirstOrThrow({
+        where: { invoiceNumber: input.invoiceNumber, direction: input.direction },
+        select: { id: true, status: true },
+      });
+      // Déjà chez la plateforme : on REFUSE, sans rien déposer.
+      if (!REDEPOSITABLE_STATUSES.has(existing.status)) throw new Error("already submitted");
+      // Reprise après échec de transport : on réutilise la ligne (l'historique
+      // des statuts est conservé, il est opposable).
+      await tx.eInvoiceSubmission.update({
+        where: { id: existing.id },
+        data: { documentHash: input.documentHash, lastError: null },
+      });
+      return { id: existing.id };
+    }
+  });
+}
+
+/** Journalise l'échec de transport : NOM d'erreur seulement. */
+async function markSubmissionFailed(
+  tenantId: string,
+  submissionId: string,
+  error: unknown,
+): Promise<void> {
+  const name = error instanceof Error ? error.name : "Error";
+  await withTenant(tenantId, async (tx) => {
+    const row = await tx.eInvoiceSubmission.findUnique({
+      where: { id: submissionId },
+      select: { statusHistory: true },
+    });
+    await tx.eInvoiceSubmission.update({
+      where: { id: submissionId },
+      data: {
+        status: "erreur",
+        lastError: name,
+        statusHistory: appendHistory(row?.statusHistory ?? [], {
+          status: "erreur",
+          at: new Date().toISOString(),
+        }),
+      },
+    });
+  }).catch(() => undefined);
+}
+
+/** Enregistre le dépôt accepté — l'historique est APPEND-ONLY (opposable). */
+async function recordDeposit(
+  tenantId: string,
+  submissionId: string,
+  deposit: { reference: string; status: string | null },
+): Promise<{ submissionId: string; reference: string; status: string }> {
+  const status = deposit.status ? (normalizeStatus(deposit.status) ?? "deposee") : "deposee";
+  const now = new Date();
+  return withTenant(tenantId, async (tx) => {
+    const row = await tx.eInvoiceSubmission.findUnique({
+      where: { id: submissionId },
+      select: { statusHistory: true },
+    });
+    await tx.eInvoiceSubmission.update({
+      where: { id: submissionId },
+      data: {
+        status,
+        pdpReference: deposit.reference,
+        lastError: null,
+        submittedAt: now,
+        statusHistory: appendHistory(row?.statusHistory ?? [], {
+          status,
+          at: now.toISOString(),
+          reference: deposit.reference,
+        }),
+      },
+    });
+    return { submissionId, reference: deposit.reference, status };
+  });
+}
+
 export const defaultExecutors: ExecutorRegistry = {
   send_dunning: () => Promise.resolve({ sent: true, simulated: true }),
   book_invoice: () => Promise.resolve({ booked: true, simulated: true }),
@@ -156,54 +256,38 @@ export const defaultExecutors: ExecutorRegistry = {
     const pdf = await buildFacturXPdf(invoice, xml, profile);
     const documentHash = createHash("sha256").update(pdf).digest("hex");
 
-    const client = await getPdpClient(tenantId, connectors ?? {});
-    const deposit = await client.deposit({
+    // RÉSERVATION AVANT LE RÉSEAU. Le dépôt est irréversible : la place doit
+    // être prise dans le registre AVANT l'appel, sinon deux propositions de
+    // la même facture (deux entrées en file, chacune valide) déposeraient
+    // deux fois — la seconde écrasant la référence de la première, qui
+    // deviendrait introuvable. L'index unique (tenant, numéro, direction)
+    // est ce qui tranche, pas une lecture préalable.
+    const reserved = await reserveSubmission(tenantId, {
       invoiceNumber: invoice.number,
-      documentBase64: Buffer.from(pdf).toString("base64"),
       profile,
+      direction: "emission",
+      documentHash,
+      amountCents: invoice.totals.grossCents,
+      currency: invoice.currency,
     });
 
-    const status = deposit.status ? (normalizeStatus(deposit.status) ?? "deposee") : "deposee";
-    const now = new Date();
-    return withTenant(tenantId, async (tx) => {
-      // Idempotence : (tenant, numéro, direction) — re-valider une
-      // proposition déjà déposée ne dépose jamais deux fois.
-      const existing = await tx.eInvoiceSubmission.findFirst({
-        where: { invoiceNumber: invoice.number, direction: "emission" },
-        select: { id: true, status: true },
+    let deposit;
+    try {
+      const client = await getPdpClient(tenantId, connectors ?? {});
+      deposit = await client.deposit({
+        invoiceNumber: invoice.number,
+        documentBase64: Buffer.from(pdf).toString("base64"),
+        profile,
       });
-      const historyEntry = { status, at: now.toISOString(), reference: deposit.reference };
-      if (existing) {
-        await tx.eInvoiceSubmission.update({
-          where: { id: existing.id },
-          data: {
-            status,
-            pdpReference: deposit.reference,
-            documentHash,
-            submittedAt: now,
-            statusHistory: [historyEntry] as Prisma.InputJsonValue,
-          },
-        });
-        return { submissionId: existing.id, reference: deposit.reference, status };
-      }
-      const created = await tx.eInvoiceSubmission.create({
-        data: {
-          tenantId,
-          invoiceNumber: invoice.number,
-          profile,
-          direction: "emission",
-          status,
-          pdpReference: deposit.reference,
-          documentHash,
-          amountCents: invoice.totals.grossCents,
-          currency: invoice.currency,
-          submittedAt: now,
-          statusHistory: [historyEntry] as Prisma.InputJsonValue,
-        },
-        select: { id: true },
-      });
-      return { submissionId: created.id, reference: deposit.reference, status };
-    });
+    } catch (error) {
+      // Échec de transport : la ligne reste, en `erreur`, et rouvre un
+      // nouveau dépôt (transition `erreur → deposee`). NOM d'erreur
+      // seulement — un message fournisseur citerait la facture.
+      await markSubmissionFailed(tenantId, reserved.id, error);
+      throw error;
+    }
+
+    return recordDeposit(tenantId, reserved.id, deposit);
   },
   // EXÉCUTEUR RÉEL (2.4) : transmet l'agrégat e-reporting de la période.
   // Ce qui part est un TOTAL — jamais le détail nominatif des clients ; la
@@ -214,55 +298,33 @@ export const defaultExecutors: ExecutorRegistry = {
     const data = parsed.data;
     const periodKey = `${data.periodStart}..${data.periodEnd}`;
 
-    const client = await getPdpClient(tenantId, connectors ?? {});
-    const deposit = await client.reportTransactions(data);
-
-    const status = deposit.status ? (normalizeStatus(deposit.status) ?? "deposee") : "deposee";
-    const now = new Date();
     // Hash de l'agrégat transmis : preuve de ce qui est parti, sans stocker
     // une seconde fois la donnée (elle vit déjà dans les colonnes).
     const documentHash = createHash("sha256")
       .update(`${periodKey}|${data.totalCents}|${data.vatCents}|${data.transactionCount}`)
       .digest("hex");
-    return withTenant(tenantId, async (tx) => {
-      const historyEntry = { status, at: now.toISOString(), reference: deposit.reference };
-      const existing = await tx.eInvoiceSubmission.findFirst({
-        where: { invoiceNumber: periodKey, direction: "ereporting" },
-        select: { id: true },
-      });
-      if (existing) {
-        // Idempotence : re-valider une période déjà transmise ne la
-        // transmet pas deux fois côté registre.
-        await tx.eInvoiceSubmission.update({
-          where: { id: existing.id },
-          data: {
-            status,
-            pdpReference: deposit.reference,
-            documentHash,
-            submittedAt: now,
-            statusHistory: [historyEntry] as Prisma.InputJsonValue,
-          },
-        });
-        return { submissionId: existing.id, reference: deposit.reference, status };
-      }
-      const created = await tx.eInvoiceSubmission.create({
-        data: {
-          tenantId,
-          invoiceNumber: periodKey,
-          profile: "EREPORTING",
-          direction: "ereporting",
-          status,
-          pdpReference: deposit.reference,
-          documentHash,
-          amountCents: data.totalCents,
-          currency: "EUR",
-          submittedAt: now,
-          statusHistory: [historyEntry] as Prisma.InputJsonValue,
-        },
-        select: { id: true },
-      });
-      return { submissionId: created.id, reference: deposit.reference, status };
+
+    // Même réservation préalable que le dépôt de facture : une période
+    // déclarée deux fois est une déclaration fautive.
+    const reserved = await reserveSubmission(tenantId, {
+      invoiceNumber: periodKey,
+      profile: "EREPORTING",
+      direction: "ereporting",
+      documentHash,
+      amountCents: data.totalCents,
+      currency: "EUR",
     });
+
+    let deposit;
+    try {
+      const client = await getPdpClient(tenantId, connectors ?? {});
+      deposit = await client.reportTransactions(data);
+    } catch (error) {
+      await markSubmissionFailed(tenantId, reserved.id, error);
+      throw error;
+    }
+
+    return recordDeposit(tenantId, reserved.id, deposit);
   },
   // EXÉCUTEUR RÉEL (3.8) : enregistre la réponse validée sur l'avis. Jamais
   // d'écrasement (idempotent) : un avis déjà répondu reste tel quel.

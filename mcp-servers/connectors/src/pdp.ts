@@ -61,6 +61,9 @@ export interface PdpClient {
   testConnection(): Promise<void>;
 }
 
+/** Destination par défaut : un TLD réservé, jamais joignable. */
+const PDP_PLACEHOLDER_URL = "https://api.pdp.example";
+
 export class HttpPdpClient implements PdpClient {
   private readonly baseUrl: string;
 
@@ -68,11 +71,18 @@ export class HttpPdpClient implements PdpClient {
     private readonly credentials: PdpCredentials,
     baseUrl?: string,
   ) {
-    this.baseUrl = resolveBaseUrl("https://api.pdp.example", baseUrl, "PDP_BASE_URL");
-    // Même garde que Silae : en production, on refuse d'émettre une facture
-    // vers une destination placeholder (TLD réservé, non contractée).
-    if (process.env.NODE_ENV === "production" && this.baseUrl === "https://api.pdp.example") {
-      throw new Error("pdp base URL not configured");
+    // L'URL de la plateforme est une CONFIGURATION DE DÉPLOIEMENT — chaque
+    // entreprise choisit son opérateur, il n'y en a pas d'« officiel ». Elle
+    // vient donc du coffre (`PDP_BASE_URL`, injecté au boot) et fait foi ;
+    // l'argument n'existe que pour les tests et reste refusé en production
+    // par `resolveBaseUrl`, comme pour tout autre connecteur.
+    const configured = process.env.PDP_BASE_URL ?? PDP_PLACEHOLDER_URL;
+    this.baseUrl = resolveBaseUrl(configured, baseUrl, "PDP_BASE_URL");
+    if (process.env.NODE_ENV === "production") {
+      // Émettre une facture engage l'entreprise : pas de dépôt vers une
+      // destination non contractée, ni en clair sur le réseau.
+      if (this.baseUrl === PDP_PLACEHOLDER_URL) throw new Error("pdp base URL not configured");
+      if (!this.baseUrl.startsWith("https://")) throw new Error("pdp base URL must be https");
     }
   }
 

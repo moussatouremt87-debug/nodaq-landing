@@ -31,6 +31,10 @@ await injectSecrets([
   { name: "SUPPORT_S3_ACCESS_KEY", required: false },
   { name: "SUPPORT_S3_SECRET_KEY", required: false },
   { name: "SUPPORT_FROM_EMAIL", required: false },
+  // Plateforme de dématérialisation (2.4) — l'opérateur est un choix de
+  // déploiement : sans URL configurée, le connecteur PDP refuse de se
+  // construire en production (aucun dépôt vers une destination inconnue).
+  { name: "PDP_BASE_URL", required: false },
   { name: "OPS_OPERATOR_USER_IDS", required: false },
   { name: "SUPPORT_TEM_SECRET_KEY", required: false },
 ]);

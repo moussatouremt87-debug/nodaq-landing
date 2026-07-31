@@ -23,12 +23,22 @@ import type { WebhookHandler } from "./webhooks.js";
  *  - the history is append-only and BOUNDED: a chatty platform must not grow
  *    a row without limit.
  *
- * Nothing here logs or stores the payload: a status event carries the invoice
- * number, which is business data (art. 5.1.c).
+ * Nothing here logs the payload: a status event carries the invoice number,
+ * which is business data. The socket itself keeps the delivered body for 90
+ * days (2.13 retention) now that a handler gives it a purpose — that storage
+ * is the socket's, and this module adds nothing to it.
  */
 
 /** Hard cap on stored history entries — oldest are dropped, newest kept. */
 export const MAX_STATUS_HISTORY = 50;
+
+/**
+ * Statuses a (re)deposit may legitimately start from: the invoice is not on
+ * the platform yet (`prete`), or a transport failure left it unsent
+ * (`erreur`). Any other status means the platform HAS the document, and a
+ * second deposit would be visible to the customer.
+ */
+export const REDEPOSITABLE_STATUSES = new Set(["prete", "erreur"]);
 
 /**
  * Status envelope. Platforms differ in naming, so both the platform
@@ -71,10 +81,39 @@ export function parseStatusEvent(payload: unknown): StatusEventRef | null {
   return { reference, invoiceNumber, status };
 }
 
+/**
+ * Shrinks a finished action's payload (art. 5.1.c — minimization).
+ *
+ * `submit_einvoice` is the only payload that carries a FULL customer invoice
+ * (name, address, SIRET, line labels): the executor needs it to rebuild the
+ * document deterministically. Once the action is executed or rejected, that
+ * need is gone — the registry keeps the hash, and the queue has no reason to
+ * hold a copy of the invoice forever. Returns null when there is nothing to
+ * shrink.
+ */
+export function reduceFinishedPayload(
+  type: string,
+  payload: unknown,
+): Prisma.InputJsonValue | null {
+  if (type !== "submit_einvoice") return null;
+  const data = payload as Record<string, unknown> | null;
+  const invoice = (data?.invoice ?? null) as Record<string, unknown> | null;
+  return {
+    reduced: true,
+    // Ce qui reste = ce qui permet de RELIRE la file, pas de reconstruire la
+    // facture : numéro, montant, profil.
+    invoiceNumber: typeof invoice?.number === "string" ? invoice.number : null,
+    grossCents: typeof data?.grossCents === "number" ? data.grossCents : null,
+    currency: typeof data?.currency === "string" ? data.currency : null,
+    profile: typeof data?.profile === "string" ? data.profile : null,
+    label: typeof data?.label === "string" ? data.label : null,
+  } as Prisma.InputJsonValue;
+}
+
 export type StatusOutcome = "applied" | "ignored" | "unknown-submission";
 
 /** Appends to the bounded history without ever dropping the newest entry. */
-function appendHistory(
+export function appendHistory(
   existing: Prisma.JsonValue,
   entry: { status: string; at: string; reference?: string | null },
 ): Prisma.InputJsonValue {
@@ -108,6 +147,11 @@ export async function applySubmissionStatus(
     if (!submission) return "unknown-submission";
 
     const current = submission.status as SubmissionStatus;
+    // `erreur` est une panne de NOTRE côté (le dépôt a échoué), jamais un
+    // verdict de plateforme : l'accepter par ce canal permettrait à un
+    // message entrant de faire retomber une facture approuvée en « erreur
+    // de transmission », puis de rouvrir le cycle depuis `erreur`.
+    if (event.status === "erreur") return "ignored";
     if (!isValidTransition(current, event.status)) return "ignored";
 
     await tx.eInvoiceSubmission.update({

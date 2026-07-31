@@ -15,7 +15,7 @@ Déposer une facture sur le réseau n'est pas un appel API de plus. C'est
 déposée en double se voit ; une facture déposée non conforme laisse une trace
 publique d'émission fautive.
 
-Trois conséquences, toutes structurelles ici :
+Quatre conséquences, toutes structurelles ici :
 
 1. **Rien ne part de la boucle agent.** Il n'existe aucun outil MCP de dépôt.
    La route prépare, l'humain valide, l'exécuteur dépose (règle HITL du
@@ -24,10 +24,25 @@ Trois conséquences, toutes structurelles ici :
    peut dormir des heures dans la file ; entre-temps la config de règles a pu
    bouger. `submit_einvoice` refait `auditInvoice()` et refuse de déposer une
    facture qui n'est plus émissible.
-3. **Le payload de la file porte la facture normalisée, jamais le PDF.** Le
+3. **La place est réservée AVANT l'appel réseau.** L'exécuteur crée la
+   ligne `einvoice_submissions` en statut `prete` puis dépose. C'est l'index
+   unique `(tenant, numéro, direction)` qui tranche, jamais une lecture
+   préalable : deux propositions de la même facture (deux entrées en file,
+   chacune valide isolément) déposeraient sinon deux fois, la seconde
+   écrasant la référence de la première — qui deviendrait introuvable. Le
+   409 des routes n'est qu'un confort d'interface.
+4. **Le payload de la file porte la facture normalisée, jamais le PDF.** Le
    générateur (2.3) est pur : le document est reconstruit à l'identique au
    moment du dépôt. Stocker un PDF en base pour le ressortir plus tard aurait
-   doublé la donnée client sans rien garantir de plus.
+   doublé la donnée client sans rien garantir de plus. Une fois l'action
+   **terminée** (exécutée ou rejetée), le payload est **réduit** à son résumé
+   de lecture — la facture du client n'a plus de raison de vivre en file
+   (art. 5.1.c).
+
+Un échec de transport laisse la ligne en `erreur` avec le **nom** de
+l'erreur (`lastError`), jamais un message fournisseur qui citerait la
+facture ; la transition `erreur → deposee` rouvre un dépôt, et c'est le seul
+chemin de reprise.
 
 ## Aucun opérateur en dur
 
@@ -47,9 +62,14 @@ mauvais pari commercial (un éditeur repreneur a déjà la sienne). D'où un
 opérateur donné ajuste le format de fil. Ce qui ne bouge pas, c'est le
 contrat. Même patron que `getBankClient()` (2.15) pour les banques.
 
-L'URL de base est configurable (`PDP_BASE_URL`) et le placeholder
-`https://api.pdp.example` est **refusé en production** : émettre une facture
-vers un TLD réservé serait une panne silencieuse aux conséquences légales.
+L'URL de la plateforme est une **configuration de déploiement** : il n'y a pas
+d'URL « officielle » unique puisque chaque entreprise choisit son opérateur.
+Elle vient donc du coffre (`PDP_BASE_URL`, injectée au boot) et fait foi ;
+l'argument de constructeur n'existe que pour les tests et reste refusé en
+production par `resolveBaseUrl`, comme pour tout autre connecteur. En
+production, deux refus supplémentaires : le placeholder `https://api.pdp.example`
+(émettre vers un TLD réservé serait une panne silencieuse aux conséquences
+légales) et toute URL non `https`.
 
 ## Cycle de vie — vocabulaire normatif, transitions gardées
 
@@ -62,7 +82,7 @@ destinataire et l'administration : en inventer un casserait le rapprochement.
 prete → deposee → recue → prise_en_charge → approuvee ┐
                                           → refusee   ├→ encaissee
                                           → rejetee   ┘
-erreur (transport, jamais un verdict) → deposee
+erreur (transport, notre côté — jamais un verdict) ⇄ prete | deposee
 ```
 
 `isValidTransition` n'autorise que l'avance. Trois refus qui comptent :
@@ -98,8 +118,13 @@ Ce que le handler garantit :
   la ligne naît du dépôt validé, point ;
 - l'historique est **append-only et borné** (`MAX_STATUS_HISTORY = 50`) : une
   plateforme bavarde ne fait pas grossir une ligne sans fin ;
+- **`erreur` est refusé par ce canal** : c'est une panne de *notre* côté, pas
+  un verdict de plateforme. L'accepter permettrait à un message signé de faire
+  retomber une facture approuvée en « erreur de transmission », puis de
+  rouvrir le cycle depuis `erreur` ;
 - rien n'est logué du payload : un événement de statut porte un numéro de
-  facture, qui est une donnée d'entreprise.
+  facture, qui est une donnée d'entreprise. Le socle 2.13, lui, conserve le
+  corps livré 90 jours maintenant qu'un handler lui donne une finalité.
 
 ## E-reporting — des totaux, jamais des noms
 

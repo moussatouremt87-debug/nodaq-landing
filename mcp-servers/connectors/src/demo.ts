@@ -1,3 +1,4 @@
+import type { PdpClient, PdpDeposit } from "./pdp.js";
 import { PennylaneClient } from "./pennylane.js";
 import { QontoClient } from "./qonto.js";
 import { SilaeClient } from "./silae.js";
@@ -355,10 +356,14 @@ export class DemoSilaeClient extends SilaeClient {
  * statut qui progresse. Sert la démonstration et les tests ; jamais présenté
  * comme un dépôt réel (le connecteur est en statut `demo`).
  */
-export class DemoPdpClient {
+export class DemoPdpClient implements PdpClient {
   private counter = 0;
 
-  deposit(input: { invoiceNumber: string }): Promise<{ reference: string; status: string | null }> {
+  deposit(input: {
+    invoiceNumber: string;
+    documentBase64: string;
+    profile: string;
+  }): Promise<PdpDeposit> {
     this.counter += 1;
     return Promise.resolve({
       reference: `demo-${input.invoiceNumber}-${this.counter}`,
@@ -367,12 +372,19 @@ export class DemoPdpClient {
   }
 
   getStatus(reference: string): Promise<{ status: string; updatedAt: string | null }> {
-    return Promise.resolve({ status: reference.includes("demo-") ? "recue" : "deposee", updatedAt: null });
+    return Promise.resolve({
+      status: reference.includes("demo-") ? "recue" : "deposee",
+      updatedAt: null,
+    });
   }
 
   reportTransactions(input: {
     periodStart: string;
-  }): Promise<{ reference: string; status: string | null }> {
+    periodEnd: string;
+    totalCents: number;
+    vatCents: number;
+    transactionCount: number;
+  }): Promise<PdpDeposit> {
     return Promise.resolve({ reference: `demo-ereporting-${input.periodStart}`, status: "deposee" });
   }
 

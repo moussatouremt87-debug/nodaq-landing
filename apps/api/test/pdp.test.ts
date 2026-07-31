@@ -237,6 +237,49 @@ describe("soumission — owner only, HITL, conformité rejouée", () => {
     expect(res.statusCode).toBe(409);
   });
 
+  it("course : une seconde action approuvée ne dépose PAS une seconde fois", async () => {
+    // On court-circuite la garde 409 de la route (qui n'est qu'un confort)
+    // pour reproduire la vraie course : deux actions en file pour la même
+    // facture. La garantie DURE est la réservation atomique côté exécuteur.
+    const owner = await admin.membership.findFirstOrThrow({
+      where: { tenantId: orgId, role: "owner" },
+      select: { userId: true },
+    });
+    const rogue = await admin.pendingAction.create({
+      data: {
+        tenantId: orgId,
+        type: "submit_einvoice",
+        requestedBy: owner.userId,
+        employee: "compta",
+        payload: { invoice: INVOICE, profile: "EN16931" },
+      },
+      select: { id: true },
+    });
+    const depositsBefore = received.filter((r) => r.url === "/invoices").length;
+    const approved = await approve(rogue.id);
+    expect((approved.json() as { status: string }).status).toBe("failed");
+    // RIEN n'est parti sur le réseau, et la référence du premier dépôt tient.
+    expect(received.filter((r) => r.url === "/invoices").length).toBe(depositsBefore);
+    expect(
+      await admin.eInvoiceSubmission.count({
+        where: { tenantId: orgId, invoiceNumber: INVOICE.number, direction: "emission" },
+      }),
+    ).toBe(1);
+  });
+
+  it("action terminée : la facture du client ne reste pas en file", async () => {
+    const action = await admin.pendingAction.findFirstOrThrow({
+      where: { tenantId: orgId, type: "submit_einvoice", status: "executed" },
+      select: { payload: true },
+    });
+    const payload = JSON.stringify(action.payload);
+    // Le numéro reste (lecture de la file) ; le client, lui, s'en va.
+    expect(payload).toContain(INVOICE.number);
+    expect(payload).not.toContain("Boulangerie");
+    expect(payload).not.toContain("52345678800018");
+    expect(payload).not.toContain("Mise aux normes");
+  });
+
   it("suivi : métadonnées seulement, jamais le document", async () => {
     const res = await app.inject({
       method: "GET",
@@ -319,6 +362,24 @@ describe("statuts entrants — webhook signé, transitions gardées", () => {
   it("un statut en ARRIÈRE est ignoré : un rejeu ne réécrit pas l'histoire", async () => {
     expect(await deliverStatus({ id: `evt-2-${RUN}`, type: "invoice.status", reference, status: "deposee" })).toBe(202);
     expect(await currentStatus()).toBe("approuvee");
+  });
+
+  it("`erreur` n'est jamais accepté d'une plateforme : ce n'est pas un verdict", async () => {
+    // Sinon un message signé ferait retomber une facture approuvée en
+    // « erreur de transmission », puis rouvrirait le cycle depuis erreur.
+    expect(
+      await deliverStatus({ id: `evt-err-${RUN}`, type: "invoice.status", reference, status: "erreur" }),
+    ).toBe(202);
+    expect(await currentStatus()).toBe("approuvee");
+  });
+
+  it("l'historique est APPEND-ONLY : le dépôt initial n'est pas effacé", async () => {
+    const row = await admin.eInvoiceSubmission.findFirstOrThrow({
+      where: { tenantId: orgId, invoiceNumber: INVOICE.number },
+    });
+    const statuses = (row.statusHistory as { status: string }[]).map((entry) => entry.status);
+    expect(statuses).toContain("deposee");
+    expect(statuses).toContain("approuvee");
   });
 
   it("un statut INCONNU n'est jamais deviné", async () => {

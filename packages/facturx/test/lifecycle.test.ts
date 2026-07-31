@@ -55,6 +55,15 @@ describe("isValidTransition", () => {
     expect(isValidTransition("deposee", "erreur")).toBe(true);
   });
 
+  it("`erreur` ne peut PAS survenir après prise en charge de la plateforme", () => {
+    // Sinon le couple (X -> erreur -> deposee) rouvrirait le cycle d'une
+    // facture déjà traitée, et afficherait « erreur de transmission » sur une
+    // facture en réalité approuvée.
+    for (const advanced of ["recue", "prise_en_charge", "approuvee", "encaissee"] as const) {
+      expect(isValidTransition(advanced, "erreur")).toBe(false);
+    }
+  });
+
   it("rejet : distingue le refus du CLIENT et le rejet de la PLATEFORME", () => {
     expect(isRejection("refusee")).toBe(true);
     expect(isRejection("rejetee")).toBe(true);

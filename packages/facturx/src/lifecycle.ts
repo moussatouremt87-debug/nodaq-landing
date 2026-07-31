@@ -87,7 +87,11 @@ export function isValidTransition(from: SubmissionStatus, to: SubmissionStatus):
   }
   // Une erreur de transmission peut être suivie d'un nouveau dépôt.
   if (from === "erreur") return to === "deposee";
-  if (to === "erreur") return true;
+  // `erreur` = échec de transport DE NOTRE CÔTÉ : il ne peut survenir que
+  // tant que la plateforme n'a pas pris le document. Autoriser le retour en
+  // erreur depuis un statut plus avancé rouvrirait le cycle (erreur →
+  // deposee) sur une facture que la plateforme a déjà traitée.
+  if (to === "erreur") return from === "prete" || from === "deposee";
   return STATUS_RANK[to] > STATUS_RANK[from];
 }
 

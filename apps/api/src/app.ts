@@ -67,7 +67,11 @@ import {
   recordPushEvent,
   tenantOwnerIds,
 } from "./push.js";
-import { createPdpWebhookHandler } from "./einvoice.js";
+import {
+  createPdpWebhookHandler,
+  REDEPOSITABLE_STATUSES,
+  reduceFinishedPayload,
+} from "./einvoice.js";
 import { createSupportStorage } from "./support/storage.js";
 import type { SupportStorage } from "./support/storage.js";
 import { createTemMailer } from "./support/tem.js";
@@ -385,12 +389,27 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         if (!exists) return reply.code(404).send({ error: "pending action not found" });
         return reply.code(409).send({ error: `already ${exists.status}` });
       }
-      const updated = await withTenant(request.tenantId, (tx) =>
-        tx.pendingAction.findUnique({
+      const updated = await withTenant(request.tenantId, async (tx) => {
+        const row = await tx.pendingAction.findUniqueOrThrow({
           where: { id: params.data.id },
-          select: { id: true, type: true, status: true, validatedBy: true, validatedAt: true },
-        }),
-      );
+        });
+        // Rejetée aussi : la facture du client n'a plus de raison de rester
+        // en file (art. 5.1.c) — seul le résumé de lecture survit.
+        const reduced = reduceFinishedPayload(row.type, row.payload);
+        if (reduced) {
+          await tx.pendingAction.update({
+            where: { id: params.data.id },
+            data: { payload: reduced },
+          });
+        }
+        return {
+          id: row.id,
+          type: row.type,
+          status: row.status,
+          validatedBy: row.validatedBy,
+          validatedAt: row.validatedAt,
+        };
+      });
       return reply.send(updated);
     };
 
@@ -446,10 +465,18 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           };
         }
       }
+      // Minimisation : une action terminée n'a plus besoin de porter la
+      // facture complète du client (elle a servi à reconstruire le document).
+      const reduced = reduceFinishedPayload(action.type, action.payload);
       const updated = await withTenant(request.tenantId, (tx) =>
         tx.pendingAction.update({
           where: { id: params.data.id },
-          data: { status: outcome.status, executedAt: new Date(), result: outcome.result },
+          data: {
+            status: outcome.status,
+            executedAt: new Date(),
+            result: outcome.result,
+            ...(reduced ? { payload: reduced } : {}),
+          },
           select: {
             id: true,
             type: true,
@@ -3063,17 +3090,30 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         return reply.code(422).send({ error: "facture non conforme", audit });
       }
 
-      const already = await withTenant(request.tenantId, (tx) =>
-        tx.eInvoiceSubmission.findFirst({
+      // Idempotence AVANT la file (confort) : une facture déjà chez la
+      // plateforme ne se re-propose pas, et une proposition en attente ne se
+      // duplique pas. La garantie DURE, elle, est la réservation atomique
+      // faite par l'exécuteur sur l'index unique — deux propositions
+      // concurrentes ne peuvent pas produire deux dépôts.
+      const conflict = await withTenant(request.tenantId, async (tx) => {
+        const submitted = await tx.eInvoiceSubmission.findFirst({
           where: { invoiceNumber: invoice.data.number, direction: "emission" },
-          select: { id: true, status: true },
-        }),
-      );
-      if (already) {
-        // Idempotence AVANT la file : une facture déjà déposée ne se
-        // re-propose pas (le dépôt en double est visible par le client).
-        return reply.code(409).send({ error: "facture déjà déposée", status: already.status });
-      }
+          select: { status: true },
+        });
+        if (submitted && !REDEPOSITABLE_STATUSES.has(submitted.status)) {
+          return { error: "facture déjà déposée", status: submitted.status };
+        }
+        const queued = await tx.pendingAction.findFirst({
+          where: {
+            type: "submit_einvoice",
+            status: "pending",
+            payload: { path: ["invoice", "number"], equals: invoice.data.number },
+          },
+          select: { id: true },
+        });
+        return queued ? { error: "dépôt déjà en attente de validation", status: "prete" } : null;
+      });
+      if (conflict) return reply.code(409).send(conflict);
 
       const action = await withTenant(request.tenantId, (tx) =>
         tx.pendingAction.create({
@@ -3200,7 +3240,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         select: { id: true, status: true },
       }),
     );
-    if (already) {
+    // Une transmission restée en `erreur` (panne de transport) reste
+    // re-proposable — sinon la période serait déclarable nulle part.
+    if (already && !REDEPOSITABLE_STATUSES.has(already.status)) {
       return reply.code(409).send({ error: "période déjà transmise", status: already.status });
     }
     const action = await withTenant(request.tenantId, (tx) =>
