@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
+  askCockpit,
   formatEuroCents,
   getKpis,
   getMe,
@@ -102,6 +103,11 @@ export default function CockpitPage() {
     plannedOutflowCents: number;
   } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Cockpit conversationnel (2.5) : la question passe par la MÊME boucle que
+  // le chat — mêmes outils, mêmes gardes de rôle.
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState<{ answer: string; tools: string[] } | null>(null);
+  const [asking, setAsking] = useState(false);
 
   const refresh = useCallback(() => {
     getKpis().then(setKpis).catch(() => undefined);
@@ -232,6 +238,43 @@ export default function CockpitPage() {
           </Link>
         </div>
       )}
+
+      <div className="card" style={{ marginBottom: 18 }}>
+        <span className="overline">Posez votre question</span>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (question.trim().length < 3) return;
+            setAsking(true);
+            setAnswer(null);
+            askCockpit(question.trim())
+              .then(setAnswer)
+              .catch(() => setAnswer({ answer: "Réponse indisponible pour l'instant.", tools: [] }))
+              .finally(() => setAsking(false));
+          }}
+          style={{ display: "flex", gap: 8, margin: "6px 0" }}
+        >
+          <input
+            value={question}
+            maxLength={500}
+            placeholder="Combien d'articles sous le seuil d'alerte ?"
+            onChange={(event) => setQuestion(event.target.value)}
+            style={{ flex: 1 }}
+          />
+          <button className="btn primary" disabled={asking}>
+            {asking ? "…" : "Demander"}
+          </button>
+        </form>
+        {answer && (
+          <div>
+            <p style={{ margin: "6px 0" }}>{answer.answer}</p>
+            {answer.tools.length > 0 && (
+              // D'OÙ vient le chiffre : les outils réellement appelés.
+              <p className="hint">Sources : {answer.tools.join(", ")}</p>
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="kpi-grid">
         <div className="card">

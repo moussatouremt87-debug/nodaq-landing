@@ -1234,6 +1234,20 @@ export const putTaxDeadline = (deadline: {
 }): Promise<unknown> =>
   call(z.unknown(), "/echeancier/deadline", { method: "PUT", body: JSON.stringify(deadline) });
 
+/*
+ * Cockpit conversationnel (2.5). Une question en français, une réponse
+ * chiffrée sur les données du tenant — et la liste des outils réellement
+ * utilisés, pour voir d'où vient le chiffre.
+ */
+export const CockpitAnswer = z.object({
+  answer: z.string(),
+  tools: z.array(z.string()),
+});
+export type CockpitAnswer = z.infer<typeof CockpitAnswer>;
+
+export const askCockpit = (question: string): Promise<CockpitAnswer> =>
+  call(CockpitAnswer, "/cockpit/ask", { method: "POST", body: JSON.stringify({ question }) });
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {

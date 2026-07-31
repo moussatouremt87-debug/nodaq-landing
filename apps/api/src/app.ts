@@ -563,6 +563,53 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   });
 
   /*
+   * Cockpit conversationnel (2.5) — une question en français, une réponse
+   * chiffrée sur les données du tenant.
+   *
+   * MÊME boucle que le chat (donc mêmes gardes : toolset lié au tenant de
+   * session, outils owner-gated, écritures en file de validation) ; seule la
+   * restitution change — pas de flux, une réponse et la liste des outils
+   * réellement utilisés, pour que l'utilisateur voie D'OÙ vient le chiffre.
+   */
+  app.post("/cockpit/ask", { preHandler: businessRoute }, async (request, reply) => {
+    const body = z
+      .object({ question: z.string().min(3).max(500) })
+      .strict()
+      .safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: "invalid payload" });
+
+    const agentRuntime = new ComptaAgent({
+      ...agentContext,
+      tenantId: request.tenantId,
+      requestedBy: request.authSession.user.id,
+      // Le rôle vient de la SESSION : c'est lui qui ferme les jeux de données
+      // réservés au dirigeant, à l'intérieur même de l'outil de requête.
+      role: request.membershipRole,
+    });
+
+    let answer = "";
+    const tools: string[] = [];
+    try {
+      await agentRuntime.run(body.data.question, {
+        onEvent: (event) => {
+          if (event.type === "assistant") answer = event.content;
+          // Métadonnées seulement : le NOM de l'outil, jamais son résultat.
+          if (event.type === "tool_call" && !tools.includes(event.name)) tools.push(event.name);
+        },
+      });
+    } catch (error) {
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "cockpit ask failed",
+      );
+      return reply.code(503).send({ error: "réponse indisponible" });
+    }
+    // Réponse construite sur des données d'entreprise : jamais mise en cache.
+    void reply.header("cache-control", "private, no-store");
+    return { answer, tools };
+  });
+
+  /*
    * Connector onboarding (ticket 1.8). Rule of the house: credentials go IN,
    * never OUT — stored in the vault under `connector/<tenantId>/<type>`,
    * referenced by name in the connector row, absent from every response.

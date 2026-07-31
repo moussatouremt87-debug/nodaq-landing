@@ -43,6 +43,17 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > montant appris ; `originalExtraction` reste la lecture BRUTE (sinon la
 > mémoire s'auto-alimente) ; colonne `learned` = trace d'explicabilité affichée
 > (« d'après vos N corrections ») + `GET /classeur/memoire` (`docs/classeur.md`).
+> **Cockpit conversationnel (2.5)** : le modèle n'écrit JAMAIS de SQL — il
+> remplit une requête STRUCTURÉE contre un catalogue fermé versionné
+> (`dataCatalog.ts`, 5 datasets), compilée par une fonction PURE qui valide
+> champ par champ AVANT toute lecture ; gating à DEUX niveaux (dataset ET
+> champ owner-only, ex. `cout_unitaire` 3.3), description du catalogue
+> FILTRÉE par rôle, rôle issu de la SESSION (`ActionsServerContext.role`,
+> jamais d'un input) ; exécuteur = allowlist explicite de modèles Prisma sous
+> `withTenant` (`dataQuery.ts`) ; un refus est une RÉPONSE motivée (le modèle
+> reformule au lieu d'inventer un chiffre) ; unité (centimes) et troncature
+> DITES, tri par l'agrégat côté base ; outil `query_business_data` (membres) +
+> `POST /cockpit/ask` = même boucle que le chat (`docs/cockpit-conversationnel.md`).
 > **Banque DSP2 (2.15)** : `getBankClient()` = Qonto direct sinon agrégateur Bridge
 > (toutes banques FR) — TOUS les consommateurs bancaires passent par lui, jamais par
 > un client direct ; identifiants Bridge (clientId/clientSecret/userUuid) testés

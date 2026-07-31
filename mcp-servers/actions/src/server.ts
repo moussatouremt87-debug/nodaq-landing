@@ -7,9 +7,13 @@ import { route } from "@nodaq/llm";
 import { getBankClient, getPennylaneClient } from "@nodaq/mcp-connectors";
 import type { RegistryOptions } from "@nodaq/mcp-connectors";
 import {
+  AGGREGATES,
   applyTaxOverrides,
   auditRgpdRegister,
   buildTaxSchedule,
+  compileDataQuery,
+  describeCatalog,
+  FILTER_OPERATORS,
   matchRegulatoryItems,
   PAYROLL_PERIODICITIES,
   TenantId,
@@ -23,6 +27,7 @@ import { analyzeReputation } from "./reputation.js";
 import type { OcrClientOptions } from "./ocrClient.js";
 import { extractInvoiceText } from "./ocrClient.js";
 import { analyzeCustomerSignals } from "./customerSignals.js";
+import { runDataQuery } from "./dataQuery.js";
 import { simulateMaterialPrices } from "./materialScenario.js";
 import { analyzeHourlyPerformance } from "./hourlyPerformance.js";
 import { buildMonthlySeries, fetchInvoiceWindow, forecastSales } from "./salesForecast.js";
@@ -48,6 +53,13 @@ export interface ActionsServerContext extends OcrClientOptions, RegistryOptions 
   requestedBy?: string;
   /** Virtual employee preparing the actions (e.g. 'compta') — audit attribution. */
   employee?: string;
+  /**
+   * Rôle du membre derrière le run (owner|member|accountant), issu de la
+   * SESSION via le runtime — jamais d'un input d'outil. Le cockpit
+   * conversationnel (2.5) s'en sert pour refuser un jeu de données ou un
+   * champ réservé au dirigeant. Fail-closed : absent = pas owner.
+   */
+  role?: string;
   /**
    * Fire-and-forget doorbell rung each time a tool PREPARES a pending_action
    * (push notifications 2.17). Carries NO data by design — the recipient
@@ -75,6 +87,7 @@ export const TOOL_POLICIES = {
   analyze_hourly_performance: { requiresValidation: false },
   check_regulatory_watch: { requiresValidation: false },
   check_tax_calendar: { requiresValidation: false },
+  query_business_data: { requiresValidation: false },
   check_rgpd_register: { requiresValidation: false },
   analyze_reputation: { requiresValidation: false },
   draft_review_reply: { requiresValidation: true },
@@ -650,6 +663,78 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
               label:
                 "Calendrier indicatif issu d'un catalogue versionné : il ne remplace " +
                 "ni votre expert-comptable ni votre espace professionnel.",
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  // Cockpit conversationnel (2.5) : répondre sur les données RÉELLES du
+  // tenant, sans jamais laisser le modèle écrire de SQL. Il remplit une
+  // requête STRUCTURÉE que le catalogue valide champ par champ avant qu'une
+  // ligne ne soit lue — un champ hors catalogue est un refus motivé.
+  server.registerTool(
+    "query_business_data",
+    {
+      description:
+        "Interroge les données de l'entreprise (lecture seule, ticket 2.5) : compte, " +
+        "somme ou moyenne sur un jeu de données du catalogue, avec regroupement, " +
+        "filtres et période. Jeux de données et champs disponibles pour cet " +
+        `utilisateur :\n${describeCatalog(context.role ?? "member")}\n` +
+        "N'invente JAMAIS un nom de champ : un champ hors catalogue est refusé. Si " +
+        "le refus explique ce qui existe, reformule avec les champs proposés.",
+      inputSchema: {
+        dataset: z.string().max(60).describe("Identifiant du jeu de données"),
+        aggregate: z.enum(AGGREGATES).describe("Agrégat appliqué"),
+        measure: z.string().max(60).optional().describe("Grandeur (requise sauf count)"),
+        groupBy: z.string().max(60).optional().describe("Dimension de regroupement"),
+        filters: z
+          .array(
+            z.object({
+              field: z.string().max(60),
+              op: z.enum(FILTER_OPERATORS),
+              value: z.union([z.string().max(200), z.number(), z.boolean()]),
+            }),
+          )
+          .max(5)
+          .optional()
+          .describe("Filtres (5 au plus)"),
+        from: z.string().max(10).optional().describe("Début de période AAAA-MM-JJ"),
+        to: z.string().max(10).optional().describe("Fin de période AAAA-MM-JJ"),
+        limit: z.number().int().min(1).max(50).optional(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async (input) => {
+      // Le RÔLE vient du runtime (session), jamais d'un input d'outil.
+      const compiled = compileDataQuery(input, context.role ?? "member");
+      if (!compiled.ok) {
+        // Un refus est une RÉPONSE : le modèle doit pouvoir reformuler, pas
+        // recevoir une exception opaque qui le pousserait à inventer.
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ refused: true, reason: compiled.reason }),
+            },
+          ],
+        };
+      }
+      const outcome = await runDataQuery(tenantId, compiled.plan);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              dataset: compiled.plan.labels.dataset,
+              measure: compiled.plan.labels.measure,
+              groupBy: compiled.plan.labels.groupBy,
+              aggregate: compiled.plan.aggregate,
+              // Les montants du catalogue sont en CENTIMES : le dire évite
+              // une réponse à deux ordres de grandeur près.
+              unit: compiled.plan.measureColumn?.endsWith("Cents") ? "centimes" : "unités",
+              ...outcome,
             }),
           },
         ],
