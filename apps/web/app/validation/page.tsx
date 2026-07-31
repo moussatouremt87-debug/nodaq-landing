@@ -95,6 +95,39 @@ function actionLine(action: PendingActionSummary, detail: PendingActionDetail | 
         .join(" · "),
     };
   }
+  // Facturation électronique (2.4) : ce que l'owner approuve part sur le
+  // réseau national — le résumé dit QUOI, pour QUEL montant, sans détour.
+  if (action.type === "submit_einvoice" && payload) {
+    const invoice = asDict(payload.invoice);
+    return {
+      title: `Dépôt de la facture ${asString(invoice?.number) ?? "?"}`,
+      meta: [
+        asNumber(payload.grossCents) !== null
+          ? `${formatEuroCents(asNumber(payload.grossCents) ?? 0)} TTC`
+          : null,
+        asString(payload.profile),
+        "dépôt irréversible sur la plateforme",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
+  if (action.type === "report_einvoice_transactions" && payload) {
+    return {
+      title: `E-reporting ${asString(payload.periodStart) ?? "?"} → ${asString(payload.periodEnd) ?? "?"}`,
+      meta: [
+        asNumber(payload.transactionCount) !== null
+          ? `${asNumber(payload.transactionCount)} transaction(s)`
+          : null,
+        asNumber(payload.totalCents) !== null
+          ? `${formatEuroCents(asNumber(payload.totalCents) ?? 0)} déclarés`
+          : null,
+        "agrégats seulement",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
   if (action.type === "create_fixed_asset" && payload) {
     return {
       title: `Immobilisation — ${asString(payload.label) ?? "?"}`,

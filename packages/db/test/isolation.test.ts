@@ -57,6 +57,8 @@ let webhookEndpointAId: string;
 let webhookEndpointBId: string;
 let webhookEventAId: string;
 let webhookEventBId: string;
+let einvoiceSubmissionAId: string;
+let einvoiceSubmissionBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -85,6 +87,7 @@ beforeAll(async () => {
   // FK order: events before endpoints.
   await admin.webhookEvent.deleteMany();
   await admin.webhookEndpoint.deleteMany();
+  await admin.eInvoiceSubmission.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -592,6 +595,33 @@ beforeAll(async () => {
   );
   webhookEventAId = webhookEventA.id;
   webhookEventBId = webhookEventB.id;
+
+  // documentHash est un sha256 placeholder de test — cette table ne stocke NI
+  // le PDF NI le XML de la facture, seulement un hash d'intégrité.
+  const einvoiceSubmissionA = await withTenant(tenantA, (tx) =>
+    tx.eInvoiceSubmission.create({
+      data: {
+        tenantId: tenantA,
+        invoiceNumber: "FA-A-1",
+        profile: "BASIC",
+        documentHash: "hash-einvoice-a",
+        amountCents: 12000,
+      },
+    }),
+  );
+  const einvoiceSubmissionB = await withTenant(tenantB, (tx) =>
+    tx.eInvoiceSubmission.create({
+      data: {
+        tenantId: tenantB,
+        invoiceNumber: "FA-B-1",
+        profile: "EN16931",
+        documentHash: "hash-einvoice-b",
+        amountCents: 34000,
+      },
+    }),
+  );
+  einvoiceSubmissionAId = einvoiceSubmissionA.id;
+  einvoiceSubmissionBId = einvoiceSubmissionB.id;
 });
 
 afterAll(async () => {
@@ -787,6 +817,14 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur webhook_events", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'webhook_events'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur einvoice_submissions", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'einvoice_submissions'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -1541,6 +1579,41 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (einvoice_submissions) — withTenant(A) ne voit QUE la soumission de A", async () => {
+    const submissions = await withTenant(tenantA, (tx) => tx.eInvoiceSubmission.findMany());
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0]?.id).toBe(einvoiceSubmissionAId);
+    expect(submissions.some((s) => s.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (einvoice_submissions) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const submissions = await prisma.eInvoiceSubmission.findMany();
+    expect(submissions).toHaveLength(0);
+  });
+
+  it("test 3 (einvoice_submissions) — lire la soumission de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.eInvoiceSubmission.findUnique({ where: { id: einvoiceSubmissionBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (einvoice_submissions) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.eInvoiceSubmission.create({
+          data: {
+            tenantId: tenantB,
+            invoiceNumber: "FA-intrusion",
+            profile: "BASIC",
+            documentHash: "hash-intrusion",
+            amountCents: 100,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -2000,5 +2073,25 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const events = await withTenant(tenantA, (tx) => tx.webhookEvent.findMany());
     expect(events).toHaveLength(1);
+  });
+
+  it("policy désactivée sur einvoice_submissions => la fuite se produit aussi (suivi de dépôt des deux tenants devient visible)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "einvoice_submissions" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.eInvoiceSubmission.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((s) => s.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.eInvoiceSubmission.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "einvoice_submissions" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "einvoice_submissions" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const submissions = await withTenant(tenantA, (tx) => tx.eInvoiceSubmission.findMany());
+    expect(submissions).toHaveLength(1);
   });
 });

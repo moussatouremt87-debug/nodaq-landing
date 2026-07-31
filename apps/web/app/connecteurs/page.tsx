@@ -31,7 +31,7 @@ import type {
  */
 
 interface ConnectorSpec {
-  type: "qonto" | "pennylane" | "bridge" | "silae";
+  type: "qonto" | "pennylane" | "bridge" | "silae" | "pdp";
   title: string;
   purpose: string;
   fields: { name: string; label: string; secret: boolean }[];
@@ -63,6 +63,16 @@ const CONNECTORS: ConnectorSpec[] = [
     title: "Pennylane",
     purpose: "Facturation — factures clients pour les relances de l'employé Compta.",
     fields: [{ name: "apiKey", label: "Clé API", secret: true }],
+  },
+  {
+    type: "pdp",
+    title: "Plateforme de dématérialisation (PDP)",
+    purpose:
+      "Facturation électronique : dépôt des factures et e-reporting sur la plateforme agréée que vous avez choisie. Chaque dépôt reste validé à la main depuis la file de validation.",
+    fields: [
+      { name: "apiKey", label: "Clé API de la plateforme", secret: true },
+      { name: "accountId", label: "Identifiant de compte émetteur", secret: false },
+    ],
   },
   {
     type: "silae",

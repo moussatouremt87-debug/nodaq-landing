@@ -50,6 +50,7 @@ model Tenant {
   processingActivities ProcessingActivity[]
   webhookEndpoints    WebhookEndpoint[]
   webhookEvents       WebhookEvent[]
+  einvoiceSubmissions EInvoiceSubmission[]
 
   @@map("tenants")
   @@schema("public")
@@ -805,6 +806,48 @@ model WebhookEvent {
   @@unique([tenantId, provider, externalId])
   @@index([tenantId, status])
   @@map("webhook_events")
+  @@schema("public")
+}
+
+/// Ticket 2.4 — soumission PDP de factures électroniques (Factur-X). Suivi de
+/// dépôt UNIQUEMENT : cette table ne stocke NI le PDF NI le XML de la facture,
+/// seulement un hash d'intégrité (`documentHash`) et des métadonnées de suivi
+/// (statut, référence PDP, historique horodaté). `lastError` porte un NOM
+/// d'erreur seulement — jamais un message qui citerait le contenu de la
+/// facture. `@@unique([tenantId, invoiceNumber, direction])` rend le dépôt
+/// idempotent : une même facture n'est déposée qu'une fois par sens de flux.
+/// Sealed by RLS (see the migration `rls_einvoice_submissions`).
+model EInvoiceSubmission {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  invoiceNumber String    @map("invoice_number")
+  /// 'BASIC' | 'EN16931' — profil Factur-X utilisé, validé côté app par Zod.
+  profile       String
+  /// 'emission' | 'ereporting' — validé côté app par Zod.
+  direction     String    @default("emission")
+  /// 'prete' | 'deposee' | 'recue' | 'prise_en_charge' | 'approuvee' |
+  /// 'approuvee_partiellement' | 'refusee' | 'rejetee' | 'encaissee' | 'erreur'
+  /// — validé côté app par Zod.
+  status        String    @default("prete")
+  /// Identifiant du dépôt chez la plateforme (PDP) — absent tant que non déposé.
+  pdpReference  String?   @map("pdp_reference")
+  /// sha256 du PDF soumis — preuve d'intégrité, JAMAIS le document lui-même.
+  documentHash  String    @map("document_hash")
+  /// TTC, pour l'affichage du suivi.
+  amountCents   Int       @map("amount_cents")
+  currency      String    @default("EUR")
+  /// Historique horodaté des statuts : [{status, at, reference?}] — append-only côté app.
+  statusHistory Json      @default("[]") @map("status_history")
+  /// Nom d'erreur SEULEMENT — jamais un message qui citerait la facture.
+  lastError     String?   @map("last_error")
+  submittedAt   DateTime? @map("submitted_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, invoiceNumber, direction])
+  @@index([tenantId, status])
+  @@map("einvoice_submissions")
   @@schema("public")
 }
 

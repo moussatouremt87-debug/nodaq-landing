@@ -123,6 +123,26 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > (sans lui, non conforme) ; `extractFacturXXml` = moitié RÉCEPTION de
 > l'obligation 09/2026 ; routes `POST /factures/facturx` (owner) et
 > `/lire` (membres) (`docs/facturx.md`).
+> **Soumission PDP + e-reporting (2.4, JALON 2)** : déposer ENGAGE l'entreprise
+> (irréversible, opposable) — AUCUN outil MCP de dépôt, la route prépare,
+> l'humain valide, l'exécuteur dépose ; audit de conformité REJOUÉ juste avant
+> le dépôt, place RÉSERVÉE dans le registre AVANT l'appel réseau (l'index
+> unique tranche, une lecture préalable ne garantit rien) et payload = facture
+> NORMALISÉE (générateur pur, PDF jamais stocké) RÉDUITE dès l'action
+> terminée ; aucun opérateur en dur = contrat abstrait `PdpClient`
+> (deposit/getStatus/reportTransactions, URL = config de DÉPLOIEMENT
+> `PDP_BASE_URL`, placeholder et non-https refusés en prod) ; statuts = CONFIG
+> VERSIONNÉE `lifecycle.ts` (10 statuts, `isValidTransition` JAMAIS en arrière
+> ni sur place, `erreur` = panne de NOTRE côté (jamais un verdict, refusée par
+> le canal webhook), `normalizeStatus` inconnu = null jamais deviné) ; retour
+> de statut par le socle 2.13 UNIQUEMENT (handler `pdp` par défaut, tenant de
+> l'ENDPOINT, soumission jamais créée depuis un message entrant, historique
+> APPEND-ONLY borné) ;
+> e-reporting = AGRÉGATS (`aggregateEReporting` pur : B2B/B2C et TVA NON
+> dérivables → dits, jamais devinés ; devise étrangère exclue jamais
+> convertie) ; table `einvoice_submissions` (RLS, hash SHA-256 — NI PDF NI
+> XML, unique (tenant,numéro,direction)) ; routes `/factures/soumettre`,
+> `/soumissions`, `/ereporting*` OWNER-ONLY (`docs/pdp.md`).
 > **Webhooks entrants (2.13)** : SEULE surface sans session — la signature HMAC
 > (`t=<unix>,v1=<hmac(secret, "t.corps brut")>`, ±300 s, `timingSafeEqual`, corps
 > brut via plugin encapsulé, 1 Mo) est l'UNIQUE preuve ; le tenant vient de
