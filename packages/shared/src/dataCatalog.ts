@@ -193,7 +193,14 @@ export interface QueryPlan {
   aggregate: Aggregate;
   measureColumn: string | null;
   groupByColumn: string | null;
-  filters: { column: string; op: FilterOperator; value: string | number | boolean }[];
+  filters: {
+    column: string;
+    /** Type catalogue du champ — l'exécuteur ne devine PAS d'après la forme
+     * de la valeur (« 2026-01-15 » peut être un numéro de facture). */
+    kind: FieldKind;
+    op: FilterOperator;
+    value: string | number | boolean;
+  }[];
   dateColumn: string | null;
   from: string | null;
   to: string | null;
@@ -227,6 +234,12 @@ function findField(dataset: Dataset, name: string): CatalogField | undefined {
  * qu'il reformule plutôt que d'inventer un chiffre.
  */
 export function compileDataQuery(spec: DataQuerySpec, role: string): CompileResult {
+  // Ce compilateur est LE point de validation (il est exporté et peut être
+  // appelé sans la couche Zod du serveur MCP) : il ne suppose donc rien de
+  // ses entrées, pas même que l'agrégat fasse partie des agrégats.
+  if (!(AGGREGATES as readonly string[]).includes(spec.aggregate)) {
+    return { ok: false, reason: `agrégat inconnu — disponibles : ${AGGREGATES.join(", ")}` };
+  }
   const dataset = DATASETS.find((entry) => entry.id === spec.dataset);
   if (!dataset) {
     const available = visibleDatasets(role)
@@ -269,7 +282,10 @@ export function compileDataQuery(spec: DataQuerySpec, role: string): CompileResu
   if (spec.groupBy) {
     const field = dataset.dimensions.find((entry) => entry.name === spec.groupBy);
     if (!field) {
-      const available = dataset.dimensions.map((entry) => entry.name).join(", ");
+      const available = dataset.dimensions
+        .filter((entry) => !entry.ownerOnly || role === "owner")
+        .map((entry) => entry.name)
+        .join(", ");
       return { ok: false, reason: `regroupement inconnu — disponibles : ${available}` };
     }
     if (field.ownerOnly && role !== "owner") {
@@ -281,6 +297,9 @@ export function compileDataQuery(spec: DataQuerySpec, role: string): CompileResu
 
   const filters: QueryPlan["filters"] = [];
   for (const filter of spec.filters ?? []) {
+    if (!(FILTER_OPERATORS as readonly string[]).includes(filter.op)) {
+      return { ok: false, reason: `opérateur de filtre inconnu : « ${String(filter.op)} »` };
+    }
     const field = findField(dataset, filter.field);
     if (!field) {
       return { ok: false, reason: `filtre sur un champ inconnu : « ${filter.field} »` };
@@ -302,7 +321,7 @@ export function compileDataQuery(spec: DataQuerySpec, role: string): CompileResu
     if (field.kind === "date" && (typeof filter.value !== "string" || !DAY.test(filter.value))) {
       return { ok: false, reason: `« ${field.description} » attend une date AAAA-MM-JJ` };
     }
-    filters.push({ column: field.column, op: filter.op, value: filter.value });
+    filters.push({ column: field.column, kind: field.kind, op: filter.op, value: filter.value });
   }
 
   let dateColumn: string | null = null;
@@ -317,10 +336,21 @@ export function compileDataQuery(spec: DataQuerySpec, role: string): CompileResu
     if (spec.from && spec.to && spec.to < spec.from) {
       return { ok: false, reason: "période invalide (fin avant début)" };
     }
+    // Un filtre explicite sur la MÊME colonne serait écrasé par la période :
+    // le chiffre rendu serait plus large que demandé, sans un mot.
+    if (filters.some((entry) => entry.column === field.column)) {
+      return {
+        ok: false,
+        reason: `« ${field.description} » est déjà filtré : utilisez la période OU le filtre`,
+      };
+    }
     dateColumn = field.column;
   }
 
-  const limit = Math.min(Math.max(spec.limit ?? DEFAULT_LIMIT, 1), MAX_QUERY_LIMIT);
+  // `NaN` traverserait Math.min/Math.max sans broncher et deviendrait un
+  // `take` invalide : une limite non entière retombe sur le défaut.
+  const requested = Number.isInteger(spec.limit) ? (spec.limit as number) : DEFAULT_LIMIT;
+  const limit = Math.min(Math.max(requested, 1), MAX_QUERY_LIMIT);
   return {
     ok: true,
     plan: {

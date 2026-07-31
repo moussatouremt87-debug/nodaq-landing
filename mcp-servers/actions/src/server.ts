@@ -721,7 +721,23 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
           ],
         };
       }
-      const outcome = await runDataQuery(tenantId, compiled.plan);
+      let outcome;
+      try {
+        outcome = await runDataQuery(tenantId, compiled.plan);
+      } catch {
+        // Une erreur Prisma REND SES ARGUMENTS : le `where` complet (donc des
+        // valeurs métier) partirait dans le transcript de la conversation,
+        // serait persisté, et repartirait au modèle au tour suivant. Refus
+        // générique — le contrat « un refus est une réponse » tient.
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ refused: true, reason: "requête non exécutable" }),
+            },
+          ],
+        };
+      }
       return {
         content: [
           {

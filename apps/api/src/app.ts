@@ -562,6 +562,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return reply;
   });
 
+  // Débit du cockpit conversationnel (2.5) : 20 questions par minute et par
+  // utilisateur. Réutilise le limiteur en process du socle webhooks — un
+  // limiteur partagé (Redis) viendra avec le multi-réplique.
+  const askLimiter = new WebhookRateLimiter(20, 60_000);
+
   /*
    * Cockpit conversationnel (2.5) — une question en français, une réponse
    * chiffrée sur les données du tenant.
@@ -577,6 +582,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       .strict()
       .safeParse(request.body);
     if (!body.success) return reply.code(400).send({ error: "invalid payload" });
+
+    // Débit borné : une question déclenche jusqu'à 6 tours de modèle. Sans
+    // plafond, un onglet en boucle consommerait du token sans fin — même
+    // raison que le limiteur de la route webhook, autre surface pilotée de
+    // l'extérieur. Par UTILISATEUR (pas par IP) : la session est authentifiée.
+    if (!askLimiter.take(`${request.tenantId}:${request.authSession.user.id}`)) {
+      return reply.code(429).send({ error: "trop de questions — patientez une minute" });
+    }
 
     const agentRuntime = new ComptaAgent({
       ...agentContext,

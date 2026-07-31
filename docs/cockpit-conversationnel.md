@@ -86,6 +86,26 @@ réponse et la liste des outils). Réponse en `cache-control: private, no-store`
 L'outil `query_business_data` est aussi disponible **dans le chat** : la même
 capacité, sans nouvelle surface à sécuriser.
 
+## Exactitude : ce que les tests figent
+
+Deux régressions d'exactitude, trouvées en revue, ont chacune leur test :
+
+- **Un texte qui ressemble à une date reste un texte.** Le plan transporte le
+  *type catalogue* du champ filtré ; sans lui, un numéro de pièce
+  « 2026-01-15 » partait en `Date` et devenait introuvable — un zéro rendu
+  comme un fait.
+- **Le groupe « non renseigné » n'est pas relégué.** Un `count` groupé trie sur
+  la clé primaire (jamais nulle) et non sur la dimension : trier sur une
+  dimension nullable donnait un compte de 0 au groupe sans valeur, qui partait
+  en dernier et sautait à la coupe — le plus gros groupe tu, à rebours de la
+  doctrine « non-attribuées comptées jamais tues » (3.4).
+
+Deux refus d'ambiguïté complètent l'exactitude : une période **et** un filtre
+sur la même colonne de date sont refusés (la période écrasait le filtre en
+silence, élargissant le chiffre), et une erreur d'exécution devient un refus
+générique — un message Prisma rend ses arguments, donc le `where` complet, et
+il serait persisté dans la conversation puis renvoyé au modèle.
+
 ## Limites assumées (V1)
 
 - **Une dimension de regroupement** à la fois : « CA par client par mois »
@@ -97,3 +117,15 @@ capacité, sans nouvelle surface à sécuriser.
   mouvements passe par deux questions.
 - **Le catalogue est le périmètre** : ajouter un dataset = éditer ce fichier,
   avec son gating. C'est volontairement un geste explicite.
+- **Modules (3.11)** : `query_business_data` n'est pas rattaché à un module.
+  Un tenant qui désactive « Stocks » voit la page masquée et les outils stocks
+  retirés du toolset, mais peut encore compter ses articles par le cockpit.
+  C'est cohérent avec la doctrine 3.11 — les modules ne sont **pas** une
+  frontière de sécurité, seulement du confort de navigation — et c'est dit ici
+  plutôt que découvert.
+- **Fuseau** : les bornes de période sont en UTC. Sur les colonnes horodatées
+  (classeur, mouvements), un enregistrement entre minuit et 1 h peut basculer
+  d'un jour. Les colonnes `date` pures (FEC, immobilisations) ne bougent pas.
+- **Une conversation par question** : chaque appel crée un transcript sous RLS.
+  Aucune rétention n'est encore posée dessus (suivi commun avec les
+  conversations du chat).

@@ -46,7 +46,8 @@ function delegateOf(tx: Tx, model: string): Delegate | null {
 export interface QueryRow {
   /** Valeur de la dimension de regroupement (null = non renseignée). */
   group: string | null;
-  value: number;
+  /** `null` quand aucune ligne ne porte la grandeur : zéro serait un chiffre. */
+  value: number | null;
   /** Nombre de lignes derrière la valeur — un total sur 1 ligne se voit. */
   rows: number;
 }
@@ -65,11 +66,21 @@ function toNumber(value: unknown): number {
   return 0;
 }
 
+/** Lendemain d'un jour « AAAA-MM-JJ », en UTC. */
+function nextDay(day: string): Date {
+  const date = new Date(`${day}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date;
+}
+
 function buildWhere(plan: QueryPlan): Record<string, unknown> {
   const where: Record<string, unknown> = {};
   for (const filter of plan.filters) {
+    // Le TYPE catalogue tranche, jamais la forme de la valeur : un numéro de
+    // facture « 2026-01-15 » est un texte, et le convertir en date le rendrait
+    // introuvable — un zéro présenté comme un fait.
     const value =
-      typeof filter.value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(filter.value)
+      filter.kind === "date" && typeof filter.value === "string"
         ? new Date(`${filter.value}T00:00:00Z`)
         : filter.value;
     switch (filter.op) {
@@ -81,7 +92,12 @@ function buildWhere(plan: QueryPlan): Record<string, unknown> {
         break;
       case "contains":
         // `mode: insensitive` : chercher « sogedis » doit trouver « SOGEDIS ».
-        where[filter.column] = { contains: String(value), mode: "insensitive" };
+        // `%` et `_` sont échappés : Prisma ne le fait pas, et un nom
+        // contenant « % » deviendrait un joker (comptage faux).
+        where[filter.column] = {
+          contains: String(value).replace(/[\\%_]/g, (match) => `\\${match}`),
+          mode: "insensitive",
+        };
         break;
       default:
         where[filter.column] = { [filter.op]: value };
@@ -90,7 +106,9 @@ function buildWhere(plan: QueryPlan): Record<string, unknown> {
   if (plan.dateColumn && (plan.from || plan.to)) {
     where[plan.dateColumn] = {
       ...(plan.from ? { gte: new Date(`${plan.from}T00:00:00Z`) } : {}),
-      ...(plan.to ? { lte: new Date(`${plan.to}T23:59:59Z`) } : {}),
+      // Borne haute EXCLUSIVE au jour suivant : `lte 23:59:59` perdait la
+      // dernière seconde du jour sur une colonne horodatée.
+      ...(plan.to ? { lt: nextDay(plan.to) } : {}),
     };
   }
   return where;
@@ -111,7 +129,7 @@ export async function runDataQuery(tenantId: string, plan: QueryPlan): Promise<Q
   const key = aggregateKey(plan);
   const selection =
     plan.aggregate === "count"
-      ? { _count: { _all: true } }
+      ? { _count: { _all: true, id: true } }
       : { [key]: { [plan.measureColumn as string]: true }, _count: { _all: true } };
 
   return withTenant(tenantId, async (tx) => {
@@ -124,9 +142,16 @@ export async function runDataQuery(tenantId: string, plan: QueryPlan): Promise<Q
       // Tri par l'AGRÉGAT côté base : « les plus gros » doit couper sur la
       // valeur, pas sur l'ordre alphabétique — sinon un top 5 tronqué serait
       // un top 5 arbitraire présenté comme un classement.
+      // `_count: { <colonne> }` compterait les NON-NULS : sur une dimension
+      // nullable, le groupe « non renseigné » aurait un compte de 0, partirait
+      // en dernier et sauterait au `take` — le plus gros groupe tu, à rebours
+      // de la doctrine « non-attribuées comptées jamais tues » (3.4).
+      // Le tri se fait sur `id` — clé primaire, donc JAMAIS nulle, donc
+      // COUNT(id) = COUNT(*). Prisma exige une colonne ici, et prendre la
+      // dimension regroupée compterait ses non-nuls.
       const orderBy =
         plan.aggregate === "count"
-          ? { _count: { [plan.groupByColumn]: "desc" } }
+          ? { _count: { id: "desc" } }
           : { [key]: { [plan.measureColumn as string]: "desc" } };
       const raw = (await delegate.groupBy({
         by: [plan.groupByColumn],
@@ -160,7 +185,7 @@ export async function runDataQuery(tenantId: string, plan: QueryPlan): Promise<Q
       });
       // Tri décroissant sur la valeur : « les plus gros » est la question
       // qu'on pose 9 fois sur 10.
-      rows.sort((a, b) => b.value - a.value);
+      rows.sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
       return { rows, truncated };
     }
 
@@ -170,11 +195,14 @@ export async function runDataQuery(tenantId: string, plan: QueryPlan): Promise<Q
     const value =
       plan.aggregate === "count"
         ? total
-        : toNumber(
-            typeof bucket === "object" && bucket !== null
-              ? bucket[plan.measureColumn as string]
-              : 0,
-          );
+        : total === 0
+          ? // Aucune ligne : la somme n'est pas « 0 €», elle n'existe pas.
+            null
+          : toNumber(
+              typeof bucket === "object" && bucket !== null
+                ? bucket[plan.measureColumn as string]
+                : 0,
+            );
     return { rows: [{ group: null, value, rows: total }], truncated: false };
   });
 }

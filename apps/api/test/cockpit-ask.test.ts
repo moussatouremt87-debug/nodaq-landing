@@ -208,6 +208,67 @@ describe("cockpit conversationnel", () => {
     expect(sawToolResult).toContain('"truncated":false');
   });
 
+  it("compte groupé : le groupe « non renseigné » n'est pas relégué", async () => {
+    // Trier un `count` sur une colonne NULLABLE compterait les non-nuls : le
+    // groupe sans référence aurait un compte de 0 et sauterait à la coupe.
+    nextToolCall = {
+      name: "query_business_data",
+      args: { dataset: "stocks", aggregate: "count", groupBy: "reference" },
+    };
+    await ask("Combien d'articles par référence ?", ownerCookie);
+    expect(sawToolResult).not.toContain("refused");
+    // Les deux articles ont une référence nulle : ils forment UN groupe de 2,
+    // et ce groupe doit être là.
+    expect(sawToolResult).toContain('"group":null');
+    expect(sawToolResult).toContain('"value":2');
+  });
+
+  it("filtre sur un TEXTE qui ressemble à une date reste un texte", async () => {
+    // « 2026-01-15 » peut être un numéro de pièce : le convertir en date le
+    // rendrait introuvable, et le zéro passerait pour un fait.
+    nextToolCall = {
+      name: "query_business_data",
+      args: {
+        dataset: "stocks",
+        aggregate: "count",
+        filters: [{ field: "article", op: "contains", value: "2026-01-15" }],
+      },
+    };
+    await ask("Combien d'articles nommés 2026-01-15 ?", ownerCookie);
+    expect(sawToolResult).not.toContain("refused");
+    expect(sawToolResult).toContain('"value":0');
+  });
+
+  it("période ET filtre sur la même date : refus explicite plutôt qu'écrasement", async () => {
+    nextToolCall = {
+      name: "query_business_data",
+      args: {
+        dataset: "documents",
+        aggregate: "count",
+        filters: [{ field: "date_ajout", op: "gte", value: "2020-01-01" }],
+        from: "2026-01-01",
+      },
+    };
+    await ask("Combien de documents ?", ownerCookie);
+    expect(sawToolResult).toContain("refused");
+    expect(sawToolResult).toContain("déjà filtré");
+  });
+
+  it("une somme sur zéro ligne n'est pas zéro", async () => {
+    nextToolCall = {
+      name: "query_business_data",
+      args: {
+        dataset: "stocks",
+        aggregate: "sum",
+        measure: "quantite",
+        filters: [{ field: "article", op: "eq", value: "article-qui-nexiste-pas" }],
+      },
+    };
+    await ask("Combien de cet article ?", ownerCookie);
+    expect(sawToolResult).toContain('"value":null');
+    expect(sawToolResult).toContain('"rows":0');
+  });
+
   it("question vide ou démesurée : 400", async () => {
     for (const question of ["", "x".repeat(600)]) {
       const res = await app.inject({

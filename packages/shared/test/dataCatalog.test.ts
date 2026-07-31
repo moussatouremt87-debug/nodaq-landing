@@ -73,7 +73,12 @@ describe("compilation — ce qui passe", () => {
     if (!result.ok) return;
     expect(result.plan.measureColumn).toBe("amountCents");
     expect(result.plan.groupByColumn).toBe("customerName");
-    expect(result.plan.filters[0]).toEqual({ column: "settled", op: "eq", value: false });
+    expect(result.plan.filters[0]).toEqual({
+      column: "settled",
+      kind: "boolean",
+      op: "eq",
+      value: false,
+    });
     expect(result.plan.dateColumn).toBe("issuedDate");
     expect(result.plan.limit).toBe(5);
   });
@@ -195,6 +200,66 @@ describe("compilation — ce qui est REFUSÉ", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toContain("période");
+  });
+
+  it("le compilateur ne suppose pas que ses entrées sont valides", () => {
+    // Il est exporté et peut être appelé sans la couche Zod du serveur MCP :
+    // agrégat, opérateur et limite sont donc revalidés ici.
+    expect(
+      compileDataQuery(
+        { dataset: "stocks", aggregate: "median" as never, measure: "quantite" },
+        OWNER,
+      ).ok,
+    ).toBe(false);
+    expect(
+      compileDataQuery(
+        {
+          dataset: "stocks",
+          aggregate: "count",
+          filters: [{ field: "article", op: "regex" as never, value: "x" }],
+        },
+        OWNER,
+      ).ok,
+    ).toBe(false);
+    const nan = compileDataQuery(
+      { dataset: "stocks", aggregate: "count", limit: Number.NaN },
+      OWNER,
+    );
+    expect(nan.ok).toBe(true);
+    if (!nan.ok) return;
+    // NaN traverserait Math.min/Math.max et deviendrait un `take` invalide.
+    expect(Number.isInteger(nan.plan.limit)).toBe(true);
+  });
+
+  it("période ET filtre sur la même date : refus plutôt qu'écrasement silencieux", () => {
+    const result = compileDataQuery(
+      {
+        dataset: "factures_clients",
+        aggregate: "count",
+        filters: [{ field: "date_emission", op: "gte", value: "2020-01-01" }],
+        from: "2026-01-01",
+      },
+      OWNER,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("déjà filtré");
+  });
+
+  it("le plan transporte le TYPE du champ filtré, pas seulement sa valeur", () => {
+    // Sans lui, l'exécuteur devinerait d'après la forme : un numéro de pièce
+    // « 2026-01-15 » deviendrait une date, et resterait introuvable.
+    const result = compileDataQuery(
+      {
+        dataset: "factures_clients",
+        aggregate: "count",
+        filters: [{ field: "numero", op: "eq", value: "2026-01-15" }],
+      },
+      OWNER,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.filters[0]?.kind).toBe("text");
   });
 
   it("PURE : deux compilations identiques donnent le même plan", () => {
