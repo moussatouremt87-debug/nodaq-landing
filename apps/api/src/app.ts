@@ -2783,11 +2783,19 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const body = z
       .object({
         emailBody: z.string().min(10).max(EMAIL_BODY_MAX),
-        from: z.string().max(320).optional(),
+        // Une ADRESSE, pas du texte libre : ce champ est de la PII persistée.
+        from: z.string().email().max(320).optional(),
       })
       .strict()
       .safeParse(request.body);
     if (!body.success) return reply.code(400).send({ error: "invalid payload" });
+
+    // Même borne que le cockpit conversationnel : deux appels modèle par
+    // requête (classifieur + extraction) sur 8 000 caractères, sur une route
+    // pilotée depuis un écran. Sans plafond, une boucle consomme sans fin.
+    if (!askLimiter.take(`${request.tenantId}:${request.authSession.user.id}`)) {
+      return reply.code(429).send({ error: "trop de demandes — patientez une minute" });
+    }
 
     let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
     try {
@@ -2797,6 +2805,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         role: request.membershipRole,
         requestedBy: request.authSession.user.id,
         employee: "commercial",
+        // Sonnette push (2.17) : une proposition préparée depuis la page
+        // attendait un owner qui n'était jamais prévenu.
+        onPendingAction: () => {
+          void notifyPendingAction(request.tenantId).catch((error: unknown) => {
+            request.log.warn(
+              { err: error instanceof Error ? error.name : "Error" },
+              "push record failed",
+            );
+          });
+        },
       });
       const result = await toolset.execute("draft_quote_from_email", {
         emailBody: body.data.emailBody,

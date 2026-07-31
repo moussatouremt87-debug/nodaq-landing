@@ -52,6 +52,29 @@ mauvais article coûte plus cher que ne rien proposer, parce que l'humain relit
 une ligne vide et ne relit pas une ligne qui a l'air juste. `unmatchedCount`
 est remonté et affiché.
 
+## Ce que voit l'humain qui valide
+
+Une validation 1 clic sur un contenu produit à partir du message d'un inconnu
+serait aveugle si la file n'en disait rien. Le détail affiche donc la
+**provenance** (« reçu par e-mail de… — contenu écrit par un tiers, à
+relire »), les **lignes** avec leur verdict de rapprochement, le nombre de
+lignes non reconnues, une éventuelle **troncature du référentiel** (une ligne
+peut être « non reconnue » à tort si l'article n'était pas dans la tranche
+lue), et le rappel permanent que les prix restent à fixer.
+
+## Ce que fait l'approbation — et ce qu'elle ne fait pas
+
+Approuver **prépare**, n'émet pas : il n'existe aucune API d'écriture vers un
+facturier en V1. L'exécuteur renvoie donc `emitted: false` et invite à
+reprendre la proposition dans l'outil de facturation — même honnêteté que la
+réponse aux avis clients (3.8), dont la publication reste manuelle. Annoncer
+« devis créé » ferait croire à une émission qui n'a pas eu lieu.
+
+Une fois l'action terminée (approuvée **ou** rejetée), le payload est
+**réduit** : le nom du prospect, son adresse et le texte de sa demande s'en
+vont, les compteurs restent. Un tiers qui a écrit une fois n'a pas à rester
+en base indéfiniment (art. 5.1.c).
+
 ## Surface
 
 | Route | Rôle | Accès |
@@ -78,3 +101,10 @@ collé disparaît de l'écran une fois traité.
   classeur, lui, sait lire une photo — le rapprochement des deux viendra).
 - **Le numéro de devis** n'est pas attribué : il vient du facturier au moment
   de l'émission, pas d'une proposition.
+- **Le chat reste un chemin plus exposé.** L'outil est aussi disponible dans
+  `/employees/compta/chat`, où le texte collé entre dans une boucle **avec**
+  outils. La page `/devis` est le chemin sûr, parce que son pipeline n'en a
+  aucun — c'est la raison d'être de la page, pas un doublon d'interface.
+- **Modules (3.11)** : `/devis` n'est rattaché à aucun module ; la page reste
+  visible quel que soit le vertical. Cohérent avec la doctrine (les modules ne
+  sont pas une frontière de sécurité), et dit ici plutôt que découvert.

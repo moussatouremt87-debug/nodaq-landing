@@ -84,17 +84,22 @@ export function parseStatusEvent(payload: unknown): StatusEventRef | null {
 /**
  * Shrinks a finished action's payload (art. 5.1.c — minimization).
  *
- * `submit_einvoice` is the only payload that carries a FULL customer invoice
- * (name, address, SIRET, line labels): the executor needs it to rebuild the
- * document deterministically. Once the action is executed or rejected, that
- * need is gone — the registry keeps the hash, and the queue has no reason to
- * hold a copy of the invoice forever. Returns null when there is nothing to
- * shrink.
+ * Two payload types carry personal or third-party data they only needed
+ * BEFORE the human decided:
+ *  - `submit_einvoice` holds a FULL customer invoice (name, address, SIRET,
+ *    line labels) so the executor can rebuild the document deterministically;
+ *  - `create_quote` prepared from an e-mail (2.7) holds the PROSPECT's name,
+ *    address and the wording of their request — data about someone who is
+ *    not even a customer yet.
+ *
+ * Once executed or rejected, that need is gone. Returns null when there is
+ * nothing to shrink.
  */
 export function reduceFinishedPayload(
   type: string,
   payload: unknown,
 ): Prisma.InputJsonValue | null {
+  if (type === "create_quote") return reduceQuotePayload(payload);
   if (type !== "submit_einvoice") return null;
   const data = payload as Record<string, unknown> | null;
   const invoice = (data?.invoice ?? null) as Record<string, unknown> | null;
@@ -107,6 +112,24 @@ export function reduceFinishedPayload(
     currency: typeof data?.currency === "string" ? data.currency : null,
     profile: typeof data?.profile === "string" ? data.profile : null,
     label: typeof data?.label === "string" ? data.label : null,
+  } as Prisma.InputJsonValue;
+}
+
+/**
+ * Réduction d'une proposition de devis terminée : on garde de quoi RELIRE la
+ * file (combien de lignes, d'où venait la demande), on jette ce qui identifie
+ * le prospect et le contenu de sa demande. Un tiers qui a écrit une fois ne
+ * doit pas rester en base indéfiniment.
+ */
+function reduceQuotePayload(payload: unknown): Prisma.InputJsonValue {
+  const data = payload as Record<string, unknown> | null;
+  const quote = (data?.quote ?? null) as Record<string, unknown> | null;
+  const lines = Array.isArray(quote?.lines) ? quote.lines.length : 0;
+  return {
+    reduced: true,
+    source: typeof data?.source === "string" ? data.source : null,
+    lines,
+    unmatchedCount: typeof quote?.unmatchedCount === "number" ? quote.unmatchedCount : null,
   } as Prisma.InputJsonValue;
 }
 

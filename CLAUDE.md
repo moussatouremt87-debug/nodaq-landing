@@ -64,7 +64,12 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > — vendre au coût serait une erreur de gestion ; rapprochement au référentiel
 > `quoteRequest.ts` (pur) = exact | probable | AUCUNE (jamais forcé : une
 > ligne vide se relit, une ligne fausse ne se relit pas), `unmatchedCount`
-> jamais tu ; corps jamais logué ni renvoyé (`docs/devis-email.md`).
+> jamais tu ; troncature du référentiel DITE ; débit borné (2 appels modèle
+> par requête) ; approuver PRÉPARE sans émettre (`emitted: false` — aucune API
+> facturier en V1) et RÉDUIT le payload (nom/adresse/demande du prospect
+> effacés, compteurs gardés) ; la file affiche provenance + lignes + non
+> reconnues avant validation ; corps jamais logué ni renvoyé
+> (`docs/devis-email.md`).
 > **Banque DSP2 (2.15)** : `getBankClient()` = Qonto direct sinon agrégateur Bridge
 > (toutes banques FR) — TOUS les consommateurs bancaires passent par lui, jamais par
 > un client direct ; identifiants Bridge (clientId/clientSecret/userUuid) testés

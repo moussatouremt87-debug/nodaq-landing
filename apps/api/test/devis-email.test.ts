@@ -213,6 +213,29 @@ describe("devis depuis un e-mail", () => {
     expect(JSON.stringify(action.payload)).not.toContain("DJ-20");
   });
 
+  it("action terminée : le prospect ne reste pas en file", async () => {
+    const res = await draft("Bonjour, devis pour 2 disjoncteurs 20A.", memberCookie);
+    const { pendingActionId } = res.json() as { pendingActionId: string };
+
+    const approved = await app.inject({
+      method: "POST",
+      url: `/pending-actions/${pendingActionId}/approve`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(approved.statusCode).toBe(200);
+    // Le devis est PRÉPARÉ, pas émis : le produit ne prétend pas le contraire.
+    expect(JSON.stringify(approved.json())).toContain("emitted");
+
+    const action = await admin.pendingAction.findUniqueOrThrow({
+      where: { id: pendingActionId },
+    });
+    const payload = JSON.stringify(action.payload);
+    // Nom, adresse et demande du prospect s'en vont ; les compteurs restent.
+    expect(payload).not.toContain("M. Bernard");
+    expect(payload).not.toContain("prospect@example.com");
+    expect(payload).toContain('"lines"');
+  });
+
   it("réponse jamais mise en cache", async () => {
     const res = await draft("Bonjour, un devis pour 5 disjoncteurs.", memberCookie);
     expect(res.headers["cache-control"]).toBe("private, no-store");

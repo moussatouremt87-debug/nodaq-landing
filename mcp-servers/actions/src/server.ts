@@ -31,6 +31,7 @@ import { analyzeCustomerSignals } from "./customerSignals.js";
 import { runDataQuery } from "./dataQuery.js";
 import {
   buildQuoteProposal,
+  CATALOG_WINDOW,
   EMAIL_BODY_MAX,
   QUOTE_EXTRACTION_PROMPT,
   QuoteRequestExtraction,
@@ -796,9 +797,13 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       const catalog = await withTenant(tenantId, (tx) =>
         tx.stockItem.findMany({
           select: { id: true, name: true, sku: true, unit: true },
-          take: 500,
+          // Ordre STABLE : sans lui, la tranche lue varie d'un appel à
+          // l'autre et un même e-mail donne deux propositions différentes.
+          orderBy: { name: "asc" },
+          take: CATALOG_WINDOW + 1,
         }),
       );
+      const catalogTruncated = catalog.length > CATALOG_WINDOW;
 
       const requestId = `quote-email-${randomUUID()}`;
       const answer = await route({
@@ -821,7 +826,18 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
         throw new Error("quote extraction returned non-JSON output");
       }
       const extraction = QuoteRequestExtraction.parse(parsed);
-      const proposal = buildQuoteProposal(extraction, catalog as CatalogItem[]);
+      const proposal = buildQuoteProposal(
+        extraction,
+        catalog.slice(0, CATALOG_WINDOW).map(
+          (item): CatalogItem => ({
+            id: item.id,
+            name: item.name,
+            sku: item.sku,
+            unit: item.unit,
+          }),
+        ),
+        catalogTruncated,
+      );
 
       const pendingAction = await withTenant(tenantId, (tx) =>
         tx.pendingAction.create({
@@ -840,6 +856,7 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
                 deadline: proposal.deadline,
                 lines: proposal.lines,
                 unmatchedCount: proposal.unmatchedCount,
+                catalogTruncated: proposal.catalogTruncated,
               },
               source: "email",
               // Expéditeur conservé pour que l'humain sache À QUI répondre —
@@ -861,6 +878,7 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
               status: "pending_validation",
               lines: proposal.lines.length,
               unmatchedCount: proposal.unmatchedCount,
+              catalogTruncated: proposal.catalogTruncated,
               pricing: "à fixer par le dirigeant",
             }),
           },
