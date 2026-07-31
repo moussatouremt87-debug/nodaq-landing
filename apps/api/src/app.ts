@@ -2694,6 +2694,40 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     }
   });
 
+  // Rapport mensuel + anomalies (2.11) : owner-only — CA du mois, encours échu
+  // et nom du meilleur client. Même chemin que l'agent (outil du toolset lié au
+  // tenant) : une seule implémentation, donc un seul jeu de seuils.
+  app.get("/rapports/mensuel", { preHandler: ownerRoute }, async (request, reply) => {
+    void reply.header("cache-control", "private, no-store");
+    const query = z
+      .object({ month: z.string().regex(/^\d{4}-\d{2}$/).optional() })
+      .safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send({ error: "invalid query" });
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+      });
+      const result = await toolset.execute("build_monthly_report", {
+        ...(query.data.month !== undefined ? { month: query.data.month } : {}),
+      });
+      return JSON.parse(result) as unknown;
+    } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "module désactivé" });
+      }
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "monthly report unavailable",
+      );
+      return reply.code(503).send({ error: "rapport indisponible" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
+
   // --- Veille réglementaire (3.7) — owner-only : profil stratégique -------
   // (vertical + effectif RH). Obligations = catalogue versionné sourcé,
   // information générale, jamais un conseil juridique.

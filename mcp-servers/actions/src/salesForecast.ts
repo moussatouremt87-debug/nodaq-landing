@@ -35,8 +35,14 @@ export interface SalesForecast {
   method: "regression-lineaire" | "moyenne" | "aucune-donnee";
 }
 
-/** Excluded from revenue: not (yet) real sales. */
-const EXCLUDED_STATUSES = new Set(["draft", "cancelled", "canceled", "estimate"]);
+/** Excluded from revenue: not (yet) real sales. Shared with the monthly report
+ * (2.11) so the same invoice never counts on one screen and not on the other. */
+export const EXCLUDED_STATUSES: ReadonlySet<string> = new Set([
+  "draft",
+  "cancelled",
+  "canceled",
+  "estimate",
+]);
 
 /**
  * STRICT amount parsing: a malformed amount must be discarded, never silently
@@ -45,7 +51,7 @@ const EXCLUDED_STATUSES = new Set(["draft", "cancelled", "canceled", "estimate"]
  */
 const AMOUNT_RE = /^-?\d+(?:[.,]\d{1,2})?$/;
 
-function euroToCents(amount: string | number): number | null {
+export function euroToCents(amount: string | number): number | null {
   if (typeof amount === "number") {
     return Number.isFinite(amount) ? Math.round(amount * 100) : null;
   }

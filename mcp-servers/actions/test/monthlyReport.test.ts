@@ -1,0 +1,213 @@
+import { describe, expect, it } from "vitest";
+import {
+  ANOMALY_RULES_VERSION,
+  ANOMALY_THRESHOLDS,
+  buildMonthlyReport,
+} from "../src/monthlyReport.js";
+import type { ReportInvoice } from "../src/monthlyReport.js";
+
+/*
+ * Rapport mensuel + anomalies (2.11). Le premier ticket qui SYNTHÉTISE : le
+ * risque n'est plus la fuite, c'est l'AFFIRMATION. Les tests portent donc sur
+ * ce que le rapport refuse de conclure — sans historique, sans référence,
+ * sans échantillon.
+ */
+
+function invoice(date: string, amount: number, extra: Partial<ReportInvoice> = {}): ReportInvoice {
+  return { date, amount, currency: "EUR", status: "paid", ...extra };
+}
+
+/** Trois mois à 10 000 € pour servir de référence stable. */
+const HISTORY: ReportInvoice[] = [
+  invoice("2026-01-10", 5_000),
+  invoice("2026-01-20", 5_000),
+  invoice("2026-02-10", 5_000),
+  invoice("2026-02-20", 5_000),
+  invoice("2026-03-10", 5_000),
+  invoice("2026-03-20", 5_000),
+];
+
+describe("config", () => {
+  it("seuils versionnés et datés", () => {
+    expect(ANOMALY_RULES_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(ANOMALY_THRESHOLDS.revenueDropRatio).toBeGreaterThan(0);
+  });
+});
+
+describe("ce que le rapport REFUSE de conclure", () => {
+  it("historique insuffisant : la règle n'est pas évaluée, et c'est DIT", () => {
+    const report = buildMonthlyReport([invoice("2026-04-05", 1_000)], "2026-04");
+    expect(report.anomalies.some((a) => a.kind === "ca_en_baisse")).toBe(false);
+    expect(report.referenceRevenueCents).toBeNull();
+    expect(report.notEvaluated.some((line) => line.includes("historique"))).toBe(true);
+  });
+
+  it("référence à zéro : aucune comparaison (« +∞ % » n'est pas un constat)", () => {
+    const months = [
+      invoice("2026-01-10", 0),
+      invoice("2026-02-10", 0),
+      invoice("2026-03-10", 0),
+      invoice("2026-04-10", 5_000),
+    ];
+    const report = buildMonthlyReport(months, "2026-04");
+    expect(report.anomalies.some((a) => a.kind === "ca_en_baisse")).toBe(false);
+    expect(report.notEvaluated.some((line) => line.includes("zéro"))).toBe(true);
+  });
+
+  it("trop peu de factures : pas de « facture inhabituelle »", () => {
+    const report = buildMonthlyReport(
+      [invoice("2026-04-10", 100_000), invoice("2026-04-11", 100)],
+      "2026-04",
+    );
+    expect(report.anomalies.some((a) => a.kind === "facture_inhabituelle")).toBe(false);
+    expect(report.notEvaluated.some((line) => line.includes("Facture inhabituelle"))).toBe(true);
+  });
+
+  it("aucun impayé le mois précédent : pas de « hausse » sans référence", () => {
+    const report = buildMonthlyReport(
+      [...HISTORY, invoice("2026-04-10", 8_000, { status: "late" })],
+      "2026-04",
+    );
+    expect(report.anomalies.some((a) => a.kind === "impayes_en_hausse")).toBe(false);
+    expect(report.notEvaluated.some((line) => line.includes("impayés"))).toBe(true);
+  });
+});
+
+describe("anomalies — des écarts MESURÉS", () => {
+  it("baisse du CA : valeur, référence et seuil sont tous portés", () => {
+    const report = buildMonthlyReport([...HISTORY, invoice("2026-04-10", 5_000)], "2026-04");
+    const anomaly = report.anomalies.find((a) => a.kind === "ca_en_baisse");
+    expect(anomaly).toBeDefined();
+    expect(anomaly?.observed).toBe(500_000);
+    expect(anomaly?.reference).toBe(1_000_000);
+    expect(anomaly?.threshold).toBe(ANOMALY_THRESHOLDS.revenueDropRatio);
+    expect(anomaly?.sampleSize).toBe(3);
+    // La phrase porte les chiffres : le modèle n'a rien à inventer.
+    expect(anomaly?.reason).toContain("−50 %");
+    expect(anomaly?.reason).toContain("seuil");
+  });
+
+  it("une baisse SOUS le seuil n'est pas signalée", () => {
+    const report = buildMonthlyReport([...HISTORY, invoice("2026-04-10", 9_000)], "2026-04");
+    expect(report.anomalies.some((a) => a.kind === "ca_en_baisse")).toBe(false);
+  });
+
+  it("facture inhabituelle : comparée à la MÉDIANE, pas à la moyenne", () => {
+    // Avec une moyenne, la grosse facture se masquerait elle-même.
+    const report = buildMonthlyReport(
+      [...HISTORY, invoice("2026-04-10", 60_000), invoice("2026-04-11", 5_000)],
+      "2026-04",
+    );
+    const anomaly = report.anomalies.find((a) => a.kind === "facture_inhabituelle");
+    expect(anomaly).toBeDefined();
+    expect(anomaly?.reference).toBe(500_000);
+    expect(anomaly?.reason).toContain("pas forcément une erreur");
+  });
+
+  it("concentration client : part chiffrée, seuil affiché", () => {
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-04-10", 9_000, { customer: { id: "c1", name: "Gros Client" } }),
+        invoice("2026-04-11", 1_000, { customer: { id: "c2", name: "Petit" } }),
+      ],
+      "2026-04",
+    );
+    const anomaly = report.anomalies.find((a) => a.kind === "concentration_client");
+    expect(anomaly).toBeDefined();
+    expect(report.topCustomer?.name).toBe("Gros Client");
+    expect(report.topCustomer?.share).toBeCloseTo(0.9, 2);
+    expect(anomaly?.reason).toContain("90 %");
+  });
+
+  it("impayés en hausse : comparés au mois précédent", () => {
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-03-25", 1_000, { status: "late" }),
+        invoice("2026-04-10", 5_000, { status: "late" }),
+      ],
+      "2026-04",
+    );
+    const anomaly = report.anomalies.find((a) => a.kind === "impayes_en_hausse");
+    expect(anomaly).toBeDefined();
+    expect(anomaly?.observed).toBe(500_000);
+    expect(anomaly?.reference).toBe(100_000);
+  });
+});
+
+describe("invariants", () => {
+  it("devise étrangère et lignes illisibles : comptées, jamais converties", () => {
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-04-10", 5_000, { currency: "USD" }),
+        invoice("2026-04-11", 5_000, { date: null }),
+        { amount: null, date: "2026-04-12", currency: "EUR", status: "paid", customer: null },
+      ],
+      "2026-04",
+    );
+    expect(report.unusableCount).toBe(3);
+    expect(report.revenueCents).toBe(0);
+  });
+
+  it("brouillons et annulées : écartés du CA comme dans la prévision, et comptés", () => {
+    // Deux écrans du même produit ne peuvent pas compter la même facture
+    // différemment : la liste d'exclusion est celle de 3.1, partagée.
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-04-10", 5_000),
+        invoice("2026-04-11", 90_000, { status: "draft" }),
+        invoice("2026-04-12", 90_000, { status: "cancelled" }),
+      ],
+      "2026-04",
+    );
+    expect(report.revenueCents).toBe(500_000);
+    expect(report.excludedCount).toBe(2);
+    // Et un brouillon démesuré ne devient pas une « facture inhabituelle ».
+    expect(report.anomalies.some((a) => a.kind === "facture_inhabituelle")).toBe(false);
+  });
+
+  it("montant malformé : écarté, jamais tronqué en un CA faux", () => {
+    // « 12abc » lu comme 12 € entrerait dans le rapport comme une donnée sûre.
+    const report = buildMonthlyReport(
+      [...HISTORY, invoice("2026-04-10", 5_000), invoice("2026-04-11", "12abc" as never)],
+      "2026-04",
+    );
+    expect(report.revenueCents).toBe(500_000);
+    expect(report.unusableCount).toBe(1);
+  });
+
+  it("chaque anomalie porte une phrase chiffrée et un seuil", () => {
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-03-25", 1_000, { status: "late" }),
+        invoice("2026-04-10", 5_000, { status: "late", customer: { id: "c1", name: "X" } }),
+      ],
+      "2026-04",
+    );
+    expect(report.anomalies.length).toBeGreaterThan(0);
+    for (const anomaly of report.anomalies) {
+      expect(anomaly.reason.length).toBeGreaterThan(30);
+      expect(anomaly.threshold).toBeGreaterThan(0);
+      expect(anomaly.sampleSize).toBeGreaterThan(0);
+    }
+  });
+
+  it("label PERMANENT : un écart mesuré, pas un jugement", () => {
+    const report = buildMonthlyReport(HISTORY, "2026-03");
+    expect(report.label).toContain("écart mesuré");
+    expect(report.label).toContain("pas un jugement");
+  });
+
+  it("mois invalide : refus", () => {
+    expect(() => buildMonthlyReport([], "avril")).toThrow();
+    expect(() => buildMonthlyReport([], "2026-4")).toThrow();
+  });
+
+  it("PURE : deux appels identiques donnent le même rapport", () => {
+    expect(buildMonthlyReport(HISTORY, "2026-03")).toEqual(buildMonthlyReport(HISTORY, "2026-03"));
+  });
+});
