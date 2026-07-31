@@ -348,3 +348,35 @@ export class DemoSilaeClient extends SilaeClient {
     };
   }
 }
+
+
+/*
+ * Démo PDP (2.4) : le cycle de vie complet sans réseau — dépôt accepté,
+ * statut qui progresse. Sert la démonstration et les tests ; jamais présenté
+ * comme un dépôt réel (le connecteur est en statut `demo`).
+ */
+export class DemoPdpClient {
+  private counter = 0;
+
+  deposit(input: { invoiceNumber: string }): Promise<{ reference: string; status: string | null }> {
+    this.counter += 1;
+    return Promise.resolve({
+      reference: `demo-${input.invoiceNumber}-${this.counter}`,
+      status: "deposee",
+    });
+  }
+
+  getStatus(reference: string): Promise<{ status: string; updatedAt: string | null }> {
+    return Promise.resolve({ status: reference.includes("demo-") ? "recue" : "deposee", updatedAt: null });
+  }
+
+  reportTransactions(input: {
+    periodStart: string;
+  }): Promise<{ reference: string; status: string | null }> {
+    return Promise.resolve({ reference: `demo-ereporting-${input.periodStart}`, status: "deposee" });
+  }
+
+  testConnection(): Promise<void> {
+    return Promise.resolve();
+  }
+}

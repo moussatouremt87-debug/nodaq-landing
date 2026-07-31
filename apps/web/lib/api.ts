@@ -160,7 +160,7 @@ export const listConnectors = (): Promise<ConnectorSummary[]> =>
   );
 
 export const connectConnector = (
-  type: "pennylane" | "qonto" | "bridge" | "silae",
+  type: "pennylane" | "qonto" | "bridge" | "silae" | "pdp",
   credentials: Record<string, string>,
 ): Promise<void> =>
   call(z.object({ type: z.string() }), "/connectors", {
@@ -1054,6 +1054,73 @@ export const listWebhookEvents = (): Promise<WebhookEvent[]> =>
   call(z.object({ events: z.array(WebhookEvent) }), "/webhooks/events").then(
     (body) => body.events,
   );
+
+/*
+ * Soumission PDP + e-reporting (2.4). Le dépôt n'est jamais appelé d'ici :
+ * la page PROPOSE, la file de validation exécute — l'envoi sur le réseau
+ * national engage l'entreprise.
+ */
+export const EInvoiceSubmission = z.object({
+  id: z.string(),
+  invoiceNumber: z.string(),
+  profile: z.string(),
+  direction: z.string(),
+  status: z.string(),
+  pdpReference: z.string().nullable(),
+  documentHash: z.string(),
+  amountCents: z.number(),
+  currency: z.string(),
+  statusHistory: z.unknown(),
+  submittedAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type EInvoiceSubmission = z.infer<typeof EInvoiceSubmission>;
+
+export const EInvoiceSubmissions = z.object({
+  items: z.array(EInvoiceSubmission),
+  statusLabels: z.record(z.string()),
+  rulesVersion: z.string(),
+});
+export type EInvoiceSubmissions = z.infer<typeof EInvoiceSubmissions>;
+
+export const EReportingPreview = z.object({
+  periodStart: z.string(),
+  periodEnd: z.string(),
+  transactionCount: z.number(),
+  totalCents: z.number(),
+  currency: z.string(),
+  outOfPeriodCount: z.number(),
+  unusableCount: z.number(),
+  otherCurrencyCount: z.number(),
+  vatDerivable: z.boolean(),
+  caveats: z.array(z.string()),
+  truncated: z.boolean(),
+});
+export type EReportingPreview = z.infer<typeof EReportingPreview>;
+
+export const getSubmissions = (): Promise<EInvoiceSubmissions> =>
+  call(EInvoiceSubmissions, "/factures/soumissions");
+
+export const previewEReporting = (
+  periodStart: string,
+  periodEnd: string,
+): Promise<EReportingPreview> =>
+  call(
+    EReportingPreview,
+    `/factures/ereporting/apercu?periodStart=${encodeURIComponent(periodStart)}&periodEnd=${encodeURIComponent(periodEnd)}`,
+  );
+
+export const proposeEReporting = (declaration: {
+  periodStart: string;
+  periodEnd: string;
+  totalCents: number;
+  vatCents: number;
+  transactionCount: number;
+}): Promise<{ pendingActionId: string; period: string }> =>
+  call(z.object({ pendingActionId: z.string(), period: z.string() }), "/factures/ereporting", {
+    method: "POST",
+    body: JSON.stringify(declaration),
+  });
 
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {

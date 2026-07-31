@@ -35,5 +35,9 @@ export {
 export type { DemoSilaeAbsence } from "./demo.js";
 export type { RegistryOptions } from "./registry.js";
 export { FEC_CONNECTOR_TYPE, FEC_CONNECTOR_STATUS, FecPennylaneClient } from "./fec.js";
+export { HttpPdpClient, PdpCredentials } from "./pdp.js";
+export type { PdpClient, PdpDeposit } from "./pdp.js";
+export { getPdpClient } from "./registry.js";
+export { DemoPdpClient } from "./demo.js";
 export { createConnectorsMcpServer } from "./server.js";
 export type { ConnectorsServerContext } from "./server.js";

@@ -7,11 +7,14 @@ import type { ToolsetContext } from "@nodaq/agent-runtime";
 import { prisma, Prisma, resolveWebhookEndpoint, withOps, withTenant } from "@nodaq/db";
 import { deriveFixedAssets, deriveReceivables, parseFec } from "@nodaq/fec";
 import {
+  aggregateEReporting,
   auditInvoice,
   buildCiiXml,
   buildFacturXPdf,
   extractFacturXXml,
   FacturXInvoice,
+  LIFECYCLE_RULES_VERSION,
+  STATUS_LABELS,
 } from "@nodaq/facturx";
 import {
   BridgeClient,
@@ -22,6 +25,8 @@ import {
   FEC_CONNECTOR_TYPE,
   getBankClient,
   getSilaeClient,
+  HttpPdpClient,
+  PdpCredentials,
   PennylaneClient,
   QontoClient,
   SilaeClient,
@@ -62,6 +67,7 @@ import {
   recordPushEvent,
   tenantOwnerIds,
 } from "./push.js";
+import { createPdpWebhookHandler } from "./einvoice.js";
 import { createSupportStorage } from "./support/storage.js";
 import type { SupportStorage } from "./support/storage.js";
 import { createTemMailer } from "./support/tem.js";
@@ -429,6 +435,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           const result = await executor(action.payload, {
             tenantId: request.tenantId,
             userId: request.authSession.user.id,
+            connectors: agentContext,
           });
           outcome = { status: "executed", result: (result ?? {}) as object };
         } catch (error) {
@@ -545,6 +552,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       .strict(),
     // SIRH/paie (3.10) : accès via middleware partenaire Silae.
     silae: SilaeCredentials,
+    // Plateforme de dématérialisation (2.4) : aucun opérateur en dur.
+    pdp: PdpCredentials,
   } as const;
 
   /**
@@ -569,6 +578,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         const client = new BridgeClient(
           ConnectorCredentials.bridge.parse(credentials),
           agentContext.bridgeBaseUrl,
+        );
+        await client.testConnection();
+      } else if (type === "pdp") {
+        const client = new HttpPdpClient(
+          PdpCredentials.parse(credentials),
+          agentContext.pdpBaseUrl,
         );
         await client.testConnection();
       } else if (type === "silae") {
@@ -2999,6 +3014,213 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     },
   );
 
+  // --- Soumission PDP + e-reporting (2.4) ---------------------------------
+  // Émettre une facture sur le réseau national ENGAGE l'entreprise : le dépôt
+  // est irréversible, horodaté, et opposable. Il ne part donc JAMAIS de la
+  // boucle agent — la route prépare, l'humain valide, l'exécuteur dépose
+  // (règle HITL du CLAUDE.md, comme adjust_stock avant lui).
+
+  /** Métadonnées de suivi SEULEMENT : ni PDF, ni XML, ni ligne de facture. */
+  const SUBMISSION_SELECT = {
+    id: true,
+    invoiceNumber: true,
+    profile: true,
+    direction: true,
+    status: true,
+    pdpReference: true,
+    documentHash: true,
+    amountCents: true,
+    currency: true,
+    statusHistory: true,
+    submittedAt: true,
+    createdAt: true,
+    updatedAt: true,
+  } as const;
+
+  app.post(
+    "/factures/soumettre",
+    { preHandler: ownerRoute, bodyLimit: 2 * 1024 * 1024 },
+    async (request, reply) => {
+      const body = z
+        .object({
+          invoice: z.unknown(),
+          // MINIMUM/BASIC_WL ne sont pas générables (2.3) : les proposer ici
+          // ferait échouer l'exécution APRÈS validation humaine.
+          profile: z.enum(["BASIC", "EN16931"]).default("EN16931"),
+        })
+        .strict()
+        .safeParse(request.body);
+      if (!body.success) return reply.code(400).send({ error: "invalid payload" });
+
+      const invoice = FacturXInvoice.safeParse(body.data.invoice);
+      // Jamais l'erreur Zod telle quelle : elle citerait les valeurs reçues.
+      if (!invoice.success) return reply.code(400).send({ error: "facture invalide" });
+
+      const audit = auditInvoice(invoice.data);
+      if (!audit.issuable) {
+        // Une facture non conforme n'entre même pas dans la file : la faire
+        // valider puis échouer au dépôt userait la confiance dans la file.
+        return reply.code(422).send({ error: "facture non conforme", audit });
+      }
+
+      const already = await withTenant(request.tenantId, (tx) =>
+        tx.eInvoiceSubmission.findFirst({
+          where: { invoiceNumber: invoice.data.number, direction: "emission" },
+          select: { id: true, status: true },
+        }),
+      );
+      if (already) {
+        // Idempotence AVANT la file : une facture déjà déposée ne se
+        // re-propose pas (le dépôt en double est visible par le client).
+        return reply.code(409).send({ error: "facture déjà déposée", status: already.status });
+      }
+
+      const action = await withTenant(request.tenantId, (tx) =>
+        tx.pendingAction.create({
+          data: {
+            tenantId: request.tenantId,
+            type: "submit_einvoice",
+            requestedBy: request.authSession.user.id,
+            employee: "compta",
+            // Le payload porte la FACTURE NORMALISÉE, jamais le PDF : le
+            // générateur est pur, l'exécuteur le reconstruit à l'identique et
+            // REJOUE l'audit juste avant de déposer.
+            payload: {
+              invoice: invoice.data,
+              profile: body.data.profile,
+              // Champs d'AFFICHAGE pour la file (l'exécuteur les ignore).
+              label: `Dépôt de la facture ${invoice.data.number}`,
+              grossCents: invoice.data.totals.grossCents,
+              currency: invoice.data.currency,
+              rulesVersion: audit.rulesVersion,
+            } as Prisma.InputJsonValue,
+          },
+          select: { id: true },
+        }),
+      );
+      return reply.code(202).send({ pendingActionId: action.id, status: "prete", audit });
+    },
+  );
+
+  /** Suivi des dépôts — owner only : numéros et montants de factures. */
+  app.get("/factures/soumissions", { preHandler: ownerRoute }, async (request, reply) => {
+    const query = z
+      .object({
+        direction: z.enum(["emission", "ereporting"]).optional(),
+        limit: z.coerce.number().int().min(1).max(200).default(100),
+      })
+      .safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send({ error: "invalid query" });
+    const items = await withTenant(request.tenantId, (tx) =>
+      tx.eInvoiceSubmission.findMany({
+        where: query.data.direction ? { direction: query.data.direction } : {},
+        orderBy: { createdAt: "desc" },
+        take: query.data.limit,
+        select: SUBMISSION_SELECT,
+      }),
+    );
+    void reply.header("cache-control", "private, no-store");
+    return { items, statusLabels: STATUS_LABELS, rulesVersion: LIFECYCLE_RULES_VERSION };
+  });
+
+  // E-reporting : ce qui part est un AGRÉGAT (totaux de la période), jamais
+  // le détail nominatif des clients — c'est toute la différence avec
+  // l'e-invoicing, et elle est structurelle ici.
+
+  /** Pré-remplissage depuis le facturier — ce n'est PAS une déclaration. */
+  app.get("/factures/ereporting/apercu", { preHandler: ownerRoute }, async (request, reply) => {
+    const query = z
+      .object({
+        periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        periodEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      })
+      .safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send({ error: "invalid query" });
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+      });
+      const raw = JSON.parse(await toolset.execute("pennylane_get_invoices", { limit: 100 })) as {
+        items?: { amount?: string | number | null; date?: string | null; currency?: string | null }[];
+      };
+      const ledger = (raw.items ?? []).map((invoice) => {
+        const value = typeof invoice.amount === "string" ? Number(invoice.amount) : invoice.amount;
+        return {
+          amountCents:
+            typeof value === "number" && Number.isFinite(value) ? Math.round(value * 100) : null,
+          date: invoice.date ?? null,
+          currency: invoice.currency ?? null,
+        };
+      });
+      const aggregate = aggregateEReporting(ledger, query.data.periodStart, query.data.periodEnd);
+      void reply.header("cache-control", "private, no-store");
+      // `truncated` : le facturier est lu par page — un agrégat partiel ne se
+      // présente jamais comme complet.
+      return { ...aggregate, truncated: (raw.items ?? []).length >= 100 };
+    } catch (error) {
+      if (isUnknownTool(error)) return reply.code(409).send({ error: "module désactivé" });
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "ereporting preview unavailable",
+      );
+      return reply.code(503).send({ error: "aperçu indisponible" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
+
+  /** Transmission de l'agrégat : proposée, validée par l'humain, puis émise. */
+  app.post("/factures/ereporting", { preHandler: ownerRoute }, async (request, reply) => {
+    const body = z
+      .object({
+        periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        periodEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        totalCents: z.number().int().min(0).max(1_000_000_000_00),
+        // La TVA n'est PAS dérivée du facturier (cf. aggregateEReporting) :
+        // elle est DÉCLARÉE, bornée au total.
+        vatCents: z.number().int().min(0).max(1_000_000_000_00),
+        transactionCount: z.number().int().min(0).max(1_000_000),
+      })
+      .strict()
+      .safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: "invalid payload" });
+    if (body.data.vatCents > body.data.totalCents) {
+      return reply.code(422).send({ error: "TVA supérieure au total déclaré" });
+    }
+    if (body.data.periodEnd < body.data.periodStart) {
+      return reply.code(422).send({ error: "période invalide" });
+    }
+    const periodKey = `${body.data.periodStart}..${body.data.periodEnd}`;
+    const already = await withTenant(request.tenantId, (tx) =>
+      tx.eInvoiceSubmission.findFirst({
+        where: { invoiceNumber: periodKey, direction: "ereporting" },
+        select: { id: true, status: true },
+      }),
+    );
+    if (already) {
+      return reply.code(409).send({ error: "période déjà transmise", status: already.status });
+    }
+    const action = await withTenant(request.tenantId, (tx) =>
+      tx.pendingAction.create({
+        data: {
+          tenantId: request.tenantId,
+          type: "report_einvoice_transactions",
+          requestedBy: request.authSession.user.id,
+          employee: "compta",
+          payload: {
+            ...body.data,
+            label: `E-reporting ${periodKey}`,
+          } as Prisma.InputJsonValue,
+        },
+        select: { id: true },
+      }),
+    );
+    return reply.code(202).send({ pendingActionId: action.id, period: periodKey });
+  });
+
   // --- Socle webhooks entrants (2.13) --------------------------------------
   // Prérequis des flux PDP (2.4) et Bridge Connect. Une requête webhook n'a
   // AUCUNE session : la signature HMAC est la SEULE preuve d'authenticité, et
@@ -3007,7 +3229,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   const webhookSecretName = (tenantId: string, provider: string): string =>
     `webhook/${tenantId}/${provider}`;
-  const webhookHandlers: WebhookHandlerRegistry = options.webhookHandlers ?? {};
+  // Handler PDP (2.4) enregistré PAR DÉFAUT : sans lui, la plateforme
+  // notifierait dans le vide et le payload d'un statut serait collecté sans
+  // finalité (2.13 ne stocke le corps que si un handler existe).
+  const webhookHandlers: WebhookHandlerRegistry = options.webhookHandlers ?? {
+    pdp: createPdpWebhookHandler(),
+  };
   // Gardes de la seule route anonyme : débit borné AVANT toute I/O, et cache
   // court des secrets (sinon un appel coffre par livraison, déclenchable par
   // quiconque connaît l'id d'endpoint — qui est partagé avec un tiers).

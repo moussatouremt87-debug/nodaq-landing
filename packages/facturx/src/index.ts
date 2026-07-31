@@ -15,3 +15,18 @@ export { buildCiiXml, escapeXml } from "./cii.js";
 export { auditInvoice } from "./audit.js";
 export type { FacturXAudit, FacturXIssue } from "./audit.js";
 export { buildFacturXPdf, extractFacturXXml, listAttachments } from "./pdf.js";
+export {
+  isRejection,
+  isValidTransition,
+  LIFECYCLE_RULES_VERSION,
+  LIFECYCLE_SOURCE,
+  normalizeStatus,
+  STATUS_LABELS,
+  SUBMISSION_STATUSES,
+  TERMINAL_STATUSES,
+} from "./lifecycle.js";
+export type { SubmissionStatus } from "./lifecycle.js";
+export { aggregateEReporting } from "./ereporting.js";
+export type { EReportingAggregate, EReportingSourceInvoice } from "./ereporting.js";
+export { computeVatBreakdown, lineNetCents } from "./vat.js";
+export type { VatBreakdown, VatBucket } from "./vat.js";

@@ -1,5 +1,16 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { withTenant } from "@nodaq/db";
+import type { Prisma } from "@nodaq/db";
+import {
+  auditInvoice,
+  buildCiiXml,
+  buildFacturXPdf,
+  FacturXInvoice,
+  normalizeStatus,
+} from "@nodaq/facturx";
+import { getPdpClient } from "@nodaq/mcp-connectors";
+import type { RegistryOptions } from "@nodaq/mcp-connectors";
 import { ASSET_CATEGORIES } from "@nodaq/shared";
 
 /*
@@ -13,7 +24,12 @@ import { ASSET_CATEGORIES } from "@nodaq/shared";
 
 export type ActionExecutor = (
   payload: unknown,
-  context: { tenantId: string; userId?: string },
+  context: {
+    tenantId: string;
+    userId?: string;
+    /** Résolution des connecteurs (coffre, URLs) — dépôt PDP 2.4. */
+    connectors?: RegistryOptions;
+  },
 ) => Promise<unknown>;
 
 export type ExecutorRegistry = Record<string, ActionExecutor>;
@@ -32,6 +48,21 @@ const AdjustStockPayload = z.object({
 });
 
 const MAX_STOCK_QUANTITY = 1_000_000_000;
+
+/** Dépôt e-invoicing (2.4) : la facture normalisée, jamais le PDF. */
+const SubmitEInvoicePayload = z.object({
+  invoice: FacturXInvoice,
+  profile: z.enum(["BASIC", "EN16931"]).default("EN16931"),
+});
+
+/** E-reporting (2.4) : agrégats de la période, jamais un détail nominatif. */
+const ReportTransactionsPayload = z.object({
+  periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  periodEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  totalCents: z.number().int().min(0).max(1_000_000_000_00),
+  vatCents: z.number().int().min(0).max(1_000_000_000_00),
+  transactionCount: z.number().int().min(0).max(1_000_000),
+});
 
 /** Réponse à un avis client (3.8) — le brouillon validé est ENREGISTRÉ sur
  * l'avis ; la publication sur la plateforme reste manuelle en V1 (aucune API
@@ -102,6 +133,137 @@ export const defaultExecutors: ExecutorRegistry = {
     });
   },
   create_quote: () => Promise.resolve({ created: true, simulated: true }),
+  // EXÉCUTEUR RÉEL (2.4) : dépose la facture sur la plateforme APRÈS
+  // validation humaine — déposer engage l'entreprise sur le réseau national.
+  //
+  // Le payload porte la FACTURE NORMALISÉE, jamais le PDF : le générateur
+  // étant pur, le document est reconstruit à l'identique ici, et l'audit de
+  // conformité est REJOUÉ juste avant le dépôt (l'état des règles a pu
+  // changer entre la préparation et la validation).
+  submit_einvoice: async (payload, { tenantId, connectors }) => {
+    const parsed = SubmitEInvoicePayload.safeParse(payload);
+    if (!parsed.success) throw new Error("invalid submit_einvoice payload");
+    const { invoice, profile } = parsed.data;
+
+    const audit = auditInvoice(invoice);
+    if (!audit.issuable) {
+      // Jamais de dépôt d'une facture non conforme : elle serait rejetée par
+      // la plateforme, avec une trace publique d'émission fautive.
+      throw new Error("invoice no longer compliant");
+    }
+
+    const xml = buildCiiXml(invoice, profile);
+    const pdf = await buildFacturXPdf(invoice, xml, profile);
+    const documentHash = createHash("sha256").update(pdf).digest("hex");
+
+    const client = await getPdpClient(tenantId, connectors ?? {});
+    const deposit = await client.deposit({
+      invoiceNumber: invoice.number,
+      documentBase64: Buffer.from(pdf).toString("base64"),
+      profile,
+    });
+
+    const status = deposit.status ? (normalizeStatus(deposit.status) ?? "deposee") : "deposee";
+    const now = new Date();
+    return withTenant(tenantId, async (tx) => {
+      // Idempotence : (tenant, numéro, direction) — re-valider une
+      // proposition déjà déposée ne dépose jamais deux fois.
+      const existing = await tx.eInvoiceSubmission.findFirst({
+        where: { invoiceNumber: invoice.number, direction: "emission" },
+        select: { id: true, status: true },
+      });
+      const historyEntry = { status, at: now.toISOString(), reference: deposit.reference };
+      if (existing) {
+        await tx.eInvoiceSubmission.update({
+          where: { id: existing.id },
+          data: {
+            status,
+            pdpReference: deposit.reference,
+            documentHash,
+            submittedAt: now,
+            statusHistory: [historyEntry] as Prisma.InputJsonValue,
+          },
+        });
+        return { submissionId: existing.id, reference: deposit.reference, status };
+      }
+      const created = await tx.eInvoiceSubmission.create({
+        data: {
+          tenantId,
+          invoiceNumber: invoice.number,
+          profile,
+          direction: "emission",
+          status,
+          pdpReference: deposit.reference,
+          documentHash,
+          amountCents: invoice.totals.grossCents,
+          currency: invoice.currency,
+          submittedAt: now,
+          statusHistory: [historyEntry] as Prisma.InputJsonValue,
+        },
+        select: { id: true },
+      });
+      return { submissionId: created.id, reference: deposit.reference, status };
+    });
+  },
+  // EXÉCUTEUR RÉEL (2.4) : transmet l'agrégat e-reporting de la période.
+  // Ce qui part est un TOTAL — jamais le détail nominatif des clients ; la
+  // minimisation est portée par le contrat `reportTransactions`.
+  report_einvoice_transactions: async (payload, { tenantId, connectors }) => {
+    const parsed = ReportTransactionsPayload.safeParse(payload);
+    if (!parsed.success) throw new Error("invalid report_einvoice_transactions payload");
+    const data = parsed.data;
+    const periodKey = `${data.periodStart}..${data.periodEnd}`;
+
+    const client = await getPdpClient(tenantId, connectors ?? {});
+    const deposit = await client.reportTransactions(data);
+
+    const status = deposit.status ? (normalizeStatus(deposit.status) ?? "deposee") : "deposee";
+    const now = new Date();
+    // Hash de l'agrégat transmis : preuve de ce qui est parti, sans stocker
+    // une seconde fois la donnée (elle vit déjà dans les colonnes).
+    const documentHash = createHash("sha256")
+      .update(`${periodKey}|${data.totalCents}|${data.vatCents}|${data.transactionCount}`)
+      .digest("hex");
+    return withTenant(tenantId, async (tx) => {
+      const historyEntry = { status, at: now.toISOString(), reference: deposit.reference };
+      const existing = await tx.eInvoiceSubmission.findFirst({
+        where: { invoiceNumber: periodKey, direction: "ereporting" },
+        select: { id: true },
+      });
+      if (existing) {
+        // Idempotence : re-valider une période déjà transmise ne la
+        // transmet pas deux fois côté registre.
+        await tx.eInvoiceSubmission.update({
+          where: { id: existing.id },
+          data: {
+            status,
+            pdpReference: deposit.reference,
+            documentHash,
+            submittedAt: now,
+            statusHistory: [historyEntry] as Prisma.InputJsonValue,
+          },
+        });
+        return { submissionId: existing.id, reference: deposit.reference, status };
+      }
+      const created = await tx.eInvoiceSubmission.create({
+        data: {
+          tenantId,
+          invoiceNumber: periodKey,
+          profile: "EREPORTING",
+          direction: "ereporting",
+          status,
+          pdpReference: deposit.reference,
+          documentHash,
+          amountCents: data.totalCents,
+          currency: "EUR",
+          submittedAt: now,
+          statusHistory: [historyEntry] as Prisma.InputJsonValue,
+        },
+        select: { id: true },
+      });
+      return { submissionId: created.id, reference: deposit.reference, status };
+    });
+  },
   // EXÉCUTEUR RÉEL (3.8) : enregistre la réponse validée sur l'avis. Jamais
   // d'écrasement (idempotent) : un avis déjà répondu reste tel quel.
   record_review_reply: async (payload, { tenantId }) => {

@@ -3,12 +3,14 @@ import { withTenant } from "@nodaq/db";
 import { defaultProvider } from "@nodaq/secrets";
 import type { SecretProvider } from "@nodaq/secrets";
 import { BridgeClient, BridgeCredentials } from "./bridge.js";
-import { DemoPennylaneClient, DemoQontoClient, DemoSilaeClient } from "./demo.js";
+import { DemoPdpClient, DemoPennylaneClient, DemoQontoClient, DemoSilaeClient } from "./demo.js";
 import { FEC_CONNECTOR_STATUS, FEC_CONNECTOR_TYPE, FecPennylaneClient } from "./fec.js";
 import { PennylaneClient, PennylaneCredentials } from "./pennylane.js";
 import { QontoClient, QontoCredentials } from "./qonto.js";
 import type { QontoTransactionsOptions } from "./qonto.js";
 import { SilaeClient, SilaeCredentials } from "./silae.js";
+import { HttpPdpClient, PdpCredentials } from "./pdp.js";
+import type { PdpClient } from "./pdp.js";
 
 /*
  * Per-tenant connector registry (blueprint §5.6). The `connectors` table stores
@@ -17,7 +19,7 @@ import { SilaeClient, SilaeCredentials } from "./silae.js";
  * at call time, in memory only. Nothing from the secret value is ever logged.
  */
 
-export const ConnectorType = z.enum(["pennylane", "qonto", "bridge", "silae"]);
+export const ConnectorType = z.enum(["pennylane", "qonto", "bridge", "silae", "pdp"]);
 export type ConnectorType = z.infer<typeof ConnectorType>;
 
 export class ConnectorNotConfiguredError extends Error {
@@ -47,6 +49,7 @@ export interface RegistryOptions {
   qontoBaseUrl?: string;
   bridgeBaseUrl?: string;
   silaeBaseUrl?: string;
+  pdpBaseUrl?: string;
 }
 
 /**
@@ -152,6 +155,22 @@ export async function getSilaeClient(
     await resolveCredentials(tenantId, "silae", options, row.credentialsRef),
   );
   return new SilaeClient(credentials, options.silaeBaseUrl);
+}
+
+/**
+ * Plateforme de dématérialisation (2.4). Aucun opérateur n'est câblé en
+ * dur : le tenant choisit sa PDP, l'adaptateur suit son contrat.
+ */
+export async function getPdpClient(
+  tenantId: string,
+  options: RegistryOptions = {},
+): Promise<PdpClient> {
+  const row = await loadConnectorRow(tenantId, "pdp");
+  if (row.status === DEMO_CONNECTOR_STATUS) return new DemoPdpClient();
+  const credentials = PdpCredentials.parse(
+    await resolveCredentials(tenantId, "pdp", options, row.credentialsRef),
+  );
+  return new HttpPdpClient(credentials, options.pdpBaseUrl);
 }
 
 /** Sous-ensemble commun consommé par l'agent Compta — agnostique de la banque. */
