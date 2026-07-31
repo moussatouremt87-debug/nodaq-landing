@@ -113,6 +113,16 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > de sécurité (routes/autorisations inchangées, données conservées) ;
 > `tenant_profiles.module_overrides` (JSONB), `GET /modules` (membres) /
 > `PUT /modules/:id` (owner), page Réglages → Modules (`docs/modules.md`).
+> **Factur-X (2.3)** : `packages/facturx` — valeurs normatives en CONFIG
+> VERSIONNÉE (`profiles.ts` : URNs de profil, UNTDID 1001/5305, barème TVA FR,
+> catégories d'opération ; calendrier RESTE dans 3.7) ; `buildCiiXml` PUR
+> (ordre des éléments normatif, échappement XML systématique, centimes →
+> décimal une seule fois) ; `auditInvoice` BLOQUE avant génération (totaux,
+> TVA, SIREN des DEUX parties, mention d'exonération) ; PDF/A-3 avec
+> `factur-x.xml` en `AFRelationship /Data` + XMP schéma d'extension
+> (sans lui, non conforme) ; `extractFacturXXml` = moitié RÉCEPTION de
+> l'obligation 09/2026 ; routes `POST /factures/facturx` (owner) et
+> `/lire` (membres) (`docs/facturx.md`).
 > **Webhooks entrants (2.13)** : SEULE surface sans session — la signature HMAC
 > (`t=<unix>,v1=<hmac(secret, "t.corps brut")>`, ±300 s, `timingSafeEqual`, corps
 > brut via plugin encapsulé, 1 Mo) est l'UNIQUE preuve ; le tenant vient de
