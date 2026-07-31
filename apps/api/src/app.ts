@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
-import { prisma, Prisma, withOps, withTenant } from "@nodaq/db";
+import { prisma, Prisma, resolveWebhookEndpoint, withOps, withTenant } from "@nodaq/db";
 import { deriveFixedAssets, deriveReceivables, parseFec } from "@nodaq/fec";
 import {
   BridgeClient,
@@ -60,6 +60,16 @@ import type { SupportStorage } from "./support/storage.js";
 import { createTemMailer } from "./support/tem.js";
 import type { SupportMailer } from "./support/tem.js";
 import { assertAnonymized, SupportOrigin } from "./support/triage.js";
+import {
+  generateWebhookSecret,
+  parseWebhookEnvelope,
+  verifyWebhookSignature,
+  WEBHOOK_EVENT_RETENTION_DAYS,
+  WEBHOOK_PROVIDERS,
+  WebhookRateLimiter,
+  WebhookSecretCache,
+} from "./webhooks.js";
+import type { WebhookHandlerRegistry } from "./webhooks.js";
 
 export interface BuildAppOptions {
   /** Executors for approved pending actions (injectable in tests). */
@@ -72,6 +82,10 @@ export interface BuildAppOptions {
   supportStorage?: SupportStorage | null;
   /** Envoi des réponses support (2.18) — factice en test, Scaleway TEM sinon. */
   supportMailer?: SupportMailer | null;
+  /** Handlers métier par provider de webhook (2.13) — PDP 2.4, Bridge… */
+  webhookHandlers?: WebhookHandlerRegistry;
+  /** Limiteur de la route webhook publique (injectable en test). */
+  webhookRateLimiter?: WebhookRateLimiter;
 }
 
 type AuthSession = NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>;
@@ -2878,6 +2892,319 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       );
       return reply.code(503).send({ error: "synchronisation indisponible" });
     }
+  });
+
+  // --- Socle webhooks entrants (2.13) --------------------------------------
+  // Prérequis des flux PDP (2.4) et Bridge Connect. Une requête webhook n'a
+  // AUCUNE session : la signature HMAC est la SEULE preuve d'authenticité, et
+  // le tenant se résout depuis l'endpoint (porte `withWebhookResolver`, en
+  // lecture seule sur cette seule table) — JAMAIS depuis le corps reçu.
+
+  const webhookSecretName = (tenantId: string, provider: string): string =>
+    `webhook/${tenantId}/${provider}`;
+  const webhookHandlers: WebhookHandlerRegistry = options.webhookHandlers ?? {};
+  // Gardes de la seule route anonyme : débit borné AVANT toute I/O, et cache
+  // court des secrets (sinon un appel coffre par livraison, déclenchable par
+  // quiconque connaît l'id d'endpoint — qui est partagé avec un tiers).
+  const webhookLimiter = options.webhookRateLimiter ?? new WebhookRateLimiter();
+  const webhookSecrets = new WebhookSecretCache();
+  /** Métadonnées seulement : ni secretRef, ni payload d'événement. */
+  const ENDPOINT_SELECT = {
+    id: true,
+    provider: true,
+    active: true,
+    description: true,
+    createdAt: true,
+  } as const;
+
+  app.post("/webhooks/endpoints", { preHandler: ownerRoute }, async (request, reply) => {
+    const body = z
+      .object({
+        provider: z.enum(WEBHOOK_PROVIDERS),
+        description: z.string().trim().max(200).optional(),
+      })
+      .strict()
+      .safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: "invalid payload" });
+
+    // Secret généré par le SERVEUR (jamais choisi par le client) et renvoyé
+    // UNE SEULE FOIS : ensuite il ne vit qu'au coffre, jamais en base.
+    const secret = generateWebhookSecret();
+    const secretRef = webhookSecretName(request.tenantId, body.data.provider);
+
+    // Rotation NON destructive (audit 2.13) : un upsert conserve l'id de
+    // l'endpoint — donc l'URL déjà configurée chez le fournisseur — ET le
+    // journal des réceptions (piste d'audit non effaçable en un clic).
+    const endpoint = await withTenant(request.tenantId, (tx) =>
+      tx.webhookEndpoint.upsert({
+        where: {
+          tenantId_provider: { tenantId: request.tenantId, provider: body.data.provider },
+        },
+        create: {
+          tenantId: request.tenantId,
+          provider: body.data.provider,
+          secretRef,
+          description: body.data.description ?? "",
+        },
+        update: {
+          secretRef,
+          active: true,
+          ...(body.data.description !== undefined ? { description: body.data.description } : {}),
+        },
+        select: ENDPOINT_SELECT,
+      }),
+    );
+    // Coffre APRÈS la ligne : si l'écriture DB échoue, l'ancien secret n'a pas
+    // été écrasé et l'endpoint existant continue de fonctionner.
+    try {
+      await vault.set(secretRef, secret);
+      webhookSecrets.invalidate(secretRef);
+    } catch (error) {
+      request.log.error(
+        { err: error instanceof Error ? error.name : "Error" },
+        "webhook secret write failed",
+      );
+      return reply.code(503).send({ error: "coffre indisponible" });
+    }
+    return reply.code(201).send({
+      ...endpoint,
+      // Absolue quand l'URL publique est connue : une URL relative n'est pas
+      // recopiable telle quelle chez un fournisseur.
+      url: `${(process.env.PUBLIC_API_URL ?? "").replace(/\/+$/, "")}/webhooks/${endpoint.provider}/${endpoint.id}`,
+      // Affiché une fois, à recopier chez le fournisseur — jamais relisible.
+      secret,
+      signatureHeader: "X-Nodaq-Signature",
+    });
+  });
+
+  app.get("/webhooks/endpoints", { preHandler: ownerRoute }, async (request) => {
+    const endpoints = await withTenant(request.tenantId, (tx) =>
+      tx.webhookEndpoint.findMany({ select: ENDPOINT_SELECT, orderBy: { provider: "asc" } }),
+    );
+    return { endpoints };
+  });
+
+  app.delete("/webhooks/endpoints/:provider", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z
+      .object({ provider: z.enum(WEBHOOK_PROVIDERS) })
+      .safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    const deleted = await withTenant(request.tenantId, (tx) =>
+      tx.webhookEndpoint.deleteMany({ where: { provider: params.data.provider } }),
+    );
+    if (deleted.count === 0) return reply.code(404).send({ error: "unknown endpoint" });
+    await vault.delete(webhookSecretName(request.tenantId, params.data.provider)).catch(() => undefined);
+    return { deleted: true };
+  });
+
+  // Journal des réceptions : métadonnées de traitement UNIQUEMENT — le
+  // payload fournisseur (données métier) ne ressort pas par cette route.
+  app.get("/webhooks/events", { preHandler: ownerRoute }, async (request) => {
+    const events = await withTenant(request.tenantId, (tx) =>
+      tx.webhookEvent.findMany({
+        select: {
+          id: true,
+          provider: true,
+          eventType: true,
+          externalId: true,
+          status: true,
+          attempts: true,
+          receivedAt: true,
+          processedAt: true,
+        },
+        orderBy: { receivedAt: "desc" },
+        take: 100,
+      }),
+    );
+    return { events };
+  });
+
+  /**
+   * Traitement métier APRÈS la réponse 202 : un handler lent ou en échec ne
+   * déclenche jamais de tempête de re-livraisons côté fournisseur, et
+   * l'événement stocké reste la source de vérité pour un rejeu.
+   */
+  const processWebhookEvent = async (event: {
+    id: string;
+    tenantId: string;
+    provider: string;
+    eventType: string;
+    externalId: string;
+    payload: unknown;
+  }): Promise<void> => {
+    // Rétention (art. 5.1.e) : purge opportuniste des réceptions expirées du
+    // tenant — bornée, sans balayeur supplémentaire.
+    const retentionFloor = new Date(
+      Date.now() - WEBHOOK_EVENT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    );
+    await withTenant(event.tenantId, (tx) =>
+      tx.webhookEvent.deleteMany({ where: { receivedAt: { lt: retentionFloor } } }),
+    ).catch(() => undefined);
+
+    const handler = webhookHandlers[event.provider];
+    if (!handler) {
+      await withTenant(event.tenantId, (tx) =>
+        tx.webhookEvent.updateMany({ where: { id: event.id }, data: { status: "ignored" } }),
+      );
+      return;
+    }
+    try {
+      await handler(event);
+      await withTenant(event.tenantId, (tx) =>
+        tx.webhookEvent.updateMany({
+          where: { id: event.id },
+          data: { status: "processed", processedAt: new Date(), attempts: { increment: 1 } },
+        }),
+      );
+    } catch (error) {
+      // Nom d'erreur SEULEMENT : un message pourrait citer le payload.
+      await withTenant(event.tenantId, (tx) =>
+        tx.webhookEvent.updateMany({
+          where: { id: event.id },
+          data: {
+            status: "failed",
+            error: error instanceof Error ? error.name : "Error",
+            attempts: { increment: 1 },
+          },
+        }),
+      );
+    }
+  };
+
+  // Réception PUBLIQUE (aucune session) : parser brut CANTONNÉ à ce plugin —
+  // la signature couvre les octets exacts, un corps re-sérialisé casserait la
+  // preuve. Corps borné : un fournisseur ne dicte pas notre mémoire.
+  void app.register(async (hooks) => {
+    hooks.addContentTypeParser(
+      ["application/json", "application/json; charset=utf-8"],
+      { parseAs: "buffer" },
+      (_request, body, done) => done(null, body),
+    );
+
+    hooks.post(
+      "/webhooks/:provider/:endpointId",
+      { bodyLimit: 1024 * 1024 },
+      async (request, reply) => {
+        // Réponse CONSTANTE sur tout échec d'authentification : ni l'existence
+        // de l'endpoint, ni la raison du rejet ne fuient (pas d'oracle).
+        const refuse = () => reply.code(401).send({ error: "unauthorized" });
+
+        // Débit borné AVANT toute I/O : sans cela un flood anonyme ouvrirait
+        // une transaction par requête et viderait le pool — l'API tomberait
+        // pour TOUS les tenants (disponibilité, art. 32).
+        if (!webhookLimiter.take(request.ip)) {
+          return reply.code(429).send({ error: "too many requests" });
+        }
+
+        const params = z
+          .object({ provider: z.enum(WEBHOOK_PROVIDERS), endpointId: Uuid })
+          .safeParse(request.params);
+        if (!params.success) return refuse();
+        const raw = request.body;
+        if (!Buffer.isBuffer(raw) || raw.length === 0) return refuse();
+
+        // Résolution du tenant AVANT tout accès métier : accesseur FERMÉ (une
+        // ligne ou rien) au-dessus de la porte en lecture seule.
+        const endpoint = await resolveWebhookEndpoint(params.data.endpointId, params.data.provider);
+        if (!endpoint) {
+          request.log.warn({ provider: params.data.provider }, "webhook endpoint not resolved");
+          return refuse();
+        }
+        // Garde de namespace (précédent connecteurs) : un secretRef qui ne
+        // vise pas le tenant de l'endpoint est refusé, jamais suivi.
+        if (endpoint.secretRef !== webhookSecretName(endpoint.tenantId, endpoint.provider)) {
+          request.log.warn({ endpointId: endpoint.id }, "webhook secret ref outside namespace");
+          return refuse();
+        }
+        let secret = webhookSecrets.get(endpoint.secretRef);
+        if (secret === undefined) {
+          secret = await vault.get(endpoint.secretRef).catch(() => undefined);
+          if (secret) webhookSecrets.set(endpoint.secretRef, secret);
+        }
+        if (!secret) {
+          // Panne de coffre = 401 massif : sans ce log, elle serait INVISIBLE
+          // côté ops et se lirait comme une révocation côté fournisseur.
+          request.log.error({ endpointId: endpoint.id }, "webhook secret unavailable");
+          return refuse();
+        }
+
+        const verdict = verifyWebhookSignature({
+          header:
+            typeof request.headers["x-nodaq-signature"] === "string"
+              ? request.headers["x-nodaq-signature"]
+              : undefined,
+          body: raw,
+          secret,
+          now: new Date(),
+        });
+        if (!verdict.ok) {
+          // La RAISON reste côté serveur (ops), jamais dans la réponse.
+          request.log.warn({ reason: verdict.reason, provider: endpoint.provider }, "webhook rejected");
+          return refuse();
+        }
+
+        let payload: unknown;
+        try {
+          payload = JSON.parse(raw.toString("utf8"));
+        } catch {
+          return reply.code(400).send({ error: "invalid payload" });
+        }
+        const envelope = parseWebhookEnvelope(payload);
+        if (!envelope) return reply.code(400).send({ error: "invalid payload" });
+
+        // MINIMISATION (art. 5.1.b/c) : sans handler pour ce provider, le
+        // corps fournisseur (transactions bancaires, factures nominatives)
+        // n'a AUCUNE finalité — on garde la trace de réception, jamais la
+        // donnée. Le payload n'est collecté que s'il va être traité.
+        const willProcess = webhookHandlers[endpoint.provider] !== undefined;
+
+        // Idempotence : (tenant, provider, externalId) unique — une
+        // re-livraison du fournisseur ne crée jamais un second événement.
+        let stored: { id: string } | null = null;
+        let duplicate = false;
+        try {
+          stored = await withTenant(endpoint.tenantId, (tx) =>
+            tx.webhookEvent.create({
+              data: {
+                tenantId: endpoint.tenantId,
+                endpointId: endpoint.id,
+                provider: endpoint.provider,
+                externalId: envelope.externalId,
+                eventType: envelope.eventType,
+                payload: (willProcess ? payload : {}) as Prisma.InputJsonValue,
+                ...(willProcess ? {} : { status: "ignored" }),
+              },
+              select: { id: true },
+            }),
+          );
+        } catch (error) {
+          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+            duplicate = true;
+          } else {
+            // Corps signé mais ininsérable (ex.   refusé par jsonb) :
+            // refus explicite, sans laisser une erreur Prisma citer ses
+            // arguments dans le gestionnaire global.
+            request.log.warn(
+              { err: error instanceof Error ? error.name : "Error", provider: endpoint.provider },
+              "webhook event not stored",
+            );
+            return reply.code(400).send({ error: "invalid payload" });
+          }
+        }
+
+        if (stored) {
+          const event = { ...envelope, id: stored.id, tenantId: endpoint.tenantId, provider: endpoint.provider, payload };
+          void processWebhookEvent(event).catch((error: unknown) => {
+            request.log.warn(
+              { err: error instanceof Error ? error.name : "Error" },
+              "webhook handler failed",
+            );
+          });
+        }
+        // 202 dans les deux cas : le fournisseur a fait son travail.
+        return reply.code(202).send({ received: true, duplicate });
+      },
+    );
   });
 
   // --- Modules par vertical (3.11) ----------------------------------------

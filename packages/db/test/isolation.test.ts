@@ -53,6 +53,10 @@ let customerReviewAId: string;
 let customerReviewBId: string;
 let processingActivityAId: string;
 let processingActivityBId: string;
+let webhookEndpointAId: string;
+let webhookEndpointBId: string;
+let webhookEventAId: string;
+let webhookEventBId: string;
 
 beforeAll(async () => {
   admin = createAdminClient();
@@ -78,6 +82,9 @@ beforeAll(async () => {
   await admin.tenantProfile.deleteMany();
   await admin.customerReview.deleteMany();
   await admin.processingActivity.deleteMany();
+  // FK order: events before endpoints.
+  await admin.webhookEvent.deleteMany();
+  await admin.webhookEndpoint.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -547,6 +554,44 @@ beforeAll(async () => {
   );
   processingActivityAId = processingActivityA.id;
   processingActivityBId = processingActivityB.id;
+
+  const webhookEndpointA = await withTenant(tenantA, (tx) =>
+    tx.webhookEndpoint.create({
+      data: { tenantId: tenantA, provider: "test", secretRef: "secret-ref-a" },
+    }),
+  );
+  const webhookEndpointB = await withTenant(tenantB, (tx) =>
+    tx.webhookEndpoint.create({
+      data: { tenantId: tenantB, provider: "test", secretRef: "secret-ref-b" },
+    }),
+  );
+  webhookEndpointAId = webhookEndpointA.id;
+  webhookEndpointBId = webhookEndpointB.id;
+
+  const webhookEventA = await withTenant(tenantA, (tx) =>
+    tx.webhookEvent.create({
+      data: {
+        tenantId: tenantA,
+        endpointId: webhookEndpointAId,
+        provider: "test",
+        externalId: "evt-a-1",
+        payload: { hello: "a" },
+      },
+    }),
+  );
+  const webhookEventB = await withTenant(tenantB, (tx) =>
+    tx.webhookEvent.create({
+      data: {
+        tenantId: tenantB,
+        endpointId: webhookEndpointBId,
+        provider: "test",
+        externalId: "evt-b-1",
+        payload: { hello: "b" },
+      },
+    }),
+  );
+  webhookEventAId = webhookEventA.id;
+  webhookEventBId = webhookEventB.id;
 });
 
 afterAll(async () => {
@@ -726,6 +771,22 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur tenant_profiles", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'tenant_profiles'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur webhook_endpoints", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'webhook_endpoints'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur webhook_events", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'webhook_events'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -1416,6 +1477,70 @@ describe("isolation tenant (RLS)", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("test 1 (webhook_endpoints) — withTenant(A) ne voit QUE l'endpoint de A", async () => {
+    const endpoints = await withTenant(tenantA, (tx) => tx.webhookEndpoint.findMany());
+    expect(endpoints).toHaveLength(1);
+    expect(endpoints[0]?.id).toBe(webhookEndpointAId);
+    expect(endpoints.some((e) => e.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (webhook_endpoints) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const endpoints = await prisma.webhookEndpoint.findMany();
+    expect(endpoints).toHaveLength(0);
+  });
+
+  it("test 3 (webhook_endpoints) — lire l'endpoint de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.webhookEndpoint.findUnique({ where: { id: webhookEndpointBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (webhook_endpoints) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.webhookEndpoint.create({
+          data: { tenantId: tenantB, provider: "pdp", secretRef: "vole" },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 1 (webhook_events) — withTenant(A) ne voit QUE l'événement de A", async () => {
+    const events = await withTenant(tenantA, (tx) => tx.webhookEvent.findMany());
+    expect(events).toHaveLength(1);
+    expect(events[0]?.id).toBe(webhookEventAId);
+    expect(events.some((e) => e.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (webhook_events) — sans contexte tenant, aucune ligne (la RLS bloque, sans erreur)", async () => {
+    const events = await prisma.webhookEvent.findMany();
+    expect(events).toHaveLength(0);
+  });
+
+  it("test 3 (webhook_events) — lire l'événement de B par son id depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.webhookEvent.findUnique({ where: { id: webhookEventBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (webhook_events) — écrire dans le tenant B depuis le contexte A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.webhookEvent.create({
+          data: {
+            tenantId: tenantB,
+            endpointId: webhookEndpointBId,
+            provider: "test",
+            externalId: "evt-vole",
+            payload: { hello: "vole" },
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
@@ -1835,5 +1960,45 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     // Et une fois la RLS réactivée, l'isolation revient.
     const activities = await withTenant(tenantA, (tx) => tx.processingActivity.findMany());
     expect(activities).toHaveLength(1);
+  });
+
+  it("policy désactivée sur webhook_endpoints => la fuite se produit aussi (endpoints des deux tenants deviennent visibles)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "webhook_endpoints" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.webhookEndpoint.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((e) => e.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.webhookEndpoint.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "webhook_endpoints" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "webhook_endpoints" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const endpoints = await withTenant(tenantA, (tx) => tx.webhookEndpoint.findMany());
+    expect(endpoints).toHaveLength(1);
+  });
+
+  it("policy désactivée sur webhook_events => la fuite se produit aussi (événements des deux tenants deviennent visibles)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "webhook_events" DISABLE ROW LEVEL SECURITY`);
+    try {
+      // Les requêtes applicatives n'ont AUCUN filtre tenant : sans RLS, tout fuit.
+      const leaked = await withTenant(tenantA, (tx) => tx.webhookEvent.findMany());
+      expect(leaked.length).toBe(2);
+      expect(leaked.some((e) => e.tenantId === tenantB)).toBe(true);
+
+      const leakedNoContext = await prisma.webhookEvent.findMany();
+      expect(leakedNoContext.length).toBe(2);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "webhook_events" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "webhook_events" FORCE ROW LEVEL SECURITY`);
+    }
+
+    // Et une fois la RLS réactivée, l'isolation revient.
+    const events = await withTenant(tenantA, (tx) => tx.webhookEvent.findMany());
+    expect(events).toHaveLength(1);
   });
 });

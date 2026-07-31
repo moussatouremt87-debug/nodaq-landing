@@ -48,6 +48,8 @@ model Tenant {
   profile             TenantProfile?
   reviews             CustomerReview[]
   processingActivities ProcessingActivity[]
+  webhookEndpoints    WebhookEndpoint[]
+  webhookEvents       WebhookEvent[]
 
   @@map("tenants")
   @@schema("public")
@@ -748,6 +750,61 @@ model ProcessingActivity {
 
   @@unique([tenantId, name])
   @@map("processing_activities")
+  @@schema("public")
+}
+
+/// ─────────────────────────────────────────────────────────────────────────────
+/// Socle webhooks entrants (ticket 2.13). Une requête webhook n'a AUCUNE
+/// session applicative : il faut résoudre l'endpoint (et donc le tenant) AVANT
+/// de pouvoir ouvrir withTenant(). Voir withWebhookResolver() (src/index.ts) et
+/// la policy SELECT gated `webhook_resolver_lookup` (migration RLS dédiée).
+/// ─────────────────────────────────────────────────────────────────────────────
+
+/// Un endpoint par (tenant, provider) — la rotation de secret remplace la ligne,
+/// elle n'en crée pas une deuxième. `secretRef` = référence coffre UNIQUEMENT,
+/// jamais le secret de signature en clair.
+model WebhookEndpoint {
+  id          String         @id @default(uuid()) @db.Uuid
+  tenantId    String         @map("tenant_id") @db.Uuid
+  /// 'pdp' | 'bridge' | 'pennylane' | 'qonto' | 'test' — validé côté app par Zod.
+  provider    String
+  /// Référence Secret Manager du secret de signature — jamais la valeur.
+  secretRef   String         @map("secret_ref")
+  active      Boolean        @default(true)
+  description String         @default("")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  events      WebhookEvent[]
+
+  @@unique([tenantId, provider])
+  @@map("webhook_endpoints")
+  @@schema("public")
+}
+
+/// Événement webhook reçu. Idempotence par (tenant, provider, externalId) :
+/// un fournisseur qui rejoue un événement ne duplique jamais la ligne.
+model WebhookEvent {
+  id          String          @id @default(uuid()) @db.Uuid
+  tenantId    String          @map("tenant_id") @db.Uuid
+  endpointId  String          @map("endpoint_id") @db.Uuid
+  provider    String
+  /// Id de l'événement chez le fournisseur — clé d'idempotence.
+  externalId  String          @map("external_id")
+  eventType   String          @default("") @map("event_type")
+  payload     Json
+  /// 'received' | 'processed' | 'ignored' | 'failed' — validé côté app par Zod.
+  status      String          @default("received")
+  attempts    Int             @default(0)
+  error       String?
+  receivedAt  DateTime        @default(now()) @map("received_at")
+  processedAt DateTime?       @map("processed_at")
+  tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  endpoint    WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, provider, externalId])
+  @@index([tenantId, status])
+  @@map("webhook_events")
   @@schema("public")
 }
 

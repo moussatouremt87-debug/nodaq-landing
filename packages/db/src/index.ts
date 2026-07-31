@@ -19,6 +19,8 @@ export type {
   AgentConversation,
   FecImport,
   FecInvoice,
+  WebhookEndpoint,
+  WebhookEvent,
 } from "@prisma/client";
 
 /**
@@ -73,4 +75,52 @@ export async function withOps<T>(fn: (tx: TenantClient) => Promise<T>): Promise<
     await tx.$queryRaw`SELECT set_config('app.ops_operator', 'on', true)`;
     return fn(tx);
   });
+}
+
+/**
+ * Resolution-only door for INBOUND webhook requests (ticket 2.13). A webhook
+ * request arrives with no better-auth session and therefore no known tenant —
+ * the endpoint (and thus its tenant) must be looked up BEFORE `withTenant` can
+ * be opened at all. This helper poses the transaction-scoped
+ * `app.webhook_resolver` flag that the `webhook_resolver_lookup` RLS policy
+ * gates on, exactly like `withOps` poses `app.ops_operator`.
+ *
+ * Scope, strictly: read-only, limited to `webhook_endpoints`, and only exposes
+ * endpoint metadata (id, tenantId, provider, secretRef, active) — never
+ * business data. It must NEVER be used to read or write business tables; once
+ * the endpoint (and its tenantId) is resolved, recording the actual webhook
+ * event goes through the normal `withTenant(tenantId, …)` path so the event
+ * row lands under the regular tenant RLS policy.
+ */
+export async function withWebhookResolver<T>(fn: (tx: TenantClient) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT set_config('app.webhook_resolver', 'on', true)`;
+    return fn(tx);
+  });
+}
+
+/** What the webhook route is allowed to learn before authenticating. */
+export interface ResolvedWebhookEndpoint {
+  id: string;
+  tenantId: string;
+  provider: string;
+  secretRef: string;
+}
+
+/**
+ * The ONLY intended use of the resolver gate: turn a (endpointId, provider)
+ * pair from an unauthenticated request into its tenant. Deliberately narrow —
+ * callers get one row or null, never a client they could use to enumerate
+ * every tenant's endpoints. Inactive endpoints resolve to null (fail-closed).
+ */
+export async function resolveWebhookEndpoint(
+  endpointId: string,
+  provider: string,
+): Promise<ResolvedWebhookEndpoint | null> {
+  return withWebhookResolver((tx) =>
+    tx.webhookEndpoint.findFirst({
+      where: { id: endpointId, provider, active: true },
+      select: { id: true, tenantId: true, provider: true, secretRef: true },
+    }),
+  );
 }

@@ -28,6 +28,12 @@ const BUSINESS_PREFIXES = [
   "modules",
 ];
 
+// Webhooks (2.13) : SEULS les sous-chemins de GESTION (owner) passent par le
+// proxy front. La route de RÉCEPTION `/webhooks/:provider/:id` est publique et
+// reste exposée par l'API seule — la proxifier lui donnerait une seconde
+// surface, qui contournerait tout garde posé devant l'API.
+const WEBHOOK_ADMIN_PATHS = ["webhooks/endpoints", "webhooks/events"];
+
 const nextConfig: NextConfig = {
   // Slim container image for Scaleway Serverless Containers (ticket 0.4).
   output: "standalone",
@@ -42,6 +48,10 @@ const nextConfig: NextConfig = {
         source: `/backend/${prefix}`,
         destination: `${API_URL}/${prefix}`,
       })),
+      ...WEBHOOK_ADMIN_PATHS.flatMap((path) => [
+        { source: `/backend/${path}`, destination: `${API_URL}/${path}` },
+        { source: `/backend/${path}/:rest*`, destination: `${API_URL}/${path}/:rest*` },
+      ]),
     ];
   },
   async redirects() {
