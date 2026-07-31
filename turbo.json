@@ -12,7 +12,8 @@
     "lint": {},
     "test": {
       "dependsOn": ["^build"],
-      "env": ["DATABASE_URL", "APP_DATABASE_URL"]
+      "env": ["DATABASE_URL", "APP_DATABASE_URL"],
+      "outputs": ["junit.xml"]
     },
     "dev": {
       "dependsOn": ["^build"],

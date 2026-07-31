@@ -50,8 +50,34 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # `pipefail` : sans lui, le `tee` renverrait 0 et un échec de tests
+      # passerait pour un succès — le pire des défauts possibles sur cette
+      # étape. Rapport JUnit PAR PAQUET (chemin relatif au paquet, donc pas de
+      # collision) + journal brut, tous deux versés en artefact ci-dessous.
       - name: Tests (dont isolation multi-tenant — bloquants)
-        run: pnpm test
+        run: |
+          set -o pipefail
+          pnpm test -- --reporter=default --reporter=junit --outputFile.junit=./junit.xml 2>&1 \
+            | tee vitest-output.log
+
+      # `always()` : l'artefact n'a d'intérêt QUE quand l'étape précédente a
+      # échoué. Sans lui, le seul cas où l'on a besoin des logs est justement
+      # celui où ils ne sont pas produits.
+      #
+      # Motif : le tail des logs GitHub est saturé par le dump du conteneur
+      # PostgreSQL à l'arrêt, ce qui rend le nom du test en échec
+      # irrécupérable par l'API. Un CI dont on ne peut pas lire les échecs
+      # coûte une demi-heure à chaque build rouge.
+      - name: Rapports de tests (téléchargeables, même en cas d'échec)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-reports
+          path: |
+            vitest-output.log
+            **/junit.xml
+          retention-days: 14
+          if-no-files-found: warn
 
   python:
     runs-on: ubuntu-latest
