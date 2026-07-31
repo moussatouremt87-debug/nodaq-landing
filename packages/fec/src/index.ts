@@ -15,3 +15,4 @@ export {
   type DeriveOptions,
 } from "./derive.js";
 export { deriveFixedAssets, type FixedAssetProposal } from "./assets.js";
+export { deriveCharges, type DerivedCharge, type ChargeDerivation } from "./charges.js";

@@ -55,6 +55,7 @@ model Tenant {
   prospects           Prospect[]
   prospectInteractions ProspectInteraction[]
   prospectExclusions  ProspectExclusion[]
+  costEntries         CostEntry[]
 
   @@map("tenants")
   @@schema("public")
@@ -950,6 +951,34 @@ model Prospect {
   @@index([tenantId, stage])
   @@index([tenantId, optedOut])
   @@map("prospects")
+  @@schema("public")
+}
+
+/// Ticket 2.8 — charges d'un mois, par poste. Une marge se calcule sur ce qui
+/// est CONNU : un poste sans ligne est un poste MANQUANT (le moteur ne produit
+/// alors qu'une borne supérieure), jamais un poste à zéro. D'où l'absence de
+/// toute valeur par défaut et l'unicité (tenant, mois, poste, source) : un
+/// import FEC rejoué met à jour SA ligne sans écraser une saisie humaine.
+/// `amountCents` peut être NÉGATIF (avoirs supérieurs aux achats du mois) — le
+/// ramener à zéro fabriquerait une charge inexistante. Sealed by RLS (see the
+/// migration `rls_cost_entries`).
+model CostEntry {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  /// "YYYY-MM" — mois de rattachement de la charge.
+  month       String
+  /// Poste du catalogue versionné `costCategories.ts`.
+  category    String
+  amountCents Int      @map("amount_cents")
+  /// 'fec' (dérivée d'un import comptable) | 'saisi' (déclarée par l'owner).
+  source      String
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, month, category, source])
+  @@index([tenantId, month])
+  @@map("cost_entries")
   @@schema("public")
 }
 

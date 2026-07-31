@@ -44,6 +44,9 @@ export const OWNER_ONLY_TOOLS = new Set([
   // CA du mois, encours échu et nom du meilleur client (PII) : même statut
   // que les factures dont le rapport est tiré (2.11).
   "build_monthly_report",
+  // CA, charges et marge : la donnée financière la plus sensible du produit
+  // (salaires agrégés compris via le poste main-d'œuvre) — 2.8.
+  "analyze_margin",
   // Noms des salariés (PII RH) + charge dérivée du CA : owner-only (3.5).
   "plan_staffing",
   // CA réalisé + heures RH : même statut que le plan de charge (3.6).

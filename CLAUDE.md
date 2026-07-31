@@ -70,6 +70,36 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > effacés, compteurs gardés) ; la file affiche provenance + lignes + non
 > reconnues avant validation ; corps jamais logué ni renvoyé
 > (`docs/devis-email.md`).
+> **Marge (2.8)** : le ticket que 2.11 avait refusé de faire à moitié. Le
+> danger est ASYMÉTRIQUE — une charge oubliée fait TOUJOURS paraître la marge
+> meilleure. Règle centrale : une base de charges incomplète ne produit PAS un
+> chiffre mais une BORNE SUPÉRIEURE (« au plus X % ») — portée par une UNION
+> DISCRIMINÉE (`marginRatio` seulement si `complete`, `maxMarginRatio` si
+> borné : un écran ou un modèle ne PEUT pas afficher un point là où il n'y a
+> qu'un plafond), écran écrivant « au plus » AVANT le chiffre ; postes
+> manquants NOMMÉS, jamais supposés à zéro. TROIS causes de bornage : poste
+> manquant, charges NON RATTACHÉES (603/600/608 — `exclu` ≠ `non_rattache`,
+> les confondre faisait disparaître une charge réelle et permettait un
+> pourcentage FERME sur base amputée), et aucune charge sur un mois POSTÉRIEUR
+> (la compta du mois n'est peut-être pas arrêtée). Deux
+> niveaux empilés (marge brute = achats + sous-traitance ; marge
+> d'exploitation = + personnel/services/impôts/autres), qualifiés séparément.
+> Charges = dérivées du FEC à l'import (`deriveCharges`, AGRÉGATS seuls —
+> aucun libellé ni tiers, donnée confidentielle 2.14) + saisie owner, les deux
+> coexistant EN BASE par l'unicité (tenant, mois, poste, SOURCE) mais au
+> CALCUL la compta PRIME (sinon double compte) ; charges dérivées VALIDÉES
+> avant écriture (une ligne aberrante ne doit pas emporter tout l'import) ; une charge `fec` ne
+> se supprime pas à la main (409 — elle reviendrait, et son absence
+> embellirait la marge). Rattachement compte PCG → poste = CONFIG VERSIONNÉE
+> DATÉE SOURCÉE (`costCategories.ts`, ANC 2014-03) avec préfixe LE PLUS LONG
+> gagnant (611 sous-traitance avant 61 services — sinon une charge directe
+> tombe au mauvais niveau et la marge brute est surévaluée) ; 66/67/68/69
+> exclus CHACUN avec sa raison (68 : amortissement ≠ décaissement, garde
+> 2.19). Refus : aucun CA (pas de dénominateur), mois EN COURS (les charges
+> arrivent APRÈS les ventes → marge trop belle), poste hors catalogue (CHECK).
+> Montant NÉGATIF accepté (avoirs > achats). CA par `normalizeSaleInvoice`
+> (3.1/2.11). `analyze_margin` + routes `/marge*` OWNER-ONLY — masse salariale
+> agrégée (`docs/marge.md`).
 > **CRM & prospection (2.12)** : premier ticket qui stocke des données de
 > personnes NON clientes — le risque n'est ni l'injection ni l'affirmation,
 > c'est la LÉGITIMITÉ DE LA DÉTENTION. 3 gardes STRUCTURELLES : provenance

@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { PROSPECT_SOURCES, PROSPECT_STAGES } from "@nodaq/shared";
+import { COST_CATEGORIES, PROSPECT_SOURCES, PROSPECT_STAGES } from "@nodaq/shared";
 
-export { PROSPECT_SOURCES, PROSPECT_STAGES };
+export { COST_CATEGORIES, PROSPECT_SOURCES, PROSPECT_STAGES };
 
 /*
  * Typed client for the NODAQ API, through the same-origin /backend proxy
@@ -981,6 +981,93 @@ export type ProspectionPlan = z.infer<typeof ProspectionPlan>;
 
 export const getProspectionPlan = (): Promise<ProspectionPlan> =>
   call(ProspectionPlan, "/prospection/suivi");
+
+/* Marge (2.8) — le schéma REFUSE de porter un « marginRatio » nu : chaque
+ * niveau porte son `kind`, et un plafond ne peut donc pas s'afficher comme un
+ * résultat par un simple oubli de rendu. */
+const MarginLevelBase = {
+  level: z.string(),
+  label: z.string(),
+  costCents: z.number(),
+  missingCategories: z.array(z.string()),
+  marginCents: z.number(),
+  reason: z.string().min(1),
+};
+
+/* Union DISCRIMINÉE : un niveau borné ne porte pas de `marginRatio`, donc le
+ * front ne peut pas afficher un point là où il n'y a qu'un plafond. */
+export const MarginLevel = z.discriminatedUnion("kind", [
+  z.object({ ...MarginLevelBase, kind: z.literal("complete"), marginRatio: z.number() }),
+  z.object({
+    ...MarginLevelBase,
+    kind: z.literal("borne_superieure"),
+    maxMarginRatio: z.number(),
+  }),
+]);
+
+export const MarginReport = z.object({
+  month: z.string(),
+  rulesVersion: z.string(),
+  revenueCents: z.number(),
+  invoiceCount: z.number(),
+  costs: z.array(
+    z.object({
+      category: z.string(),
+      label: z.string(),
+      amountCents: z.number(),
+      source: z.string(),
+    }),
+  ),
+  levels: z.array(MarginLevel),
+  missingCategories: z.array(z.object({ id: z.string(), label: z.string() })),
+  unmappedCents: z.number(),
+  revenueTruncated: z.boolean(),
+  costsPossiblyPartial: z.boolean(),
+  notEvaluated: z.array(z.string()),
+  excludedCount: z.number(),
+  unusableCount: z.number(),
+  label: z.string().min(1),
+  revenueUnavailable: z.boolean().optional(),
+});
+export type MarginReport = z.infer<typeof MarginReport>;
+
+export const MarginRefusal = z.object({
+  refused: z.literal(true),
+  reason: z.string(),
+  rulesVersion: z.string().optional(),
+});
+
+export const getMargin = (
+  month?: string,
+): Promise<MarginReport | z.infer<typeof MarginRefusal>> =>
+  call(
+    z.union([MarginRefusal, MarginReport]),
+    `/marge${month ? `?month=${encodeURIComponent(month)}` : ""}`,
+  );
+
+export const CostLine = z.object({
+  id: z.string(),
+  category: z.string(),
+  amountCents: z.number(),
+  source: z.string(),
+});
+export type CostLine = z.infer<typeof CostLine>;
+
+export const getCosts = (month: string): Promise<{ costs: CostLine[] }> =>
+  call(
+    z.object({ costs: z.array(CostLine) }),
+    `/marge/charges?month=${encodeURIComponent(month)}`,
+  );
+
+export const putCost = (input: {
+  month: string;
+  category: string;
+  amountCents: number;
+}): Promise<{ id: string }> =>
+  call(z.object({ id: z.string() }), "/marge/charges", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
 
 export const ComplianceProfile = z.object({
   vertical: z.string(),
