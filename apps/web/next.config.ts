@@ -21,6 +21,7 @@ const BUSINESS_PREFIXES = [
   "factures",
   "echeancier",
   "rapports",
+  "marge",
   "prospects",
   "prospection",
   "stocks",

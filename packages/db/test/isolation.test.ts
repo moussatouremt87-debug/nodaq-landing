@@ -61,6 +61,8 @@ let einvoiceSubmissionAId: string;
 let einvoiceSubmissionBId: string;
 let taxDeadlineAId: string;
 let taxDeadlineBId: string;
+let costEntryAId: string;
+let costEntryBId: string;
 let prospectAId: string;
 let prospectBId: string;
 let interactionAId: string;
@@ -99,6 +101,7 @@ beforeAll(async () => {
   await admin.prospectInteraction.deleteMany();
   await admin.prospect.deleteMany();
   await admin.prospectExclusion.deleteMany();
+  await admin.costEntry.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -662,6 +665,32 @@ beforeAll(async () => {
   taxDeadlineAId = taxDeadlineA.id;
   taxDeadlineBId = taxDeadlineB.id;
 
+  // Charges mensuelles (2.8) : donnée financière du tenant.
+  const costA = await withTenant(tenantA, (tx) =>
+    tx.costEntry.create({
+      data: {
+        tenantId: tenantA,
+        month: "2026-06",
+        category: "achats",
+        amountCents: 123_400,
+        source: "fec",
+      },
+    }),
+  );
+  const costB = await withTenant(tenantB, (tx) =>
+    tx.costEntry.create({
+      data: {
+        tenantId: tenantB,
+        month: "2026-06",
+        category: "main_oeuvre",
+        amountCents: 987_600,
+        source: "saisi",
+      },
+    }),
+  );
+  costEntryAId = costA.id;
+  costEntryBId = costB.id;
+
   // Prospects (2.12) : données personnelles de TIERS non clients. Les noms de
   // test restent fictifs — jamais de PII réelle dans un jeu de test.
   const prospectA = await withTenant(tenantA, (tx) =>
@@ -917,6 +946,14 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur einvoice_submissions", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'einvoice_submissions'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur cost_entries", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'cost_entries'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -1760,6 +1797,73 @@ describe("isolation tenant (RLS)", () => {
   });
 });
 
+describe("isolation tenant (RLS) — cost_entries (2.8)", () => {
+  it("test 1 (cost_entries) — withTenant(A) ne voit QUE la charge de A", async () => {
+    const costs = await withTenant(tenantA, (tx) => tx.costEntry.findMany());
+    expect(costs).toHaveLength(1);
+    expect(costs[0]?.id).toBe(costEntryAId);
+    expect(costs.some((cost) => cost.tenantId === tenantB)).toBe(false);
+  });
+
+  it("test 2 (cost_entries) — sans contexte tenant, aucune ligne", async () => {
+    expect(await prisma.costEntry.findMany()).toHaveLength(0);
+  });
+
+  it("test 3 (cost_entries) — lire la charge de B depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.costEntry.findUnique({ where: { id: costEntryBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 3bis (cost_entries) — écrire dans le tenant B depuis A est rejeté (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.costEntry.create({
+          data: {
+            tenantId: tenantB,
+            month: "2026-07",
+            category: "achats",
+            amountCents: 1,
+            source: "saisi",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 4 — un poste hors catalogue est refusé EN BASE : sinon il serait ni compté ni manquant", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.costEntry.create({
+          data: {
+            tenantId: tenantA,
+            month: "2026-06",
+            category: "poste_invente",
+            amountCents: 100,
+            source: "saisi",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 5 — un montant NÉGATIF est accepté : des avoirs peuvent dépasser les achats", async () => {
+    const created = await withTenant(tenantA, (tx) =>
+      tx.costEntry.create({
+        data: {
+          tenantId: tenantA,
+          month: "2026-05",
+          category: "achats",
+          amountCents: -5_000,
+          source: "fec",
+        },
+      }),
+    );
+    expect(created.amountCents).toBe(-5_000);
+  });
+});
+
 describe("isolation tenant (RLS) — prospects (2.12)", () => {
   it("test 1 (prospects) — withTenant(A) ne voit QUE le prospect de A", async () => {
     const prospects = await withTenant(tenantA, (tx) => tx.prospect.findMany());
@@ -1853,6 +1957,20 @@ describe("isolation tenant (RLS) — prospects (2.12)", () => {
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
+  it("policy désactivée sur cost_entries => la fuite se produit aussi (les charges des deux tenants)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "cost_entries" DISABLE ROW LEVEL SECURITY`);
+    try {
+      const leaked = await withTenant(tenantA, (tx) => tx.costEntry.findMany());
+      expect(leaked.some((cost) => cost.tenantId === tenantB)).toBe(true);
+      expect((await prisma.costEntry.findMany()).length).toBeGreaterThan(1);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "cost_entries" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "cost_entries" FORCE ROW LEVEL SECURITY`);
+    }
+    const costs = await withTenant(tenantB, (tx) => tx.costEntry.findMany());
+    expect(costs).toHaveLength(1);
+  });
+
   it("policy désactivée sur prospect_interactions => la fuite se produit aussi (les comptes rendus des deux tenants)", async () => {
     await admin.$executeRawUnsafe(`ALTER TABLE "prospect_interactions" DISABLE ROW LEVEL SECURITY`);
     try {

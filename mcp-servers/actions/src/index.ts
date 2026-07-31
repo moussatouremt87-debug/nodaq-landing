@@ -18,6 +18,8 @@ export {
   ReportInvoice,
 } from "./monthlyReport.js";
 export type { Anomaly, AnomalyKind, MonthlyReport } from "./monthlyReport.js";
+export { buildMarginReport, CostEntry, MARGIN_RULES_VERSION } from "./margin.js";
+export type { MarginLevel, MarginReport } from "./margin.js";
 export {
   buildProspectionPlan,
   FOLLOWUP_AFTER_DAYS,

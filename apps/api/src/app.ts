@@ -5,7 +5,7 @@ import { z } from "zod";
 import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
 import { prisma, Prisma, resolveWebhookEndpoint, withOps, withTenant } from "@nodaq/db";
-import { deriveFixedAssets, deriveReceivables, parseFec } from "@nodaq/fec";
+import { deriveCharges, deriveFixedAssets, deriveReceivables, parseFec } from "@nodaq/fec";
 import {
   aggregateEReporting,
   auditInvoice,
@@ -57,7 +57,12 @@ import {
   VERTICALS,
 } from "@nodaq/shared";
 import type { RegistryAsset } from "@nodaq/shared";
-import { INTERACTION_KINDS, PROSPECT_SOURCES, PROSPECT_STAGES } from "@nodaq/shared";
+import {
+  COST_CATEGORY_IDS,
+  INTERACTION_KINDS,
+  PROSPECT_SOURCES,
+  PROSPECT_STAGES,
+} from "@nodaq/shared";
 import { auth } from "./auth.js";
 import { DocExtraction, DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.js";
 import {
@@ -834,6 +839,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           return reply.code(422).send({ error: "FEC invalide", details: parsed.errors });
         }
         const derivation = deriveReceivables(parsed.entries);
+        // Charges (2.8) : le FEC porte les charges RÉELLES. Sans cette
+        // dérivation, la marge reposerait sur une saisie mensuelle que
+        // personne ne tient — et l'oubli fait justement paraître la marge
+        // meilleure qu'elle n'est. Agrégats SEULEMENT (mois, poste, montant).
+        const chargeDerivation = deriveCharges(parsed.entries);
 
         // Métadonnée d'affichage : nom de fichier assaini, optionnel.
         let fileName: string | null = null;
@@ -896,6 +906,24 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
                     amountCents: BigInt(invoice.amountCents),
                     residualCents: BigInt(invoice.residualCents),
                     settled: invoice.settled,
+                  })),
+                });
+              }
+              // Charges dérivées (2.8) : on remplace les lignes de source
+              // `fec` du tenant — un nouvel import fait foi sur les précédents
+              // — SANS toucher aux saisies humaines (source `saisi`), que
+              // l'unicité (tenant, mois, poste, source) garde distinctes.
+              await tx.costEntry.deleteMany({
+                where: { tenantId: request.tenantId, source: "fec" },
+              });
+              for (let i = 0; i < chargeDerivation.charges.length; i += 5000) {
+                await tx.costEntry.createMany({
+                  data: chargeDerivation.charges.slice(i, i + 5000).map((charge) => ({
+                    tenantId: request.tenantId,
+                    month: charge.month,
+                    category: charge.category,
+                    amountCents: charge.amountCents,
+                    source: "fec",
                   })),
                 });
               }
@@ -2702,7 +2730,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.get("/rapports/mensuel", { preHandler: ownerRoute }, async (request, reply) => {
     void reply.header("cache-control", "private, no-store");
     const query = z
-      .object({ month: z.string().regex(/^\d{4}-\d{2}$/).optional() })
+      .object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() })
       .safeParse(request.query ?? {});
     if (!query.success) return reply.code(400).send({ error: "invalid query" });
     let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
@@ -2731,6 +2759,112 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     } finally {
       await toolset?.close().catch(() => undefined);
     }
+  });
+
+  // --- Marge (2.8) — owner-only : CA, charges (dont la masse salariale
+  // agrégée) et marge. La donnée financière la plus sensible du produit.
+
+  app.get("/marge", { preHandler: ownerRoute }, async (request, reply) => {
+    void reply.header("cache-control", "private, no-store");
+    const query = z
+      .object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() })
+      .safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send({ error: "invalid query" });
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+      });
+      const result = await toolset.execute("analyze_margin", {
+        ...(query.data.month !== undefined ? { month: query.data.month } : {}),
+      });
+      return JSON.parse(result) as unknown;
+    } catch (error) {
+      if (isUnknownTool(error)) {
+        return reply.code(409).send({ error: "outil indisponible pour ce tenant" });
+      }
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "margin unavailable",
+      );
+      return reply.code(503).send({ error: "marge indisponible" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
+
+  const CostBody = z
+    .object({
+      month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+      category: z.enum(COST_CATEGORY_IDS as [string, ...string[]]),
+      // Borne alignée sur le CHECK : au-delà c'est une faute de frappe, et le
+      // montant écraserait la marge sans qu'on le voie.
+      amountCents: z.number().int().min(-2_000_000_000).max(2_000_000_000),
+    })
+    .strict();
+
+  // Saisie d'une charge par l'owner. Source `saisi` : elle ne peut donc jamais
+  // être écrasée par un import FEC (l'unicité porte la source), ni l'écraser.
+  app.put("/marge/charges", { preHandler: ownerRoute }, async (request, reply) => {
+    const parsed = CostBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    void reply.header("cache-control", "private, no-store");
+    const { month, category, amountCents } = parsed.data;
+    const saved = await withTenant(request.tenantId, (tx) =>
+      tx.costEntry.upsert({
+        where: {
+          tenantId_month_category_source: {
+            tenantId: request.tenantId,
+            month,
+            category,
+            source: "saisi",
+          },
+        },
+        update: { amountCents },
+        create: { tenantId: request.tenantId, month, category, amountCents, source: "saisi" },
+        select: { id: true },
+      }),
+    );
+    return reply.code(200).send(saved);
+  });
+
+  app.get("/marge/charges", { preHandler: ownerRoute }, async (request, reply) => {
+    void reply.header("cache-control", "private, no-store");
+    const query = z
+      .object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/) })
+      .safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send({ error: "invalid query" });
+    const costs = await withTenant(request.tenantId, (tx) =>
+      tx.costEntry.findMany({
+        where: { month: query.data.month },
+        select: { id: true, category: true, amountCents: true, source: true },
+        orderBy: { category: "asc" },
+        take: 200,
+      }),
+    );
+    return { costs };
+  });
+
+  // Suppression d'une saisie HUMAINE uniquement : une charge dérivée du FEC ne
+  // se supprime pas à la main (elle reviendrait au prochain import, et son
+  // absence rendrait la marge trop belle sans qu'on sache pourquoi).
+  app.delete("/marge/charges/:id", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+    void reply.header("cache-control", "private, no-store");
+    const { count } = await withTenant(request.tenantId, (tx) =>
+      tx.costEntry.deleteMany({ where: { id: params.data.id, source: "saisi" } }),
+    );
+    if (count === 0) {
+      const exists = await withTenant(request.tenantId, (tx) =>
+        tx.costEntry.findUnique({ where: { id: params.data.id }, select: { source: true } }),
+      );
+      if (!exists) return reply.code(404).send({ error: "charge not found" });
+      return reply.code(409).send({ error: "charge dérivée du FEC : réimportez le fichier" });
+    }
+    return { deleted: true };
   });
 
   // --- Veille réglementaire (3.7) — owner-only : profil stratégique -------

@@ -45,6 +45,8 @@ import {
   monthsBetween,
   previousMonthKey,
 } from "./monthlyReport.js";
+import { buildMarginReport, MARGIN_RULES_VERSION } from "./margin.js";
+import type { CostEntry } from "./margin.js";
 import { buildProspectionPlan } from "./prospection.js";
 import type { InteractionKind, ProspectSource, ProspectStage } from "./prospection.js";
 import { simulateMaterialPrices } from "./materialScenario.js";
@@ -108,6 +110,7 @@ export const TOOL_POLICIES = {
   forecast_sales: { requiresValidation: false },
   analyze_customer_signals: { requiresValidation: false },
   build_monthly_report: { requiresValidation: false },
+  analyze_margin: { requiresValidation: false },
   list_prospection_followups: { requiresValidation: false },
   draft_prospect_email: { requiresValidation: true },
   plan_staffing: { requiresValidation: false },
@@ -428,6 +431,79 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       const report = buildMonthlyReport(invoices, target, { windowTruncated: truncated });
       return {
         content: [{ type: "text" as const, text: JSON.stringify(report) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "analyze_margin",
+    {
+      description:
+        "Marge (lecture seule, ticket 2.8) : marge brute et marge d'exploitation " +
+        "d'un mois, calculées sur les charges CONNUES (dérivées d'un import FEC ou " +
+        "saisies). Règle centrale : tant qu'un poste de charges manque, le résultat " +
+        "est une BORNE SUPÉRIEURE (« au plus X % »), jamais un chiffre — une charge " +
+        "oubliée fait toujours paraître la marge meilleure qu'elle n'est. Les postes " +
+        "manquants sont nommés.",
+      inputSchema: {
+        month: z
+          .string()
+          .regex(/^\d{4}-\d{2}$/)
+          .optional()
+          .describe("Mois analysé au format YYYY-MM (défaut : dernier mois complet)"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ month }) => {
+      const now = new Date();
+      const currentMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+      // Même refus qu'en 2.11 : un mois en cours compare des semaines à des
+      // mois pleins. Ici c'est pire — les charges arrivent en comptabilité
+      // APRÈS les ventes, donc un mois entamé montre un CA sans ses charges.
+      const target = month ?? previousMonthKey(currentMonth);
+      const monthsAgo = monthsBetween(target, currentMonth);
+      if (monthsAgo === null || monthsAgo <= 0 || monthsAgo > MAX_REPORT_AGE_MONTHS) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                refused: true,
+                rulesVersion: MARGIN_RULES_VERSION,
+                reason:
+                  monthsAgo !== null && monthsAgo <= 0
+                    ? "Ce mois n'est pas terminé : ses charges ne sont pas toutes " +
+                      "enregistrées, et une marge calculée dessus serait trop belle."
+                    : `Mois hors de la fenêtre de lecture (${MAX_REPORT_AGE_MONTHS} mois).`,
+              }),
+            },
+          ],
+        };
+      }
+      const costs = await withTenant(tenantId, (tx) =>
+        tx.costEntry.findMany({
+          where: { month: target },
+          select: { category: true, month: true, amountCents: true, source: true },
+          orderBy: { id: "asc" },
+          take: 200,
+        }),
+      );
+      // Facturier absent = AUCUN CA connu : le rapport le dira (dénominateur
+      // nul), plutôt que de faire échouer l'outil.
+      let invoices: Awaited<ReturnType<typeof fetchInvoiceWindow>>["invoices"] = [];
+      let revenueUnavailable = false;
+      try {
+        const pennylane = await getPennylaneClient(tenantId, context);
+        const window = await fetchInvoiceWindow(pennylane, now, { monthsBack: monthsAgo + 1 });
+        invoices = window.invoices;
+      } catch {
+        revenueUnavailable = true;
+      }
+      const report = buildMarginReport(invoices, costs as CostEntry[], target);
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify({ ...report, revenueUnavailable }) },
+        ],
       };
     },
   );
