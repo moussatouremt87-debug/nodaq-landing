@@ -143,6 +143,21 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > convertie) ; table `einvoice_submissions` (RLS, hash SHA-256 — NI PDF NI
 > XML, unique (tenant,numéro,direction)) ; routes `/factures/soumettre`,
 > `/soumissions`, `/ereporting*` OWNER-ONLY (`docs/pdp.md`).
+> **Échéancier fiscal & social (2.9)** : règles de date = CONFIG VERSIONNÉE
+> DATÉE sourcée (`taxCalendar.ts` — TVA/IS/CFE/DSN/URSSAF ; acomptes IS repris
+> de `frenchTax.ts`, jamais redupliqués ; CVAE ABSENTE assumée, calendrier de
+> suppression instable) ; moteur pur `buildTaxSchedule` — régime `inconnu`
+> BLOQUE les échéances de TVA (jamais un régime supposé), date CA3 = borne
+> BASSE marquée `dateIsApproximate` (elle dépend du SIREN), AUCUN montant
+> produit (test littéral : pas de propriété `amount*`) ; le calendrier n'est
+> JAMAIS stocké (recalculé à chaque lecture) — seules les décisions humaines
+> vivent dans `tax_deadlines` (RLS), et une surcharge orpheline est ignorée
+> (pas d'échéance fantôme après changement de régime) ; `plannedOutflowCents`
+> ne compte QUE les montants saisis par l'owner (garde 2.19 : non chiffré =
+> aucun impact trésorerie, `unpricedCount` jamais tu) ; outil
+> `check_tax_calendar` + routes `/echeancier*` + page OWNER-ONLY ; label
+> « ne remplace pas votre expert-comptable » PERMANENT
+> (`docs/echeancier-fiscal.md`).
 > **Webhooks entrants (2.13)** : SEULE surface sans session — la signature HMAC
 > (`t=<unix>,v1=<hmac(secret, "t.corps brut")>`, ±300 s, `timingSafeEqual`, corps
 > brut via plugin encapsulé, 1 Mo) est l'UNIQUE preuve ; le tenant vient de

@@ -18,6 +18,7 @@ const BUSINESS_PREFIXES = [
   "connectors",
   "classeur",
   "factures",
+  "echeancier",
   "stocks",
   "push",
   "ops",

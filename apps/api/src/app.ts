@@ -45,11 +45,15 @@ import {
   LEGAL_BASES,
   MODULE_CATALOG_VERSION,
   MODULES,
+  PAYROLL_PERIODICITIES,
   PROCESSING_TEMPLATES,
   resolveModules,
   renewalWall,
+  TAX_CALENDAR_VERSION,
+  TAX_OBLIGATIONS,
   TenantId,
   Uuid,
+  VAT_REGIMES,
   VERTICALS,
 } from "@nodaq/shared";
 import type { RegistryAsset } from "@nodaq/shared";
@@ -2608,6 +2612,131 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     } finally {
       await toolset?.close().catch(() => undefined);
     }
+  });
+
+  // --- Échéancier fiscal & social (2.9) -----------------------------------
+  // Le calendrier n'est JAMAIS stocké : il est recalculé à chaque lecture
+  // depuis le catalogue versionné et le profil fiscal. Seules les décisions
+  // humaines persistent (montant déclaré, payé, non applicable) — un
+  // changement de régime ne laisse donc pas derrière lui des échéances
+  // fantômes. Owner-only de bout en bout : régime fiscal et montants d'impôt.
+
+  app.get("/echeancier/profil", { preHandler: ownerRoute }, async (request) => {
+    const profile = await withTenant(request.tenantId, (tx) =>
+      tx.tenantProfile.findFirst({
+        select: {
+          vatRegime: true,
+          corporateTaxLiable: true,
+          fiscalYearEndMonth: true,
+          payrollPeriodicity: true,
+        },
+      }),
+    );
+    return {
+      // Défauts = état RÉEL tant que rien n'est renseigné : `inconnu` et
+      // `aucune` ne sont pas des valeurs commodes, ils bloquent la génération
+      // des échéances correspondantes plutôt que d'en inventer.
+      vatRegime: profile?.vatRegime ?? "inconnu",
+      corporateTaxLiable: profile?.corporateTaxLiable ?? true,
+      fiscalYearEndMonth: profile?.fiscalYearEndMonth ?? 12,
+      payrollPeriodicity: profile?.payrollPeriodicity ?? "aucune",
+      rulesVersion: TAX_CALENDAR_VERSION,
+    };
+  });
+
+  const FiscalProfileBody = z
+    .object({
+      vatRegime: z.enum(VAT_REGIMES),
+      corporateTaxLiable: z.boolean(),
+      fiscalYearEndMonth: z.number().int().min(1).max(12),
+      payrollPeriodicity: z.enum(PAYROLL_PERIODICITIES),
+    })
+    .strict();
+
+  app.put("/echeancier/profil", { preHandler: ownerRoute }, async (request, reply) => {
+    const parsed = FiscalProfileBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    const saved = await withTenant(request.tenantId, (tx) =>
+      tx.tenantProfile.upsert({
+        where: { tenantId: request.tenantId },
+        create: { tenantId: request.tenantId, ...parsed.data },
+        update: parsed.data,
+        select: {
+          vatRegime: true,
+          corporateTaxLiable: true,
+          fiscalYearEndMonth: true,
+          payrollPeriodicity: true,
+        },
+      }),
+    );
+    return saved;
+  });
+
+  /** Échéancier : MÊME chemin que l'agent (outil owner-gated du toolset). */
+  app.get("/echeancier", { preHandler: ownerRoute }, async (request, reply) => {
+    const query = z
+      .object({ monthsAhead: z.coerce.number().int().min(1).max(12).optional() })
+      .safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send({ error: "invalid query" });
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+      });
+      const result = await toolset.execute("check_tax_calendar", {
+        ...(query.data.monthsAhead !== undefined ? { monthsAhead: query.data.monthsAhead } : {}),
+      });
+      void reply.header("cache-control", "private, no-store");
+      return JSON.parse(result) as unknown;
+    } catch (error) {
+      if (isUnknownTool(error)) return reply.code(409).send({ error: "module désactivé" });
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "tax calendar unavailable",
+      );
+      return reply.code(503).send({ error: "échéancier indisponible" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
+
+  const DeadlineBody = z
+    .object({
+      obligationId: z.enum(Object.keys(TAX_OBLIGATIONS) as [string, ...string[]]),
+      dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      // Montant DÉCLARÉ par le dirigeant : le produit n'en dérive jamais un.
+      amountCents: z.number().int().min(0).max(100_000_000_00).nullable(),
+      status: z.enum(["prevu", "paye", "non_applicable"]),
+      note: z.string().max(500).nullable(),
+    })
+    .strict();
+
+  app.put("/echeancier/deadline", { preHandler: ownerRoute }, async (request, reply) => {
+    const parsed = DeadlineBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
+    const { obligationId, dueDate, ...rest } = parsed.data;
+    const saved = await withTenant(request.tenantId, (tx) =>
+      tx.taxDeadline.upsert({
+        where: {
+          tenantId_obligationId_dueDate: {
+            tenantId: request.tenantId,
+            obligationId,
+            dueDate: new Date(`${dueDate}T00:00:00Z`),
+          },
+        },
+        create: {
+          tenantId: request.tenantId,
+          obligationId,
+          dueDate: new Date(`${dueDate}T00:00:00Z`),
+          ...rest,
+        },
+        update: rest,
+        select: { obligationId: true, status: true, amountCents: true },
+      }),
+    );
+    return saved;
   });
 
   // --- Sync Silae (3.10) — alimente équipe + absences depuis le SIRH ------

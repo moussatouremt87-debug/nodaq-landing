@@ -7,6 +7,7 @@ import {
   getKpis,
   getMe,
   getPendingAction,
+  getTaxSchedule,
   decidePendingAction,
   listConnectors,
   listPendingActions,
@@ -93,6 +94,13 @@ export default function CockpitPage() {
   const [details, setDetails] = useState<Record<string, PendingActionDetail>>({});
   const [connectorCount, setConnectorCount] = useState<number | null>(null);
   const [demoMode, setDemoMode] = useState(false);
+  // Échéancier fiscal (2.9) — owner only côté API : un 403 laisse la carte
+  // muette, jamais une erreur à l'écran.
+  const [taxSchedule, setTaxSchedule] = useState<{
+    next: { label: string; dueDate: string } | null;
+    count: number;
+    plannedOutflowCents: number;
+  } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
@@ -120,6 +128,16 @@ export default function CockpitPage() {
     refresh();
     getMe()
       .then((session) => setFirstName(session.name?.split(" ")[0] ?? null))
+      .catch(() => undefined);
+    getTaxSchedule(3)
+      .then((schedule) => {
+        const upcoming = schedule.deadlines.filter((d) => d.status === "prevu");
+        setTaxSchedule({
+          next: upcoming[0] ? { label: upcoming[0].label, dueDate: upcoming[0].dueDate } : null,
+          count: upcoming.length,
+          plannedOutflowCents: schedule.plannedOutflowCents,
+        });
+      })
       .catch(() => undefined);
     listConnectors()
       .then((connectors) => {
@@ -233,6 +251,26 @@ export default function CockpitPage() {
               : "Aucune relance en attente"}
           </span>
         </div>
+        {taxSchedule && (
+          <div className="card">
+            <span className="overline">Prochaine échéance fiscale</span>
+            <div className="big">
+              {taxSchedule.next
+                ? new Date(taxSchedule.next.dueDate).toLocaleDateString("fr-FR")
+                : "—"}
+            </div>
+            <span className="delta up">
+              {taxSchedule.next
+                ? `${taxSchedule.next.label} · ${taxSchedule.count} sur 3 mois`
+                : "Aucune échéance — complétez votre régime"}
+            </span>
+            {taxSchedule.plannedOutflowCents > 0 && (
+              <div className="hint">
+                {formatEuroCents(taxSchedule.plannedOutflowCents)} chiffrés par vos soins
+              </div>
+            )}
+          </div>
+        )}
         <div className="card">
           <span className="overline">Actions exécutées</span>
           <div className="big">{executed}</div>

@@ -6,8 +6,17 @@ import { withTenant } from "@nodaq/db";
 import { route } from "@nodaq/llm";
 import { getBankClient, getPennylaneClient } from "@nodaq/mcp-connectors";
 import type { RegistryOptions } from "@nodaq/mcp-connectors";
-import { auditRgpdRegister, matchRegulatoryItems, TenantId, VERTICALS } from "@nodaq/shared";
-import type { Vertical } from "@nodaq/shared";
+import {
+  applyTaxOverrides,
+  auditRgpdRegister,
+  buildTaxSchedule,
+  matchRegulatoryItems,
+  PAYROLL_PERIODICITIES,
+  TenantId,
+  VAT_REGIMES,
+  VERTICALS,
+} from "@nodaq/shared";
+import type { PayrollPeriodicity, TaxDeadlineOverride, VatRegime, Vertical } from "@nodaq/shared";
 import { scoreLatePayment } from "./dunning.js";
 import { extractInvoiceFields } from "./invoiceExtraction.js";
 import { analyzeReputation } from "./reputation.js";
@@ -65,6 +74,7 @@ export const TOOL_POLICIES = {
   plan_staffing: { requiresValidation: false },
   analyze_hourly_performance: { requiresValidation: false },
   check_regulatory_watch: { requiresValidation: false },
+  check_tax_calendar: { requiresValidation: false },
   check_rgpd_register: { requiresValidation: false },
   analyze_reputation: { requiresValidation: false },
   draft_review_reply: { requiresValidation: true },
@@ -524,6 +534,108 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
             text: JSON.stringify({
               ...result,
               profile: { vertical, headcount, headcountSource },
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "check_tax_calendar",
+    {
+      description:
+        "Échéancier fiscal et social (lecture seule, ticket 2.9) : prochaines échéances " +
+        "de TVA, d'IS, de CFE et de cotisations sociales, dérivées du régime fiscal du " +
+        "tenant depuis un calendrier versionné daté et sourcé. Chaque date est " +
+        "justifiée ; une date qui dépend du SIREN est signalée comme approchée. Ne " +
+        "produit AUCUN montant : seuls les montants saisis par le dirigeant apparaissent.",
+      inputSchema: {
+        monthsAhead: z
+          .number()
+          .int()
+          .min(1)
+          .max(12)
+          .optional()
+          .describe("Profondeur de l'échéancier en mois (défaut 3)"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ monthsAhead }) => {
+      const now = new Date();
+      const from = now.toISOString().slice(0, 10);
+      const horizon = new Date(now);
+      horizon.setUTCMonth(horizon.getUTCMonth() + (monthsAhead ?? 3));
+      const to = horizon.toISOString().slice(0, 10);
+
+      const { stored, activeStaff, overrides } = await withTenant(tenantId, async (tx) => ({
+        stored: await tx.tenantProfile.findFirst({
+          select: {
+            vatRegime: true,
+            corporateTaxLiable: true,
+            fiscalYearEndMonth: true,
+            payrollPeriodicity: true,
+            headcountOverride: true,
+          },
+        }),
+        activeStaff: await tx.staffMember.count({ where: { active: true } }),
+        overrides: await tx.taxDeadline.findMany({
+          where: { dueDate: { gte: new Date(`${from}T00:00:00Z`), lte: new Date(`${to}T00:00:00Z`) } },
+          select: {
+            obligationId: true,
+            dueDate: true,
+            amountCents: true,
+            status: true,
+            note: true,
+          },
+        }),
+      }));
+
+      // Un régime non reconnu retombe sur `inconnu` : l'échéancier le DIT au
+      // lieu de proposer les échéances d'un régime supposé.
+      const vatRegime: VatRegime = (VAT_REGIMES as readonly string[]).includes(
+        stored?.vatRegime ?? "",
+      )
+        ? (stored?.vatRegime as VatRegime)
+        : "inconnu";
+      const payrollPeriodicity: PayrollPeriodicity = (
+        PAYROLL_PERIODICITIES as readonly string[]
+      ).includes(stored?.payrollPeriodicity ?? "")
+        ? (stored?.payrollPeriodicity as PayrollPeriodicity)
+        : "aucune";
+      // Même règle d'effectif qu'en 3.7 : déclaré, sinon dérivé de l'équipe,
+      // sinon INCONNU (jamais lu comme zéro).
+      const headcount = stored?.headcountOverride ?? (activeStaff > 0 ? activeStaff : null);
+
+      const profile = {
+        vatRegime,
+        corporateTaxLiable: stored?.corporateTaxLiable ?? true,
+        fiscalYearEndMonth: stored?.fiscalYearEndMonth ?? 12,
+        payrollPeriodicity,
+        headcount,
+      };
+      const planned = applyTaxOverrides(
+        buildTaxSchedule(profile, from, to),
+        overrides.map(
+          (row): TaxDeadlineOverride => ({
+            obligationId: row.obligationId,
+            dueDate: row.dueDate.toISOString().slice(0, 10),
+            amountCents: row.amountCents,
+            status: row.status as TaxDeadlineOverride["status"],
+            note: row.note,
+          }),
+        ),
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              ...planned,
+              profile,
+              label:
+                "Calendrier indicatif issu d'un catalogue versionné : il ne remplace " +
+                "ni votre expert-comptable ni votre espace professionnel.",
             }),
           },
         ],
