@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { ApiError, getMe, listPendingActions } from "../lib/api";
+import { ApiError, getMe, getModules, listPendingActions } from "../lib/api";
 import type { Me } from "../lib/api";
 
 /*
@@ -85,6 +85,7 @@ const LINKS = [
   { href: "/connecteurs", label: "Connecteurs", icon: "connecteurs" },
   { href: "/validation", label: "File de validation", icon: "validation" },
   { href: "/reglages/notifications", label: "Notifications", icon: "notifications" },
+  { href: "/reglages/modules", label: "Modules", icon: "connecteurs" },
 ];
 
 const TITLES: Record<string, string> = {
@@ -100,6 +101,7 @@ const TITLES: Record<string, string> = {
   "/connecteurs": "Connecteurs",
   "/validation": "File de validation",
   "/reglages/notifications": "Notifications",
+  "/reglages/modules": "Modules",
   "/ops/support": "Support (back-office)",
 };
 
@@ -108,6 +110,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [me, setMe] = useState<Me | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
+  const [inactiveHrefs, setInactiveHrefs] = useState<Set<string>>(new Set());
   const onLogin = pathname === "/login";
 
   useEffect(() => {
@@ -131,6 +134,20 @@ export function Shell({ children }: { children: ReactNode }) {
     listPendingActions()
       .then((actions) => setPendingCount(actions.filter((a) => a.status === "pending").length))
       .catch(() => undefined);
+  }, [onLogin, me, pathname]);
+
+  // Modules par vertical (3.11) : la nav suit l'état effectif. FAIL-OPEN en
+  // erreur (tout visible) — la visibilité est du confort produit, la
+  // sécurité reste sur les routes API.
+  useEffect(() => {
+    if (onLogin || me === null) return;
+    getModules()
+      .then((state) =>
+        setInactiveHrefs(
+          new Set(state.modules.filter((m) => !m.active).map((m) => m.href)),
+        ),
+      )
+      .catch(() => setInactiveHrefs(new Set()));
   }, [onLogin, me, pathname]);
 
   const activeOrg = me?.memberships.find((m) => m.tenantId === me.activeOrganizationId);
@@ -163,7 +180,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <span className="pill-souverain">Souverain</span>
         </div>
         <nav className="nav">
-          {LINKS.map((link) => (
+          {LINKS.filter((link) => !inactiveHrefs.has(link.href)).map((link) => (
             <Link
               key={link.href}
               href={link.href}

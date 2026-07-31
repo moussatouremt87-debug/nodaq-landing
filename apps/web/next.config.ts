@@ -25,6 +25,7 @@ const BUSINESS_PREFIXES = [
   "reglementaire",
   "avis",
   "rgpd",
+  "modules",
 ];
 
 const nextConfig: NextConfig = {

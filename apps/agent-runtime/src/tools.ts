@@ -5,7 +5,9 @@ import type { ToolDefinition } from "@nodaq/llm";
 import { createActionsMcpServer, TOOL_POLICIES } from "@nodaq/mcp-actions";
 import type { ActionsServerContext } from "@nodaq/mcp-actions";
 import { createConnectorsMcpServer } from "@nodaq/mcp-connectors";
-import { TenantId } from "@nodaq/shared";
+import { inactiveModuleTools, resolveModules, TenantId, VERTICALS } from "@nodaq/shared";
+import type { Vertical } from "@nodaq/shared";
+import { withTenant } from "@nodaq/db";
 
 /*
  * Toolset of the Compta/Direction employee. THE provenance rule (1.2/1.3
@@ -86,6 +88,30 @@ async function connectInMemory(server: McpServer): Promise<Client> {
   return client;
 }
 
+/**
+ * Tools carried by modules the tenant deactivated (3.11): resolved from the
+ * versioned catalog (vertical default + owner overrides in tenant_profiles).
+ * Fail-open: no profile row = pure vertical defaults for "autre" (everything
+ * on) — a missing profile must never amputate the agent.
+ */
+async function moduleFilteredTools(tenantId: string): Promise<Set<string>> {
+  const profile = await withTenant(tenantId, (tx) =>
+    tx.tenantProfile.findFirst({
+      select: { vertical: true, moduleOverrides: true },
+    }),
+  );
+  const vertical: Vertical = (VERTICALS as readonly string[]).includes(profile?.vertical ?? "")
+    ? (profile?.vertical as Vertical)
+    : "autre";
+  const overrides =
+    profile?.moduleOverrides !== null &&
+    typeof profile?.moduleOverrides === "object" &&
+    !Array.isArray(profile?.moduleOverrides)
+      ? (profile?.moduleOverrides as Record<string, unknown>)
+      : {};
+  return inactiveModuleTools(resolveModules(vertical, overrides));
+}
+
 export async function buildToolset(context: ToolsetContext): Promise<Toolset> {
   const tenantId = TenantId.parse(context.tenantId);
   const serverContext = { ...context, tenantId };
@@ -94,6 +120,7 @@ export async function buildToolset(context: ToolsetContext): Promise<Toolset> {
   const actionsClient = await connectInMemory(createActionsMcpServer(serverContext));
 
   const isOwner = context.role === "owner";
+  const disabledTools = await moduleFilteredTools(tenantId);
   const routing = new Map<string, Client>();
   const definitions: ToolDefinition[] = [];
   for (const [client, source] of [
@@ -103,6 +130,9 @@ export async function buildToolset(context: ToolsetContext): Promise<Toolset> {
     const { tools } = await client.listTools();
     for (const tool of tools) {
       if (OWNER_ONLY_TOOLS.has(tool.name) && !isOwner) continue;
+      // Module désactivé (3.11) : l'outil sort du toolset — même mécanique
+      // fail-closed que le gate owner (absent du routage => unknown tool).
+      if (disabledTools.has(tool.name)) continue;
       routing.set(tool.name, client);
       definitions.push({
         name: tool.name,

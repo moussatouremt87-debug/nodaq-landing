@@ -289,6 +289,36 @@ describe("ComptaAgent — the full loop", () => {
     }
   });
 
+  it("module désactivé (3.11) : ses outils sortent du toolset, fail-open sans profil", async () => {
+    // Profil avec RH et stocks désactivés : les outils rattachés disparaissent
+    // même pour l'owner (absent du routage => unknown tool).
+    await withTenant(tenantId, (tx) =>
+      tx.tenantProfile.upsert({
+        where: { tenantId },
+        create: { tenantId, moduleOverrides: { rh: false, stocks: false } },
+        update: { moduleOverrides: { rh: false, stocks: false } },
+      }),
+    );
+    try {
+      const toolset = await buildToolset({ tenantId, secretProvider: vault, role: "owner" });
+      const names = toolset.definitions.map((d) => d.name);
+      for (const tool of ["plan_staffing", "silae_get_employees", "check_stock_alerts", "adjust_stock"]) {
+        expect(names.includes(tool)).toBe(false);
+        await expect(toolset.execute(tool, {})).rejects.toThrow(/unknown tool/);
+      }
+      // Les modules restés actifs et le cœur compta ne bougent pas.
+      expect(names).toContain("check_regulatory_watch");
+      expect(names).toContain("compute_treasury_forecast");
+      await toolset.close();
+    } finally {
+      // Fail-open vérifié : sans profil, tout revient.
+      await withTenant(tenantId, (tx) => tx.tenantProfile.deleteMany({}));
+    }
+    const restored = await buildToolset({ tenantId, secretProvider: vault, role: "owner" });
+    expect(restored.definitions.map((d) => d.name)).toContain("plan_staffing");
+    await restored.close();
+  });
+
   it("traces a run to Langfuse — METADATA ONLY, never content", async () => {
     script = [
       {
