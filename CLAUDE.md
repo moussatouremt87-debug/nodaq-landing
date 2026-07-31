@@ -33,7 +33,10 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > **Apprentissage classeur (2.16b, JALON 3)** : mémoire fournisseur DÉRIVÉE des
 > corrections (`classeurMemory.ts`, pur) — jamais stockée, recalculée à la
 > lecture (doctrine 2.9) ; PAS de réentraînement (ni vecteur ni fine-tuning) ;
-> 4 refus testés : une seule correction ne fait pas règle (`MIN_EVIDENCE`),
+> preuve = journal `corrections[]` UNIQUEMENT (jamais `extraction`, qui porte
+> les valeurs de la mémoire — sinon la règle s'auto-conforte) ; comparaison
+> NORMALISÉE (« eur » ≠ désaccord) ; 4 refus testés : une seule correction ne
+> fait pas règle (`MIN_EVIDENCE`),
 > une contradiction GÈLE le champ (jamais d'arbitrage à la place de l'humain),
 > la mémoire COMBLE ou SIGNALE mais n'écrase JAMAIS une lecture du modèle, et
 > un tenant n'apprend JAMAIS d'un autre (`withTenant`, test dédié) ; AUCUN

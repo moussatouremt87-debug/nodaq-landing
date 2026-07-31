@@ -26,15 +26,15 @@ const EMPTY: DocExtraction = {
   totalInclTax: null,
 };
 
+/** Un document dont l'humain a SAISI les champs de `extra` (journal 2.16). */
 function corrected(
   supplierName: string,
   extra: Partial<DocExtraction> = {},
-  correctionCount = 1,
+  humanCorrected = true,
 ): CorrectedDocument {
   return {
-    original: { supplierName: "lu par le modèle" },
     final: { ...EMPTY, supplierName, ...extra },
-    correctionCount,
+    humanFields: humanCorrected ? (extra as Record<string, unknown>) : {},
   };
 }
 
@@ -85,17 +85,48 @@ describe("buildSupplierMemory", () => {
 
   it("un document NON corrigé n'est pas une vérité terrain", () => {
     const memories = buildSupplierMemory([
-      corrected("Sogedis", { currency: "EUR" }, 0),
-      corrected("Sogedis", { currency: "EUR" }, 0),
+      corrected("Sogedis", { currency: "EUR" }, false),
+      corrected("Sogedis", { currency: "EUR" }, false),
     ]);
     expect(memories).toHaveLength(0);
+  });
+
+  it("AUTO-ALIMENTATION : une valeur posée par la mémoire ne se conforte pas", () => {
+    // Deux corrections humaines fondent la règle « EUR ». Un troisième
+    // document reçoit EUR de la MÉMOIRE, et l'humain n'y corrige qu'un autre
+    // champ : la preuve doit rester à 2, jamais monter à 3.
+    const memories = buildSupplierMemory([
+      corrected("Sogedis", { currency: "EUR" }),
+      corrected("Sogedis", { currency: "EUR" }),
+      {
+        // `final` porte EUR (posé par la mémoire), le journal humain non.
+        final: { ...EMPTY, supplierName: "Sogedis", currency: "EUR" },
+        humanFields: { docType: "recu" },
+      },
+    ]);
+    expect(memories[0]?.fields.find((f) => f.field === "currency")?.evidence).toBe(2);
+  });
+
+  it("une variation de CASSE n'est pas une contradiction humaine", () => {
+    const memories = buildSupplierMemory([
+      corrected("Sogedis", { currency: "EUR" }),
+      corrected("SOGEDIS", { currency: "eur" }),
+    ]);
+    expect(memories[0]?.conflicts).toHaveLength(0);
+    expect(memories[0]?.fields.find((f) => f.field === "currency")?.evidence).toBe(2);
   });
 
   it("regroupe sur le nom VALIDÉ, jamais sur celui lu par le modèle", () => {
     // C'est ce qui permet d'apprendre l'orthographe quand le modèle se trompe.
     const memories = buildSupplierMemory([
-      { original: { supplierName: "S0GEDIS" }, final: { ...EMPTY, supplierName: "Sogedis", currency: "EUR" }, correctionCount: 1 },
-      { original: { supplierName: "SOGEDlS" }, final: { ...EMPTY, supplierName: "Sogedis", currency: "EUR" }, correctionCount: 1 },
+      {
+        final: { ...EMPTY, supplierName: "Sogedis", currency: "EUR" },
+        humanFields: { supplierName: "Sogedis" },
+      },
+      {
+        final: { ...EMPTY, supplierName: "Sogedis", currency: "EUR" },
+        humanFields: { supplierName: "Sogedis" },
+      },
     ]);
     expect(memories).toHaveLength(1);
     expect(memories[0]?.displayName).toBe("Sogedis");

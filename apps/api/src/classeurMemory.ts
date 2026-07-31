@@ -57,12 +57,46 @@ export function supplierKey(name: string | null | undefined): string | null {
 
 /** Un document déjà corrigé par un humain — la vérité terrain de 2.16. */
 export interface CorrectedDocument {
-  /** Ce que le modèle avait lu au classement (figé par 2.16). */
-  original: Partial<DocExtraction> | null;
-  /** Ce que l'humain a validé (extraction courante). */
-  final: Partial<DocExtraction> | null;
-  /** Nombre de corrections humaines portées sur ce document. */
-  correctionCount: number;
+  /** Extraction courante : sert UNIQUEMENT à rattacher le document à un
+   * fournisseur (le nom validé). Jamais à fonder une preuve : elle porte
+   * aussi les valeurs posées par la mémoire elle-même. */
+  final: Record<string, unknown> | null;
+  /**
+   * Champs RÉELLEMENT saisis par un humain, extraits du journal append-only
+   * `corrections[]` (dernière valeur gagnante). C'est la SEULE source de
+   * preuve : sans cette distinction, une valeur proposée par la mémoire
+   * reviendrait la conforter au tour suivant, et la règle s'auto-entretiendrait
+   * jusqu'à survivre à la sortie de fenêtre des corrections qui la fondaient.
+   */
+  humanFields: Partial<Record<LearnableField, unknown>>;
+}
+
+/** Journal de corrections d'un document (2.16) : `[{by, at, fields}]`. */
+export function humanFieldsOf(corrections: unknown): Partial<Record<LearnableField, unknown>> {
+  const fields: Partial<Record<LearnableField, unknown>> = {};
+  if (!Array.isArray(corrections)) return fields;
+  for (const entry of corrections) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const patch = (entry as { fields?: unknown }).fields;
+    if (typeof patch !== "object" || patch === null) continue;
+    for (const field of LEARNABLE_FIELDS) {
+      const value = (patch as Record<string, unknown>)[field];
+      // La dernière saisie gagne : l'humain a pu se corriger lui-même.
+      if (value !== undefined) fields[field] = value;
+    }
+  }
+  return fields;
+}
+
+/**
+ * Forme comparable d'une valeur. Le REGROUPEMENT normalise (casse, accents,
+ * ponctuation) : la COMPARAISON doit en faire autant, sinon « EUR » et « eur »
+ * passeraient pour un désaccord humain et gèleraient le champ pour toujours,
+ * sur du bruit d'orthographe.
+ */
+function comparable(field: LearnableField, value: string): string {
+  if (field === "supplierName") return supplierKey(value) ?? value.toLowerCase();
+  return value.trim().toLowerCase();
 }
 
 export interface LearnedField {
@@ -74,7 +108,7 @@ export interface LearnedField {
 
 export interface SupplierMemory {
   key: string;
-  /** Orthographe retenue par l'humain (la plus récente et concordante). */
+  /** Orthographe la plus fréquemment saisie par l'humain pour ce fournisseur. */
   displayName: string;
   fields: LearnedField[];
   /** Champs où l'humain s'est contredit : jamais appris, toujours comptés. */
@@ -84,7 +118,7 @@ export interface SupplierMemory {
 }
 
 function stringField(
-  source: Partial<DocExtraction> | null,
+  source: Record<string, unknown> | null | undefined,
   field: LearnableField,
 ): string | null {
   const value = source?.[field];
@@ -103,12 +137,14 @@ export function buildSupplierMemory(documents: readonly CorrectedDocument[]): Su
   const groups = new Map<string, { names: string[]; values: Map<LearnableField, string[]> }>();
 
   for (const document of documents) {
-    // Seuls les documents RÉELLEMENT corrigés font foi : une extraction
-    // acceptée sans relecture n'est pas une vérité terrain.
-    if (document.correctionCount <= 0) continue;
+    // Le rattachement se fait sur le nom VALIDÉ (il peut venir du modèle si
+    // l'humain ne l'a pas contredit) ; la PREUVE, elle, ne vient que du
+    // journal des corrections humaines.
     const finalName = stringField(document.final, "supplierName");
     const key = supplierKey(finalName);
     if (key === null || finalName === null) continue;
+    const human = document.humanFields;
+    if (Object.keys(human).length === 0) continue;
 
     let group = groups.get(key);
     if (!group) {
@@ -117,10 +153,10 @@ export function buildSupplierMemory(documents: readonly CorrectedDocument[]): Su
     }
     group.names.push(finalName);
     for (const field of LEARNABLE_FIELDS) {
-      const value = stringField(document.final, field);
-      if (value === null) continue;
+      const raw = human[field];
+      if (typeof raw !== "string" || raw.trim().length === 0) continue;
       const bucket = group.values.get(field) ?? [];
-      bucket.push(value);
+      bucket.push(raw.trim());
       group.values.set(field, bucket);
     }
   }
@@ -132,21 +168,33 @@ export function buildSupplierMemory(documents: readonly CorrectedDocument[]): Su
     for (const field of LEARNABLE_FIELDS) {
       const values = group.values.get(field) ?? [];
       if (values.length === 0) continue;
-      const counts = new Map<string, number>();
-      for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-      const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-      const [topValue, topCount] = ranked[0] as [string, number];
+      // Comptage sur la forme COMPARABLE (une variation de casse n'est pas
+      // un désaccord), affichage sur la forme la plus fréquemment saisie.
+      const counts = new Map<string, { count: number; display: string }>();
+      for (const value of values) {
+        const bucketKey = comparable(field, value);
+        const entry = counts.get(bucketKey);
+        if (entry) entry.count += 1;
+        else counts.set(bucketKey, { count: 1, display: value });
+      }
+      const ranked = [...counts.values()].sort((a, b) => b.count - a.count);
+      const top = ranked[0] as { count: number; display: string };
       // Contradiction : l'humain a tranché différemment sur le même champ.
       // On n'arbitre PAS à sa place — le champ n'est pas appris.
       if (ranked.length > 1) {
         conflicts.push(field);
         continue;
       }
-      if (topCount >= MIN_EVIDENCE) fields.push({ field, value: topValue, evidence: topCount });
+      if (top.count >= MIN_EVIDENCE) {
+        fields.push({ field, value: top.display, evidence: top.count });
+      }
     }
+    const nameCounts = new Map<string, number>();
+    for (const name of group.names) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+    const displayName = [...nameCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? group.names[0];
     memories.push({
       key,
-      displayName: (group.names[0] as string),
+      displayName: displayName as string,
       fields,
       conflicts,
       documents: group.names.length,
@@ -199,9 +247,6 @@ export function applySupplierMemory(
   for (const learned of memory.fields) {
     const current = stringField(extraction, learned.field);
     if (current === null) {
-      // docType a une valeur par défaut ("autre") : la traiter comme un trou
-      // serait faux, mais la laisser bloquer l'apprentissage aussi.
-      if (learned.field === "docType" && extraction.docType !== "autre") continue;
       (next as Record<string, unknown>)[learned.field] = learned.value;
       applied.push({ field: learned.field, value: learned.value, evidence: learned.evidence, kind: "comble" });
       continue;

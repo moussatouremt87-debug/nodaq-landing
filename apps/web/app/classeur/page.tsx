@@ -256,7 +256,12 @@ export default function ClasseurPage() {
             concordantes pour qu&apos;une règle s&apos;applique, et un désaccord la gèle.
           </p>
           <ul className="hint" style={{ margin: 0, paddingLeft: 18 }}>
-            {memory.suppliers.slice(0, 8).map((supplier) => (
+            {memory.suppliers
+              .filter(
+                (supplier) => supplier.fields.length > 0 || supplier.conflicts.length > 0,
+              )
+              .slice(0, 8)
+              .map((supplier) => (
               <li key={supplier.key}>
                 <b>{supplier.displayName}</b>
                 {supplier.fields.length > 0 && (
@@ -270,8 +275,8 @@ export default function ClasseurPage() {
                 {supplier.conflicts.length > 0 && (
                   <> · à trancher : {supplier.conflicts.join(", ")}</>
                 )}
-              </li>
-            ))}
+                </li>
+              ))}
           </ul>
         </div>
       )}

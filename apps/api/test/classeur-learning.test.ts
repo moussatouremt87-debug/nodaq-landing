@@ -207,6 +207,33 @@ describe("boucle d'apprentissage", () => {
     }
   });
 
+  it("une fois l'humain arbitré, la suggestion cesse de s'afficher", async () => {
+    const previous = modelReads;
+    modelReads = { ...previous, currency: "USD" };
+    let doc: Doc;
+    try {
+      doc = await upload(`a8-${RUN}`, cookieA);
+    } finally {
+      modelReads = previous;
+    }
+    expect(doc.learned?.some((entry) => entry.field === "currency")).toBe(true);
+
+    // L'owner tranche : « à trancher » ne doit pas rester au présent pour
+    // toujours. Les traces sur les AUTRES champs, elles, survivent.
+    await correct(doc.id, { currency: "EUR" }, cookieA);
+    const after = await app.inject({
+      method: "GET",
+      url: "/classeur/documents",
+      headers: { cookie: cookieA },
+    });
+    const refreshed = (after.json() as { documents: Doc[] }).documents.find(
+      (entry) => entry.id === doc.id,
+    );
+    expect(refreshed?.learned?.some((entry) => entry.field === "currency")).toBeFalsy();
+    // Les listes de documents ne sont pas mises en cache non plus.
+    expect(after.headers["cache-control"]).toBe("private, no-store");
+  });
+
   it("CLOISONNEMENT : les corrections d'un tenant n'apprennent RIEN à l'autre", async () => {
     // Le tenant A a appris « Sogedis paie en EUR ». Le tenant B, qui n'a rien
     // corrigé, doit repartir de zéro sur le MÊME fournisseur.

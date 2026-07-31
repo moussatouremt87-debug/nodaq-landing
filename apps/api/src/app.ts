@@ -58,15 +58,15 @@ import {
 } from "@nodaq/shared";
 import type { RegistryAsset } from "@nodaq/shared";
 import { auth } from "./auth.js";
-import { DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.js";
+import { DocExtraction, DOC_TYPES, extractDocumentFields, matchTransactions } from "./classeur.js";
 import {
   applySupplierMemory,
   buildSupplierMemory,
+  humanFieldsOf,
   MEMORY_WINDOW,
   MIN_EVIDENCE,
 } from "./classeurMemory.js";
 import type { MemoryApplication, SupplierMemory } from "./classeurMemory.js";
-import type { DocExtraction } from "./classeur.js";
 import { defaultExecutors } from "./executors.js";
 import type { ExecutorRegistry } from "./executors.js";
 import {
@@ -1016,17 +1016,21 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const loadSupplierMemory = async (tenantId: string): Promise<SupplierMemory[]> => {
     const rows = await withTenant(tenantId, (tx) =>
       tx.classeurDocument.findMany({
-        where: { status: { in: ["verifie", "rapproche"] } },
+        // Seuls les documents PORTANT une correction humaine : les autres
+        // n'apprennent rien et coûteraient une lecture pour rien.
+        where: { status: { in: ["verifie", "rapproche"] }, NOT: { corrections: { equals: [] } } },
         orderBy: { updatedAt: "desc" },
         take: MEMORY_WINDOW,
-        select: { extraction: true, originalExtraction: true, corrections: true },
+        // `originalExtraction` n'est PAS relue : la preuve vient du journal
+        // des corrections, pas d'une comparaison avec la lecture du modèle.
+        select: { extraction: true, corrections: true },
       }),
     );
     return buildSupplierMemory(
       rows.map((row) => ({
-        original: (row.originalExtraction ?? null) as DocExtraction | null,
-        final: (row.extraction ?? null) as DocExtraction | null,
-        correctionCount: Array.isArray(row.corrections) ? row.corrections.length : 0,
+        // JSONB relu depuis la base : validé, jamais casté (frontières typées).
+        final: DocExtraction.partial().safeParse(row.extraction).data ?? null,
+        humanFields: humanFieldsOf(row.corrections),
       })),
     );
   };
@@ -1056,7 +1060,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return null;
   }
 
-  app.get("/classeur/documents", { preHandler: businessRoute }, async (request) => {
+  app.get("/classeur/documents", { preHandler: businessRoute }, async (request, reply) => {
+    // Noms de fournisseurs et montants : jamais mis en cache par un
+    // intermédiaire (même doctrine que la mémoire et l'échéancier).
+    void reply.header("cache-control", "private, no-store");
     const documents = await withTenant(request.tenantId, (tx) =>
       tx.classeurDocument.findMany({
         orderBy: { createdAt: "desc" },
@@ -1311,7 +1318,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       updated = await withTenant(request.tenantId, async (tx) => {
         const document = await tx.classeurDocument.findUnique({
           where: { id },
-          select: { extraction: true, corrections: true, docType: true, status: true },
+          select: {
+            extraction: true,
+            corrections: true,
+            docType: true,
+            status: true,
+            learned: true,
+          },
         });
         if (!document) return null;
         // Append-only FAIL-CLOSED : un historique corrompu (pas un tableau)
@@ -1330,11 +1343,23 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           ...document.corrections,
           { by: request.authSession.user.id, at: new Date().toISOString(), fields },
         ] as Prisma.InputJsonValue;
+        // L'humain a tranché : la suggestion de la mémoire sur CE champ n'a
+        // plus à s'afficher (« à trancher » resterait au présent pour
+        // toujours). Les autres traces d'explicabilité restent.
+        const remainingLearned = Array.isArray(document.learned)
+          ? document.learned.filter(
+              (entry) =>
+                typeof entry !== "object" ||
+                entry === null ||
+                !((entry as { field?: unknown }).field as string in fields),
+            )
+          : document.learned;
         return tx.classeurDocument.update({
           where: { id },
           data: {
             extraction,
             corrections,
+            learned: (remainingLearned ?? Prisma.DbNull) as Prisma.InputJsonValue,
             docType: fields.docType ?? document.docType,
             // Un document rapproché RESTE rapproché : corriger un champ ne
             // défait pas silencieusement le rapprochement fait par l'owner.

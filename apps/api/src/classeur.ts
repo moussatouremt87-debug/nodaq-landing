@@ -16,10 +16,20 @@ import type { RouteImage } from "@nodaq/llm";
 
 export const DOC_TYPES = ["facture_fournisseur", "recu", "note_de_frais", "autre"] as const;
 
+/** Texte issu du MODÈLE (donc d'une photo, donc potentiellement hostile) :
+ * tronqué, jamais refusé — une valeur trop longue ne doit pas faire perdre
+ * toute l'extraction, mais elle ne doit pas non plus se propager telle quelle
+ * dans la mémoire d'apprentissage (2.16b) ni dans les réponses d'API. */
+const modelText = (max: number) =>
+  z
+    .string()
+    .nullable()
+    .transform((value) => (value === null ? null : value.slice(0, max)));
+
 export const DocExtraction = z.object({
   docType: z.enum(DOC_TYPES),
-  supplierName: z.string().nullable(),
-  pieceNumber: z.string().nullable(),
+  supplierName: modelText(300),
+  pieceNumber: modelText(120),
   docDate: z.string().nullable(), // YYYY-MM-DD
   currency: z.string().nullable(),
   totalExclTax: z.number().nullable(), // euros

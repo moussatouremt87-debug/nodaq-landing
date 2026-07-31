@@ -77,6 +77,16 @@ tuning, pas une ligne qui sort du tenant. Une agrégation pure, recalculée à
 la lecture — même doctrine que l'échéancier (2.9) : ce qui est dérivable
 n'est pas conservé comme vérité.
 
+### La preuve vient du journal, jamais de l'extraction
+
+Une règle ne se fonde QUE sur les champs réellement saisis par un humain,
+lus dans le journal append-only `corrections[]`. C'est ce qui empêche
+l'**auto-alimentation** : une valeur posée par la mémoire vit dans
+`extraction`, et si `extraction` faisait preuve, la règle se conforterait
+elle-même à chaque nouveau document — jusqu'à survivre à la sortie de fenêtre
+des corrections humaines qui la fondaient, en affichant « d'après vos 5
+corrections » alors qu'il n'y en a jamais eu que deux.
+
 ### Quatre refus, tous testés
 
 1. **Une correction n'est pas une règle.** Il en faut au moins deux
@@ -103,7 +113,17 @@ et le contredire.
 Le regroupement fournisseur normalise casse, accents et ponctuation
 (« S.A.R.L. » = « SARL ») mais **ne retire pas les formes juridiques** :
 « Martin SARL » et « Martin SAS » sont deux entreprises, et les fusionner
-attribuerait à l'une les corrections de l'autre.
+attribuerait à l'une les corrections de l'autre. La **comparaison des valeurs**
+est normalisée de la même façon — sans quoi « EUR » et « eur » passeraient
+pour un désaccord humain et gèleraient le champ définitivement, sur du bruit
+d'orthographe.
+
+Une fois l'humain arbitré sur un champ, la trace `learned` de ce champ est
+retirée : « à trancher » ne reste pas affiché au présent indéfiniment.
+
+**Coût borné** : la mémoire ne relit que les documents PORTANT une correction,
+dans une fenêtre de `MEMORY_WINDOW` documents. Un tenant à 500 documents ne
+fait pas exploser le classement.
 
 ## À ne pas faire
 
