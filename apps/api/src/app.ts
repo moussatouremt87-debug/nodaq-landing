@@ -2770,6 +2770,71 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     }
   });
 
+  // --- Devis depuis un e-mail (2.7) ---------------------------------------
+  // Le corps reçu est écrit par un INCONNU : il ne traverse jamais un log ni
+  // une réponse, et le pipeline qui le lit n'a AUCUN OUTIL (doctrine 2.18).
+  // La sortie est une proposition en file de validation — jamais un envoi,
+  // jamais un prix.
+  // Même borne que l'outil MCP : la défense en profondeur veut la limite des
+  // deux côtés (convention du repo — cf. les payloads d'exécuteurs).
+  const EMAIL_BODY_MAX = 8_000;
+
+  app.post("/devis/depuis-email", { preHandler: businessRoute }, async (request, reply) => {
+    const body = z
+      .object({
+        emailBody: z.string().min(10).max(EMAIL_BODY_MAX),
+        // Une ADRESSE, pas du texte libre : ce champ est de la PII persistée.
+        from: z.string().email().max(320).optional(),
+      })
+      .strict()
+      .safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: "invalid payload" });
+
+    // Même borne que le cockpit conversationnel : deux appels modèle par
+    // requête (classifieur + extraction) sur 8 000 caractères, sur une route
+    // pilotée depuis un écran. Sans plafond, une boucle consomme sans fin.
+    if (!askLimiter.take(`${request.tenantId}:${request.authSession.user.id}`)) {
+      return reply.code(429).send({ error: "trop de demandes — patientez une minute" });
+    }
+
+    let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+    try {
+      toolset = await buildToolset({
+        ...agentContext,
+        tenantId: request.tenantId,
+        role: request.membershipRole,
+        requestedBy: request.authSession.user.id,
+        employee: "commercial",
+        // Sonnette push (2.17) : une proposition préparée depuis la page
+        // attendait un owner qui n'était jamais prévenu.
+        onPendingAction: () => {
+          void notifyPendingAction(request.tenantId).catch((error: unknown) => {
+            request.log.warn(
+              { err: error instanceof Error ? error.name : "Error" },
+              "push record failed",
+            );
+          });
+        },
+      });
+      const result = await toolset.execute("draft_quote_from_email", {
+        emailBody: body.data.emailBody,
+        ...(body.data.from ? { from: body.data.from } : {}),
+      });
+      void reply.header("cache-control", "private, no-store");
+      return reply.code(202).send(JSON.parse(result) as unknown);
+    } catch (error) {
+      if (isUnknownTool(error)) return reply.code(409).send({ error: "module désactivé" });
+      // NOM d'erreur seulement : le message pourrait citer l'e-mail reçu.
+      request.log.warn(
+        { err: error instanceof Error ? error.name : "Error" },
+        "quote draft failed",
+      );
+      return reply.code(422).send({ error: "e-mail non exploitable en devis" });
+    } finally {
+      await toolset?.close().catch(() => undefined);
+    }
+  });
+
   // --- Échéancier fiscal & social (2.9) -----------------------------------
   // Le calendrier n'est JAMAIS stocké : il est recalculé à chaque lecture
   // depuis le catalogue versionné et le profil fiscal. Seules les décisions

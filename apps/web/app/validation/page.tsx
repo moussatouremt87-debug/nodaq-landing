@@ -56,6 +56,7 @@ function actionLine(action: PendingActionSummary, detail: PendingActionDetail | 
     };
   }
   if (quote) {
+    const lines = Array.isArray(quote.lines) ? quote.lines.length : null;
     return {
       title: `Devis ${asString(quote.number) ?? ""}`.trim(),
       meta: [
@@ -63,6 +64,10 @@ function actionLine(action: PendingActionSummary, detail: PendingActionDetail | 
         asNumber(quote.amountCents) !== null
           ? formatEuroCents(asNumber(quote.amountCents) ?? 0)
           : null,
+        // Provenance : une proposition tirée d'un e-mail vient d'un TIERS,
+        // et l'owner doit le savoir AVANT d'approuver (2.7).
+        asString(payload?.source) === "email" ? "issu d'un e-mail reçu" : null,
+        lines !== null ? `${lines} ligne(s)` : null,
         asString(quote.label),
       ]
         .filter(Boolean)
@@ -146,6 +151,56 @@ function actionLine(action: PendingActionSummary, detail: PendingActionDetail | 
     };
   }
   return { title: actionTypeLabel(action.type), meta: "" };
+}
+
+/** Détail d'une proposition de devis tirée d'un e-mail (2.7). L'owner valide
+ * un contenu produit à partir du message d'un INCONNU : il doit voir la
+ * provenance, les lignes, ce qui n'a pas été reconnu, et que rien n'est
+ * chiffré. Sans cela, la validation 1 clic est aveugle. */
+function QuoteProposalDetail({ payload }: { payload: Dict }) {
+  const quote = asDict(payload.quote);
+  const lines = Array.isArray(quote?.lines) ? (quote.lines as unknown[]) : [];
+  const unmatched = asNumber(quote?.unmatchedCount) ?? 0;
+  return (
+    <div>
+      {asString(payload.label) && <p className="warn">{asString(payload.label)}</p>}
+      {asString(payload.source) === "email" && (
+        <p className="hint">
+          Demande reçue par e-mail{asString(payload.from) ? ` de ${asString(payload.from)}` : ""} —
+          contenu écrit par un tiers, à relire.
+        </p>
+      )}
+      {asString(quote?.deadline) && (
+        <p className="hint">Échéance souhaitée : {asString(quote?.deadline)}</p>
+      )}
+      <ul className="hint">
+        {lines.map((raw, index) => {
+          const line = asDict(raw);
+          const confidence = asString(line?.confidence);
+          return (
+            <li key={`${asString(line?.label) ?? "ligne"}-${index}`}>
+              {asNumber(line?.quantity) !== null ? `${asNumber(line?.quantity)} × ` : ""}
+              {asString(line?.label) ?? "—"}
+              {confidence === "aucune" ? (
+                <b> · article non reconnu</b>
+              ) : (
+                <> · {asString(line?.itemName)}{confidence === "probable" ? " (à confirmer)" : ""}</>
+              )}
+              {" · prix à fixer"}
+            </li>
+          );
+        })}
+      </ul>
+      {unmatched > 0 && (
+        <p className="warn">{unmatched} ligne(s) sans article connu — à compléter.</p>
+      )}
+      {quote?.catalogTruncated === true && (
+        <p className="warn">
+          Référentiel lu partiellement : une ligne peut être « non reconnue » à tort.
+        </p>
+      )}
+    </div>
+  );
 }
 
 /** Détail lisible d'une proposition d'immobilisation (2.19) : l'owner doit
@@ -453,7 +508,12 @@ export default function ValidationPage() {
               {detailPayload && selectedSummary?.type === "create_fixed_asset" && (
                 <FixedAssetProposal payload={detailPayload} />
               )}
-              {detailPayload && selectedSummary?.type !== "create_fixed_asset" && (
+              {detailPayload && selectedSummary?.type === "create_quote" && (
+                <QuoteProposalDetail payload={detailPayload} />
+              )}
+              {detailPayload &&
+                selectedSummary?.type !== "create_fixed_asset" &&
+                selectedSummary?.type !== "create_quote" && (
                 <>
                   <div className="meta-row">
                     {invoice && (

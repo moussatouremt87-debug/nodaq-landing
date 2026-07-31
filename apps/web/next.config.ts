@@ -17,6 +17,7 @@ const BUSINESS_PREFIXES = [
   "employees",
   "connectors",
   "classeur",
+  "devis",
   "factures",
   "echeancier",
   "stocks",

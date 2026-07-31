@@ -232,7 +232,16 @@ export const defaultExecutors: ExecutorRegistry = {
       return { fixedAssetId: asset.id, alreadyExisted: false };
     });
   },
-  create_quote: () => Promise.resolve({ created: true, simulated: true }),
+  // Le devis est PRÉPARÉ, pas émis : il n'existe aucune API d'écriture vers
+  // un facturier en V1. Annoncer « créé » ferait croire à une émission qui
+  // n'a pas eu lieu — même honnêteté que record_review_reply (3.8), qui dit
+  // que la publication reste manuelle.
+  create_quote: () =>
+    Promise.resolve({
+      prepared: true,
+      emitted: false,
+      next: "reprenez la proposition dans votre facturier pour l'émettre",
+    }),
   // EXÉCUTEUR RÉEL (2.4) : dépose la facture sur la plateforme APRÈS
   // validation humaine — déposer engage l'entreprise sur le réseau national.
   //

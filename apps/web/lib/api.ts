@@ -1248,6 +1248,29 @@ export type CockpitAnswer = z.infer<typeof CockpitAnswer>;
 export const askCockpit = (question: string): Promise<CockpitAnswer> =>
   call(CockpitAnswer, "/cockpit/ask", { method: "POST", body: JSON.stringify({ question }) });
 
+/*
+ * Devis depuis un e-mail (2.7). Le corps part dans UN sens : il n'est jamais
+ * renvoyé, et la réponse ne porte que des compteurs + l'id de l'action à
+ * valider.
+ */
+export const QuoteDraftResult = z.object({
+  pendingActionId: z.string(),
+  status: z.string(),
+  lines: z.number(),
+  unmatchedCount: z.number(),
+  pricing: z.string(),
+});
+export type QuoteDraftResult = z.infer<typeof QuoteDraftResult>;
+
+export const draftQuoteFromEmail = (
+  emailBody: string,
+  from?: string,
+): Promise<QuoteDraftResult> =>
+  call(QuoteDraftResult, "/devis/depuis-email", {
+    method: "POST",
+    body: JSON.stringify({ emailBody, ...(from ? { from } : {}) }),
+  });
+
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {
   return new Intl.NumberFormat("fr-FR", {
