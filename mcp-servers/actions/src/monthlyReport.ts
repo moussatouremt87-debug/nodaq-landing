@@ -167,6 +167,15 @@ function median(values: readonly number[]): number | null {
     : (sorted[middle] as number);
 }
 
+/** Mois "YYYY-MM" d'une date de facture, `null` si illisible. Sert aux lignes
+ * qui ne sont pas des ventes mais portent un solde exigible. */
+function monthOf(date: string | null | undefined): string | null {
+  if (!date) return null;
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return `${parsed.getUTCFullYear()}-${String(parsed.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
 const euros = (cents: number): string =>
   new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 })
     .format(cents / 100);
@@ -207,6 +216,18 @@ export function buildMonthlyReport(
     if (!normalized.ok) {
       if (normalized.reason === "exclue" || normalized.reason === "non_positif") {
         excludedCount += 1;
+        // Une écriture peut n'être PAS une vente et porter quand même un
+        // solde exigible : c'est le cas d'une levée de réserves comptabilisée
+        // sous sa propre pièce (montant facturé nul, 500 € redevenus dus).
+        // La laisser sortir ici la rangeait parmi les brouillons et avoirs,
+        // et l'encours du rapport contredisait celui du connecteur pour la
+        // même donnée. Elle n'entre pas au CA — mais elle est bien due.
+        const claimableOnly = claimableCents(invoice, 0);
+        const overdueOnly = invoice.status ? OVERDUE_STATUSES.has(invoice.status) : false;
+        if (claimableOnly > 0 && overdueOnly && monthOf(invoice.date) === month) {
+          overdueCents += claimableOnly;
+          overdueCount += 1;
+        }
       } else {
         unusableCount += 1;
       }

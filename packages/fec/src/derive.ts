@@ -378,11 +378,25 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   // le solde annoncerait « en cours » une somme encaissée. Quand un compte de
   // retenue n'a qu'UN seul tiers reconnu, la sortie sans auxiliaire lui
   // revient — une seule candidate n'est pas une supposition.
+  //
+  // Ce report reste un rattachement entre regroupements : il ne vaut donc que
+  // si le compte ne porte AUCUNE autre retenue non reconnue. Sinon la sortie
+  // pourrait appartenir à ce tiers-là, et l'imputer au seul tiers reconnu
+  // sous-évaluerait sa retenue — en silence. Dans le doute, on ne compense
+  // pas, et on le dit.
   const refsByAccount = new Map<string, Set<string>>();
-  for (const line of recognisedRetentionLines) {
-    const refs = refsByAccount.get(line.compteNum) ?? new Set<string>();
-    refs.add(line.compAuxNum ?? line.compteNum);
-    refsByAccount.set(line.compteNum, refs);
+  const ambiguousAccounts = new Set<string>();
+  for (const entry of clientEntries) {
+    if (classifyReceivableAccount(entry.compteNum) !== "retenue") continue;
+    if (recognisedRetentionLines.has(entry)) {
+      const refs = refsByAccount.get(entry.compteNum) ?? new Set<string>();
+      refs.add(entry.compAuxNum ?? entry.compteNum);
+      refsByAccount.set(entry.compteNum, refs);
+    } else if (entry.debitCents > 0) {
+      // Une retenue NON reconnue sur ce compte : sa libération future y
+      // ressemblerait trait pour trait à celle d'un tiers reconnu.
+      ambiguousAccounts.add(entry.compteNum);
+    }
   }
   let unattachedReleaseCount = 0;
   for (const entry of clientEntries) {
@@ -398,7 +412,11 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
       if (!isRelease) continue;
       if (!recognisedRetentionRefs.has(ref)) {
         const candidates = refsByAccount.get(entry.compteNum);
-        if (entry.compAuxNum === null && candidates?.size === 1) {
+        if (
+          entry.compAuxNum === null &&
+          candidates?.size === 1 &&
+          !ambiguousAccounts.has(entry.compteNum)
+        ) {
           ref = [...candidates][0]!;
         } else {
           unattachedReleaseCount += 1;
@@ -450,12 +468,18 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
     // Trancher serait un diagnostic inventé : on dit le fait et sa
     // conséquence, pas la cause.
     warnings.push(
-      `${lookalikeAccountCount} écriture(s) 4117 au débit sans aucune créance 411 dans la même ` +
-        "pièce : traitées comme des créances ordinaires (compte client en 4117xxxx ou retenue " +
-        "non rattachable — rien n'est déduit des impayés)",
+      `${lookalikeAccountCount} écriture(s) 4117 au débit sans aucune créance 411 dans le même ` +
+        "regroupement (client, pièce) : traitées comme des créances ordinaires (compte client " +
+        "en 4117xxxx ou retenue non rattachable). Rien n'est déduit des impayés — s'il s'agit " +
+        "d'une retenue, elle peut donc apparaître en retard et faire l'objet d'une proposition " +
+        "de relance",
     );
   }
-  if (unattachedReleaseCount > 0) {
+  // Sans AUCUNE retenue reconnue dans le fichier, ce message est sans objet :
+  // sur un plan « 411 + code client », chaque règlement client crédite un
+  // compte 4117xxxx et l'alimenterait — un avertissement permanent, faux, à
+  // côté d'un total de retenues à zéro.
+  if (unattachedReleaseCount > 0 && recognisedRetentionLines.size > 0) {
     warnings.push(
       `${unattachedReleaseCount} mouvement(s) de sortie sur un compte 4117 non rattachable(s) ` +
         "à une retenue reconnue : le total des retenues en cours peut être surévalué d'autant",
@@ -477,7 +501,11 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
     overdueCount,
     overdueCents,
     retainedCents: retainedTotalCents,
-    retentionCount,
+    // Le compteur suit le SOLDE : une facture peut porter une retenue déjà
+    // libérée sous une autre pièce. « 1 retenue en cours » pour 0 € serait
+    // faux, et c'est la dérivation qui doit être juste — pas seulement la
+    // route qui la sert.
+    retentionCount: retainedTotalCents > 0 ? retentionCount : 0,
     warnings,
   };
 }

@@ -158,7 +158,7 @@ export default function RapportsPage() {
                 {report.unusableCount > 0 &&
                   `${report.unusableCount} facture(s) écartée(s) (montant ou date illisible, devise étrangère jamais convertie). `}
                 {report.excludedCount > 0 &&
-                  `${report.excludedCount} brouillon(s), devis, avoir(s) ou facture(s) annulée(s) hors du CA. `}
+                  `${report.excludedCount} écriture(s) hors du CA : brouillons, devis, avoirs, factures annulées, ou écritures sans montant facturé (une levée de réserves, par exemple — son solde reste compté dans l'encours). `}
                 {report.unattributedCount > 0 &&
                   `${report.unattributedCount} facture(s) (${euros(report.unattributedCents)}) ne sont rattachées à aucun client : comptées au CA, jamais attribuées. `}
                 {/* US-8 : sortie d'un compteur sans un mot, c'est une donnée

@@ -107,9 +107,17 @@ La retenue se comptabilise de deux façons, toutes deux courantes :
   exactement l'erreur que ce ticket corrige, à l'envers.
 
 Le discriminant est l'**écriture**, pas la pièce : au sein d'une même écriture,
-la contrepartie du débit `4117` est-elle un crédit client ? Oui ⇒ transfert
-(déjà carvé). Non ⇒ comptabilisation directe, le débit `4117` fait partie du
-facturé. `amountCents` vaut 10 000 € dans les deux cas.
+la contrepartie du débit `4117` est-elle un crédit client **du même montant** ?
+Oui ⇒ transfert (déjà carvé). Non ⇒ comptabilisation directe, le débit `4117`
+fait partie du facturé. `amountCents` vaut 10 000 € dans les deux cas.
+
+Le montant, et pas seulement la présence d'un crédit : une écriture de vente
+peut porter un escompte au crédit du client, qu'il ne faut pas prendre pour un
+transfert. **Limite assumée** : un acompte imputé du **même montant** que la
+retenue est, lui, indiscernable d'un transfert — le montant facturé est alors
+sous-évalué de la retenue (le solde exigible, lui, reste juste). L'erreur va
+dans la direction prudente : elle minore le CA et la marge, elle ne les
+embellit pas.
 
 ### La garde ne s'arrête pas au FEC
 
@@ -230,27 +238,6 @@ L'avertissement dit donc le **fait** et sa **conséquence** — la ligne est
 traitée comme une créance ordinaire, rien n'est déduit des impayés — sans
 trancher la cause. Un diagnostic inventé, répété à chaque pièce, use la
 confiance aussi sûrement qu'un chiffre faux.
-
-Le rattachement par pièce ne suffit d'ailleurs pas à lui seul — il peut faire
-disparaître une créance, et lui faire changer de client, ce qui est pire. Il
-exige donc **trois** conditions cumulatives :
-
-1. une seule facture candidate dans la pièce (deux : on ne devine pas) ;
-2. les lignes `4117` n'ont **pas d'auxiliaire propre**, ou le même que la
-   facture cible. C'est le vrai discriminant du plan « 411 + code client » : le
-   client n° 70003 y est un **tiers**, avec son auxiliaire ; un compte de
-   retenue n'en a pas ;
-3. chaque débit `4117` est une jambe de la **même écriture** qu'une créance de
-   la facture cible (comptabilisation directe), ou a pour contrepartie un
-   crédit client du même montant dans son écriture (transfert).
-
-Sans 2 et 3, une pièce partagée par deux clients (un lot de facturation) où
-l'un porte le compte `41170003` voyait **sa** créance ré-étiquetée « retenue »
-et rattachée à la facture de **l'autre** : un vrai dû sortait des impayés et
-changeait de client au passage. Une condition qui n'aurait retenu que la
-signature du transfert aurait, elle, laissé la facture fantôme réapparaître sur
-le **croisement** des deux conventions (sans auxiliaire *et* comptabilisée
-directement) — les deux conventions se croisent dans la vraie vie.
 
 ### Sans comptabilité auxiliaire : la limite, plutôt que la devinette
 

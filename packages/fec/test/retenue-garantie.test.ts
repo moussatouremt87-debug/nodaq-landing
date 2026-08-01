@@ -188,8 +188,11 @@ describe("retenue de garantie — jamais un impayé", () => {
     const warning = result.warnings.find((w) => w.includes("4117 au débit"));
     expect(warning).toBeDefined();
     // La conséquence est dite ; la cause reste ouverte.
-    expect(warning).toContain("rien n'est déduit des impayés");
+    expect(warning).toContain("Rien n'est déduit des impayés");
     expect(warning).toContain("ou retenue non rattachable");
+    // La conséquence RÉELLE est dite : le fait sans sa conséquence n'informe
+    // pas. Cette ligne peut ressortir en retard et nourrir une relance.
+    expect(warning).toContain("proposition de relance");
   });
 
   it("sans compte auxiliaire, la retenue n'est PAS reconnue — et la limite est DITE", () => {
@@ -215,7 +218,8 @@ describe("retenue de garantie — jamais un impayé", () => {
     // Et l'avertissement porte la conséquence, sans deviner la cause.
     const warning = result.warnings.find((w) => w.includes("4117 au débit"));
     expect(warning).toBeDefined();
-    expect(warning).toContain("rien n'est déduit des impayés");
+    expect(warning).toContain("Rien n'est déduit des impayés");
+    expect(warning).toContain("proposition de relance");
   });
 
   it("BLOQUANT : un lot de facturation en UNE écriture ne fait pas changer de client", () => {

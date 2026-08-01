@@ -298,6 +298,26 @@ describe("invariants", () => {
     expect(report.overdueNotClaimableCount).toBe(1);
   });
 
+  it("une levée de réserves n'est pas une vente, mais son solde est bien un impayé", () => {
+    // Pièce à montant facturé NUL (ce n'est pas une vente : elle n'entre pas
+    // au CA) et à solde exigible : 500 € redevenus dus après la levée. La
+    // laisser sortir avec les brouillons et les avoirs faisait dire deux
+    // chiffres d'impayés différents au rapport et au connecteur, pour la
+    // même donnée.
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-04-10", 5_000),
+        { date: "2026-04-12", amount: 0, currency: "EUR", status: "late", residual_amount: 500 },
+      ],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(50_000);
+    expect(report.overdueCount).toBe(1);
+    // Le CA, lui, ne bouge pas : rien n'a été vendu ce jour-là.
+    expect(report.revenueCents).toBe(500_000);
+  });
+
   it("factures non attribuées : comptées au CA, jamais tues", () => {
     const report = buildMonthlyReport(
       [

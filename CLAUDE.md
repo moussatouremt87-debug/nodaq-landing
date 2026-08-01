@@ -102,7 +102,11 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > un « retard de 146 jours » le jour de son enregistrement ; total des retenues
 > = SOLDE du compte 4117 — lignes RECONNUES, plus les seules SORTIES du même
 > compte (un débit non reconnu est déjà dans les impayés : l'ajouter comptait
-> deux fois) — planché par seau (compte auxiliaire s'il existe, sinon le
+> deux fois). Une sortie saisie sans auxiliaire revient au SEUL tiers reconnu
+> du compte — et seulement si ce compte ne porte AUCUNE autre retenue non
+> reconnue, sinon on ne compense pas et on le DIT (le seul rattachement
+> inter-regroupement qui subsiste, et il a son plancher de preuve) — planché
+> par seau (compte auxiliaire s'il existe, sinon le
 > compte — limite DITE quand le risque est réel)
 > (`fec_imports.retained_cents`), jamais la somme par facture — une
 > libération sous sa propre pièce annoncerait sinon « en cours » des sommes
