@@ -79,9 +79,26 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > (config versionnée datée sourcée PCG, `receivableAccounts.ts`, préfixe le
 > plus long gagnant) sépare `retenue`|`client`|`hors_clients` ; `settled` jugé
 > sur les seules lignes EXIGIBLES, `residualCents` hors retenue,
-> `retainedCents` conservé et AFFICHÉ à part, `amountCents` = débits 411 (la
-> retenue y est carvée par le transfert, l'additionner comptait 5 % deux fois) ;
-> date de libération JAMAIS inventée (contractuelle, absente du FEC —
+> `retainedCents` conservé et AFFICHÉ à part. `amountCents` = le montant du
+> MARCHÉ sous les DEUX conventions : retenue transférée après coup (déjà
+> carvée du débit 411, l'additionner comptait 5 % deux fois) OU portée dès la
+> facture (débit 411 net + débit 4117 dans la MÊME écriture — ne sommer que
+> le 411 amputait le CA et faisait déduire la retenue une SECONDE fois en
+> aval). Discriminant = l'ÉCRITURE, pas la pièce : contrepartie de même
+> MONTANT (un escompte n'est pas un transfert) ; le reclassement de la
+> libération n'est pas une vente. Rattachement PAR PIÈCE même sans compte
+> auxiliaire (sinon la retenue du `411700` devenait une facture fantôme
+> relançable) ; total des retenues = SOLDE du compte 4117 planché par tiers
+> (`fec_imports.retained_cents`), jamais la somme par facture — une
+> libération sous sa propre pièce annoncerait sinon « en cours » des sommes
+> encaissées ; cause NON devinée quand une ligne 4117 n'a aucune créance 411
+> dans sa pièce (compte client en 4117xxxx ou retenue orpheline : on dit le
+> fait et sa conséquence). La garde ne s'arrête pas au FEC : `retained_amount`
+> ET `residual_amount` à côté de `amount`, `claimableCents` = UNIQUE décision
+> de ce qu'on peut réclamer (le solde connu fait foi, la retenue n'y est pas
+> redéduite), `draft_dunning` refuse avec un motif VRAI, encours échu du
+> rapport mensuel sur l'exigible + `overdueNotClaimableCount` DIT. Date de
+> libération JAMAIS inventée (contractuelle, absente du FEC —
 > `releaseDateKnown: false`) ; test BLOQUANT bout en bout : facture soldée hors
 > retenue => statut `paid`, aucune relance (`docs/fec-import.md`).
 > **Marge (2.8)** : le ticket que 2.11 avait refusé de faire à moitié. Le

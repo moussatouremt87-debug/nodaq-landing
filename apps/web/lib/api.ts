@@ -219,6 +219,11 @@ export const FecStatus = z.object({
       entryCount: z.number(),
       invoiceCount: z.number(),
       overdueCount: z.number(),
+      /** Limites de la dérivation (compteurs, jamais une ligne du journal) :
+       * affichées en permanence, pas seulement à l'instant de l'import — une
+       * limite qui change le chiffre lu n'a aucune raison de disparaître au
+       * premier rechargement. */
+      warnings: z.array(z.string()),
     })
     .nullable(),
   /** Retenues de garantie du dernier import (US-8) — affichées À PART des
@@ -853,6 +858,10 @@ export const MonthlyReport = z.object({
   invoiceCount: z.number(),
   overdueCents: z.number(),
   overdueCount: z.number(),
+  /** Factures échues dont il ne reste rien à réclamer (retenue de garantie,
+   * ou déjà encaissé) — déclaré ICI, sinon Zod le supprime et le « retrait
+   * est dit » ne serait vrai que dans le JSON de l'outil (US-8). */
+  overdueNotClaimableCount: z.number(),
   referenceRevenueCents: z.number().nullable(),
   referenceMonths: z.number(),
   topCustomer: z

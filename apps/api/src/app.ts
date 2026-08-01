@@ -793,6 +793,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
    */
 
   // Métadonnées du dernier import — visibles de tout membre (compteurs only).
+  // Les avertissements sont stockés en Json : une forme inattendue dégrade en
+  // liste vide, jamais en 500 sur l'écran Connecteurs.
+  const FecWarnings = z.array(z.string()).catch([]);
   app.get("/connectors/fec", { preHandler: businessRoute }, async (request) => {
     // Métadonnées et retenues LUES ENSEMBLE, dans la MÊME transaction : deux
     // lectures séparées peuvent encadrer un import concurrent et afficher les
@@ -807,28 +810,37 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           entryCount: true,
           invoiceCount: true,
           overdueCount: true,
+          // Les avertissements portent les LIMITES de la dérivation (retenue
+          // non rattachable, par exemple : elle reste comptée en impayé). Ne
+          // les rendre qu'au moment de l'import les ferait disparaître au
+          // premier rechargement, juste là où ils changent le chiffre lu.
+          // Compteurs uniquement — jamais une ligne du journal (2.14).
+          warnings: true,
+          // Retenues EN COURS (US-8) : le SOLDE du compte 4117, calculé à
+          // l'import. Ré-agréger les retenues par facture raterait les
+          // libérations comptabilisées sous leur propre pièce et annoncerait
+          // « en cours » des sommes déjà encaissées.
+          retainedCents: true,
         },
       });
-      // Retenues de garantie en cours (US-8) : agrégées sur les factures du
-      // DERNIER import — celui-là même qui est servi à l'aval (fec.ts) — et
-      // affichées À PART des impayés. Une retenue tue n'est pas neutre : le
-      // dirigeant croirait ces 5 % perdus ou, pire, les relancerait à la main.
-      const sum = last
-        ? await tx.fecInvoice.aggregate({
+      // Nombre de FACTURES concernées — un fait par facture, celui-là
+      // s'agrège. Scopé au dernier import, celui servi à l'aval (fec.ts).
+      const count = last
+        ? await tx.fecInvoice.count({
             where: { importId: last.id, retainedCents: { gt: 0 } },
-            _sum: { retainedCents: true },
-            _count: { _all: true },
           })
-        : null;
-      return { lastImport: last, retention: sum };
+        : 0;
+      return { lastImport: last, retention: count };
     });
-    const { id: _importId, ...lastImportPublic } = lastImport ?? {};
+    const { id: _importId, retainedCents, warnings, ...lastImportPublic } = lastImport ?? {};
     return {
       imported: lastImport !== null,
-      lastImport: lastImport ? lastImportPublic : null,
+      lastImport: lastImport
+        ? { ...lastImportPublic, warnings: FecWarnings.parse(warnings) }
+        : null,
       retention: {
-        count: retention?._count._all ?? 0,
-        totalCents: Number(retention?._sum.retainedCents ?? 0n),
+        count: retention,
+        totalCents: Number(retainedCents ?? 0n),
         // La date de libération est CONTRACTUELLE : elle n'est nulle part
         // dans un FEC. On ne l'invente pas — la saisir est un ticket à part.
         releaseDateKnown: false,
@@ -928,6 +940,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
                   invoiceCount: derivation.invoices.length,
                   overdueCount: derivation.overdueCount,
                   overdueCents: BigInt(derivation.overdueCents),
+                  // Solde du compte 4117 (US-8) — jamais la somme des
+                  // retenues par facture : une libération sous sa propre
+                  // pièce n'est rattachable à aucune facture.
+                  retainedCents: BigInt(derivation.retainedCents),
                   warnings,
                 },
               });

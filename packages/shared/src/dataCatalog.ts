@@ -74,7 +74,16 @@ export const DATASETS: readonly Dataset[] = [
         name: "reste_du",
         column: "residualCents",
         kind: "number",
-        description: "Reste dû",
+        description: "Reste dû EXIGIBLE (retenue de garantie exclue)",
+      },
+      {
+        // US-8 : sans cette mesure, « combien me doit-on ? » tairait la
+        // retenue — le reste dû n'en tient plus compte, et le montant du
+        // marché ne dit pas ce qui est encore retenu.
+        name: "retenue_garantie",
+        column: "retainedCents",
+        kind: "number",
+        description: "Retenue de garantie (due, pas encore exigible)",
       },
     ],
   },

@@ -141,6 +141,19 @@ pour la même raison : deux écrans qui trancheraient séparément réclameraien
 Le chiffre d'affaires, lui, garde le montant du marché : c'est bien ce qui a
 été facturé.
 
+### Le total est un SOLDE, pas une somme de factures
+
+Une libération se comptabilise souvent sous sa **propre** pièce (`débit 512 /
+crédit 4117`) : elle n'est rattachable à aucune facture. Additionner les
+retenues portées par les factures continuerait donc d'annoncer « X € de retenue
+en cours » sur des sommes **déjà encaissées**.
+
+Le total affiché est le **solde du compte 4117**, planché à zéro par tiers (un
+compte sur-libéré ne masque pas la retenue d'un autre client). Un solde n'a
+rien à rattacher : il est juste par construction, quelle que soit la pièce sous
+laquelle la libération a été passée. La colonne par facture reste, elle, ce
+qu'elle dit : la retenue portée par **cette** pièce.
+
 ### Ce que le produit ne prétend pas savoir
 
 La **date de libération** est contractuelle : elle n'existe nulle part dans un
@@ -174,9 +187,18 @@ probablement un plan « 411 + code client » où le client a un compte en
 rattachée — un avertissement faux, répété à chaque pièce, use la confiance
 aussi sûrement qu'un chiffre faux.
 
-**Limite assumée, et dite.** Sous cette seconde convention, la retenue n'est
-rattachable à aucune facture : elle reste comptée comme une créance ordinaire,
-exactement comme avant le correctif. Le produit ne fait pas semblant — l'import
+Sans **compte auxiliaire**, la facture vit au `411000` et sa retenue au
+`411700` : deux « clients » pour notre clé de regroupement (client, pièce), une
+seule facture pour l'artisan. Une pièce entièrement composée de lignes `4117`
+est donc reversée dans la facture de la **même pièce** quand il en existe une,
+et une seule — deux candidates, on ne devine pas. Sans ce rattachement, la
+retenue formait une facture **fantôme** de 500 €, comptée en impayé et donc
+relançable : le défaut du ticket, intact.
+
+**Limite assumée, et dite.** Quand le transfert porte sa propre référence et
+qu'aucun rattachement par pièce n'est possible, la retenue n'est rattachable à
+aucune facture : elle reste comptée comme une créance ordinaire, exactement
+comme avant le correctif. Le produit ne fait pas semblant — l'import
 émet un avertissement nominatif (« N écriture(s) 4117 non rattachée(s) … —
 retenue NON déduite des impayés »), et l'écran Connecteurs affiche désormais le
 **texte** des avertissements, pas seulement leur nombre : une limite qui change

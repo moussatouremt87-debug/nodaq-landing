@@ -31,13 +31,17 @@ export interface FecDerivedInvoice {
   number: string;
   /** ISO yyyy-mm-dd (PieceDate, à défaut EcritureDate). */
   issuedDate: string;
-  /** Somme des débits 411 de la pièce (total facturé). La retenue y est déjà
-   * comprise : elle est carvée par le transfert vers le 4117, pas ajoutée. */
+  /** Montant du MARCHÉ, retenue comprise — sous les deux conventions de
+   * comptabilisation (retenue transférée au 4117 après coup, ou portée dès la
+   * facture). Ni le reclassement de la libération ni un escompte n'y entrent. */
   amountCents: number;
   /** Part restant due et EXIGIBLE (0 si soldée) — retenue de garantie EXCLUE. */
   residualCents: number;
-  /** Retenue de garantie (4117) : due, mais pas encore exigible. Elle n'entre
-   * ni dans `residualCents`, ni dans les impayés, ni dans une relance. */
+  /** Retenue de garantie portée par CETTE pièce : due, mais pas encore
+   * exigible. Elle n'entre ni dans `residualCents`, ni dans les impayés, ni
+   * dans une relance. Une libération comptabilisée sous une AUTRE pièce ne s'y
+   * déduit pas (elle n'est rattachable à aucune facture) — c'est le total de
+   * la dérivation, lu sur le solde du compte, qui fait foi. */
   retainedCents: number;
   /** Toutes les lignes EXIGIBLES de la pièce sont lettrées. La retenue, non
    * lettrée jusqu'à la levée des réserves, ne peut pas empêcher ce solde. */
@@ -52,9 +56,13 @@ export interface FecDerivation {
   openCount: number;
   overdueCount: number;
   overdueCents: number;
-  /** Total des retenues de garantie en cours — affiché À PART des impayés. */
+  /** Retenues de garantie EN COURS — le SOLDE du compte 4117 (planché à zéro
+   * par tiers), pas la somme des retenues par facture : une libération
+   * comptabilisée sous sa propre pièce n'est rattachable à aucune facture, et
+   * l'ignorer annoncerait comme « en cours » des sommes déjà encaissées.
+   * Affiché À PART des impayés. */
   retainedCents: number;
-  /** Nombre de factures portant une retenue. */
+  /** Nombre de factures portant une retenue rattachée à leur pièce. */
   retentionCount: number;
   warnings: string[];
 }
@@ -117,11 +125,40 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
     warnings.push(`${unreferenced} écriture(s) 411 sans PieceRef ignorée(s) pour la facturation`);
   }
 
+  // RATTACHEMENT PAR PIÈCE, même sans compte auxiliaire.
+  //
+  // La clé de regroupement est (client, pièce), et le « client » vient du
+  // CompAuxNum — à défaut du numéro de compte. Dans un plan SANS auxiliaire,
+  // la facture vit au `411000` et sa retenue au `411700` : deux « clients »
+  // pour notre clé, une seule et même facture pour l'artisan. La retenue
+  // formait alors une facture fantôme de 500 €, comptée en impayé et donc
+  // relançable — le défaut exact du ticket, intact.
+  //
+  // Une pièce entièrement composée de lignes 4117 est donc reversée dans la
+  // facture de la MÊME pièce quand il en existe une, et une seule : deux
+  // candidates, on ne devine pas.
+  const invoicePiece = new Map<string, string[]>();
+  for (const [key, group] of groups) {
+    const piece = key.slice(key.indexOf("␟") + 1);
+    if (group.some((e) => classifyReceivableAccount(e.compteNum) === "client" && e.debitCents > 0)) {
+      invoicePiece.set(piece, [...(invoicePiece.get(piece) ?? []), key]);
+    }
+  }
+  for (const [key, group] of [...groups]) {
+    if (group.every((e) => classifyReceivableAccount(e.compteNum) !== "retenue")) continue;
+    if (group.some((e) => classifyReceivableAccount(e.compteNum) === "client")) continue;
+    const piece = key.slice(key.indexOf("␟") + 1);
+    const candidates = invoicePiece.get(piece) ?? [];
+    const target = candidates.length === 1 ? groups.get(candidates[0]!) : undefined;
+    if (!target) continue;
+    target.push(...group);
+    groups.delete(key);
+  }
+
   const invoices: FecDerivedInvoice[] = [];
   let openCount = 0;
   let overdueCount = 0;
   let overdueCents = 0;
-  let retainedTotalCents = 0;
   let retentionCount = 0;
   let unattachedRetentionCount = 0;
   let lookalikeAccountCount = 0;
@@ -159,21 +196,23 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
       // fait pas semblant, on le dit.
       unattachedRetentionCount += flagged.length;
     }
-    if (flagged.length > 0 && ordinary.length === 0) {
-      // Aucune ligne 411 « ordinaire » dans la pièce : très probablement un
-      // plan « 411 + code client » où le client porte un compte en 4117xxxx.
-      // Le dire comme une retenue non rattachée serait faux — il n'y a pas de
-      // retenue du tout, juste un compte client qui ressemble à 4117.
-      lookalikeAccountCount += flagged.length;
-    }
+    // Lignes 4117 AU DÉBIT laissées en créance ordinaire (le rattachement par
+    // pièce n'a rien trouvé). Seul le débit compte : un crédit 4117 isolé est
+    // une libération, il n'ajoute aucun impayé et n'a rien à signaler ici.
+    const strandedRetentionDebits = ordinary.length === 0
+      ? flagged.filter((e) => e.debitCents > 0).length
+      : 0;
+    lookalikeAccountCount += strandedRetentionDebits;
     const debitCents = dueLines.reduce((sum, e) => sum + e.debitCents, 0);
     const creditCents = dueLines.reduce((sum, e) => sum + e.creditCents, 0);
-    // Retenue = solde du 4117 (débit au transfert, crédit à la libération).
-    const rawRetained = retentionLines.reduce((sum, e) => sum + e.debitCents - e.creditCents, 0);
-    // Une retenue négative = libération sur-comptabilisée. La ramener à zéro
-    // en silence contredirait la garde annoncée : on la compte et on la dit.
-    if (rawRetained < 0) negativeRetentionCount += 1;
-    const retainedCents = Math.max(0, rawRetained);
+    // Retenue portée par CETTE pièce (débit au transfert, crédit à la
+    // libération comptabilisée sous la même pièce). Le total, lui, se lit sur
+    // le SOLDE du compte 4117 plus bas — une libération sous sa propre pièce
+    // n'est rattachable à aucune facture.
+    const retainedCents = Math.max(
+      0,
+      retentionLines.reduce((sum, e) => sum + e.debitCents - e.creditCents, 0),
+    );
     // MONTANT FACTURÉ — il doit valoir le marché sous LES DEUX conventions de
     // comptabilisation, sinon le CA lui-même est amputé (2.11/3.1/2.8) :
     //
@@ -185,16 +224,41 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
     //      4117, le montant facturé perd la retenue, et l'aval la déduit une
     //      seconde fois — une créance réelle disparaît en silence.
     //
-    // Discriminant : au sein d'une même ÉCRITURE, la contrepartie du débit
-    // 4117 est-elle un crédit client ? Oui => transfert (déjà carvé). Non =>
-    // comptabilisation directe, le débit 4117 fait partie du facturé.
-    const transferEcritures = new Set(
-      ordinary.filter((e) => e.creditCents > 0).map(ecritureKey),
-    );
+    // Discriminant : au sein d'une même ÉCRITURE, le débit 4117 a-t-il pour
+    // contrepartie un crédit client du MÊME MONTANT ? Oui => transfert (déjà
+    // carvé). Non => comptabilisation directe, le débit 4117 fait partie du
+    // facturé.
+    //
+    // Le montant, et pas seulement la présence d'un crédit : une écriture de
+    // vente peut porter un escompte ou un acompte imputé au crédit du client
+    // (`débit 411 9 500 + débit 4117 500 + crédit 411 100`). Prendre ce
+    // crédit pour un transfert ferait perdre la retenue au montant facturé.
+    const creditByEcriture = new Map<string, number>();
+    for (const line of ordinary) {
+      if (line.creditCents > 0) {
+        const k = ecritureKey(line);
+        creditByEcriture.set(k, (creditByEcriture.get(k) ?? 0) + line.creditCents);
+      }
+    }
     const directRetentionCents = retentionLines
-      .filter((e) => e.debitCents > 0 && !transferEcritures.has(ecritureKey(e)))
+      .filter((e) => e.debitCents > 0 && creditByEcriture.get(ecritureKey(e)) !== e.debitCents)
       .reduce((sum, e) => sum + e.debitCents, 0);
-    const invoicedCents = debitCents + directRetentionCents;
+    // …et symétriquement, un débit 411 dont la contrepartie de même montant
+    // est un CRÉDIT 4117 n'est pas une vente : c'est la LIBÉRATION de la
+    // retenue, qui reclasse une somme déjà facturée en somme exigible.
+    // L'additionner gonflerait le montant facturé de 5 % — la direction
+    // flatteuse que la marge (2.8) s'interdit précisément.
+    const retentionCreditByEcriture = new Map<string, number>();
+    for (const line of retentionLines) {
+      if (line.creditCents > 0) {
+        const k = ecritureKey(line);
+        retentionCreditByEcriture.set(k, (retentionCreditByEcriture.get(k) ?? 0) + line.creditCents);
+      }
+    }
+    const releaseReclassCents = dueLines
+      .filter((e) => e.debitCents > 0 && retentionCreditByEcriture.get(ecritureKey(e)) === e.debitCents)
+      .reduce((sum, e) => sum + e.debitCents, 0);
+    const invoicedCents = debitCents - releaseReclassCents + directRetentionCents;
     if (invoicedCents === 0 && retainedCents === 0) continue; // avoir isolé : pas une facture
     const residualCents = Math.max(0, debitCents - creditCents);
     // Le lettrage ne se juge QUE sur les lignes exigibles : la retenue reste
@@ -228,10 +292,7 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
     };
     invoices.push(invoice);
 
-    if (retainedCents > 0) {
-      retainedTotalCents += retainedCents;
-      retentionCount++;
-    }
+    if (retainedCents > 0) retentionCount++;
     if (!settled && invoice.residualCents > 0) {
       openCount++;
       if (dueDate < todayIso) {
@@ -241,6 +302,32 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
     }
   }
 
+  // TOTAL DES RETENUES = le SOLDE du compte 4117, pas la somme des retenues
+  // portées par les factures.
+  //
+  // Une libération se comptabilise souvent sous sa propre pièce (`débit 512 /
+  // crédit 4117`) : elle n'est alors rattachable à aucune facture, et la somme
+  // des retenues par facture continuerait d'annoncer « X € de retenue en
+  // cours » sur des sommes déjà encaissées. Un solde de compte, lui, n'a rien
+  // à rattacher — il est juste par construction.
+  //
+  // Plancher à zéro PAR TIERS : un compte sur-libéré ne doit pas venir masquer
+  // la retenue d'un autre client.
+  const retentionBalances = new Map<string, number>();
+  for (const entry of clientEntries) {
+    if (classifyReceivableAccount(entry.compteNum) !== "retenue") continue;
+    const ref = entry.compAuxNum ?? entry.compteNum;
+    retentionBalances.set(
+      ref,
+      (retentionBalances.get(ref) ?? 0) + entry.debitCents - entry.creditCents,
+    );
+  }
+  let retainedTotalCents = 0;
+  for (const balance of retentionBalances.values()) {
+    if (balance < 0) negativeRetentionCount += 1;
+    retainedTotalCents += Math.max(0, balance);
+  }
+
   if (unattachedRetentionCount > 0) {
     warnings.push(
       `${unattachedRetentionCount} écriture(s) 4117 non rattachée(s) à une créance de la même ` +
@@ -248,16 +335,21 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
     );
   }
   if (lookalikeAccountCount > 0) {
+    // Sans créance 411 dans la pièce, deux situations sont INDISCERNABLES :
+    // un plan « 411 + code client » (le client 70003 porte le compte
+    // 41170003, il n'y a aucune retenue) ou une vraie retenue orpheline.
+    // Trancher serait un diagnostic inventé : on dit le fait et sa
+    // conséquence, pas la cause.
     warnings.push(
-      `${lookalikeAccountCount} écriture(s) sur un compte commençant par 4117 sans aucune ` +
-        "créance 411 dans la pièce : traitées comme des créances ordinaires (plan " +
-        "« 411 + code client » probable, aucune retenue de garantie déduite)",
+      `${lookalikeAccountCount} écriture(s) 4117 au débit sans aucune créance 411 dans la même ` +
+        "pièce : traitées comme des créances ordinaires (compte client en 4117xxxx ou retenue " +
+        "non rattachable — rien n'est déduit des impayés)",
     );
   }
   if (negativeRetentionCount > 0) {
     warnings.push(
-      `${negativeRetentionCount} retenue(s) de garantie négative(s) (libération ` +
-        "sur-comptabilisée ?) — ramenée(s) à zéro, à vérifier",
+      `${negativeRetentionCount} compte(s) de retenue de garantie au solde négatif ` +
+        "(libération sur-comptabilisée ?) — ramené(s) à zéro, à vérifier",
     );
   }
 

@@ -392,6 +392,11 @@ model FecImport {
   invoiceCount  Int          @map("invoice_count")
   overdueCount  Int          @map("overdue_count")
   overdueCents  BigInt       @map("overdue_cents")
+  /// Retenues de garantie EN COURS (US-8) = solde du compte 4117, planché à
+  /// zéro par tiers. PAS la somme des retenues par facture : une libération
+  /// comptabilisée sous sa propre pièce n'est rattachable à aucune facture, et
+  /// l'ignorer annoncerait comme « en cours » des sommes déjà encaissées.
+  retainedCents BigInt       @default(0) @map("retained_cents")
   warnings      Json         @default("[]")
   importedAt    DateTime     @default(now()) @map("imported_at")
   tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)

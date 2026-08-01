@@ -217,6 +217,55 @@ describe("retenue de garantie (US-8) — bout en bout", () => {
     expect(invoice?.retained_amount).toBe("500.00");
     expect(claimableCents(invoice, 1_000_000)).toBe(950_000);
   });
+
+  it("une retenue LIBÉRÉE ne reste pas affichée comme en cours", async () => {
+    // La libération est ici encaissée sous la pièce du règlement (« débit 512
+    // / crédit 4117 ») : elle n'est rattachable à aucune facture. Sommer les
+    // retenues PAR FACTURE annoncerait encore « 500 € de retenue en cours »
+    // sur une somme déjà perçue — l'écran mentirait poliment.
+    const libere = [
+      HEADER,
+      line({ num: "1", date: "20250110", compte: "41100012", aux: "CLIB2", piece: "FA-LIB", debit: "10000,00", let: "AA" }),
+      line({ num: "1", date: "20250110", compte: "706000", piece: "FA-LIB", credit: "10000,00" }),
+      line({ num: "2", date: "20250110", compte: "41170012", aux: "CLIB2", piece: "FA-LIB", debit: "500,00" }),
+      line({ num: "2", date: "20250110", compte: "41100012", aux: "CLIB2", piece: "FA-LIB", credit: "500,00", let: "AA" }),
+      line({ num: "3", date: "20250214", compte: "512000", piece: "REG-LIB", debit: "9500,00" }),
+      line({ num: "3", date: "20250214", compte: "41100012", aux: "CLIB2", piece: "FA-LIB", credit: "9500,00", let: "AA" }),
+      line({ num: "4", date: "20260120", compte: "512000", piece: "REG-RG-LIB", debit: "500,00" }),
+      line({ num: "4", date: "20260120", compte: "41170012", aux: "CLIB2", piece: "REG-RG-LIB", credit: "500,00" }),
+    ].join("\r\n");
+    expect((await importFec(libere, ownerCookie, "retenue-liberee.txt")).statusCode).toBe(201);
+
+    const status = await app.inject({
+      method: "GET",
+      url: "/connectors/fec",
+      headers: { cookie: ownerCookie },
+    });
+    const body = status.json() as { retention: { totalCents: number } };
+    // Solde du compte 4117 : soldé, donc plus rien en cours.
+    expect(body.retention.totalCents).toBe(0);
+  });
+
+  it("les limites de la dérivation survivent au rechargement", async () => {
+    // Un avertissement n'a de valeur que s'il reste lisible : il porte le
+    // fait qu'une retenue non rattachable est encore comptée en impayé.
+    const orphelin = [
+      HEADER,
+      line({ num: "1", date: "20250110", compte: "41100013", aux: "CORPH", piece: "FA-ORP", debit: "10000,00" }),
+      line({ num: "1", date: "20250110", compte: "706000", piece: "FA-ORP", credit: "10000,00" }),
+      line({ num: "2", date: "20250110", compte: "41170013", aux: "CORPH", piece: "RG-ORP", debit: "500,00" }),
+      line({ num: "2", date: "20250110", compte: "41100013", aux: "CORPH", piece: "RG-ORP", credit: "500,00" }),
+    ].join("\r\n");
+    expect((await importFec(orphelin, ownerCookie, "retenue-orpheline.txt")).statusCode).toBe(201);
+
+    const status = await app.inject({
+      method: "GET",
+      url: "/connectors/fec",
+      headers: { cookie: ownerCookie },
+    });
+    const body = status.json() as { lastImport: { warnings: string[] } };
+    expect(body.lastImport.warnings.some((w) => w.includes("non rattachée"))).toBe(true);
+  });
 });
 
 describe("POST /connectors/fec/import", () => {
@@ -309,6 +358,18 @@ describe("POST /connectors/fec/import", () => {
       lastImport: null,
       retention: { count: 0, totalCents: 0, releaseDateKnown: false },
     });
+  });
+});
+
+describe("GET /connectors/fec", () => {
+  it("le dernier import expose ses avertissements (compteurs, jamais une ligne)", async () => {
+    const status = await app.inject({
+      method: "GET",
+      url: "/connectors/fec",
+      headers: { cookie: ownerCookie },
+    });
+    const body = status.json() as { lastImport: { warnings: string[] } | null };
+    expect(Array.isArray(body.lastImport?.warnings)).toBe(true);
   });
 });
 

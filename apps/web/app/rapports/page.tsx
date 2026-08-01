@@ -152,14 +152,20 @@ export default function RapportsPage() {
             </ul>
             {(report.unusableCount > 0 ||
               report.excludedCount > 0 ||
-              report.unattributedCount > 0) && (
+              report.unattributedCount > 0 ||
+              report.overdueNotClaimableCount > 0) && (
               <p className="muted">
                 {report.unusableCount > 0 &&
                   `${report.unusableCount} facture(s) écartée(s) (montant ou date illisible, devise étrangère jamais convertie). `}
                 {report.excludedCount > 0 &&
                   `${report.excludedCount} brouillon(s), devis, avoir(s) ou facture(s) annulée(s) hors du CA. `}
                 {report.unattributedCount > 0 &&
-                  `${report.unattributedCount} facture(s) (${euros(report.unattributedCents)}) ne sont rattachées à aucun client : comptées au CA, jamais attribuées.`}
+                  `${report.unattributedCount} facture(s) (${euros(report.unattributedCents)}) ne sont rattachées à aucun client : comptées au CA, jamais attribuées. `}
+                {/* US-8 : sortie d'un compteur sans un mot, c'est une donnée
+                    qui disparaît — l'écart avec le facturier doit s'expliquer
+                    à l'écran, pas seulement dans le JSON de l'outil. */}
+                {report.overdueNotClaimableCount > 0 &&
+                  `${report.overdueNotClaimableCount} facture(s) échue(s) hors encours : il n'en reste rien à réclamer (retenue de garantie, ou déjà encaissé).`}
               </p>
             )}
           </section>

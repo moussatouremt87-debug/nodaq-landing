@@ -144,7 +144,7 @@ describe("retenue de garantie — jamais un impayé", () => {
     ];
     const result = deriveReceivables(entriesOf(rows), { today: TODAY });
     expect(result.invoices.find((i) => i.number === "F-600")?.retainedCents).toBe(0);
-    expect(result.warnings.some((w) => w.includes("négative"))).toBe(true);
+    expect(result.warnings.some((w) => w.includes("solde négatif"))).toBe(true);
   });
 
   it("BLOQUANT : retenue comptabilisée DIRECTEMENT à la facture — le marché vaut toujours 10 000 €", () => {
@@ -174,18 +174,111 @@ describe("retenue de garantie — jamais un impayé", () => {
     expect(result.warnings.some((w) => w.includes("non rattachée"))).toBe(false);
   });
 
-  it("compte client en 4117xxxx : dit comme tel, jamais comme une retenue non rattachée", () => {
-    // Plan « 411 + code client » : chaque pièce du tenant sortirait sinon un
-    // avertissement « retenue non rattachée » alors qu'aucune retenue
-    // n'existe — un avertissement faux répété use la confiance aussi sûrement
-    // qu'un chiffre faux.
+  it("4117 sans créance 411 dans la pièce : le fait est dit, la CAUSE n'est pas devinée", () => {
+    // Deux situations sont ici INDISCERNABLES : un plan « 411 + code client »
+    // (le client 70003 porte le compte 41170003, il n'y a aucune retenue) ou
+    // une vraie retenue orpheline. Trancher serait un diagnostic inventé —
+    // et un avertissement faux, répété à chaque pièce, use la confiance aussi
+    // sûrement qu'un chiffre faux.
     const rows = [
       row({ num: "1", date: "20260105", compte: "41170003", aux: "C70003", piece: "F-300", pieceDate: "20260105", lib: "Facture F-300", debit: "3000,00" }),
       row({ num: "1", date: "20260105", compte: "706000", compteLib: "Prestations", piece: "F-300", pieceDate: "20260105", lib: "Facture F-300", credit: "3000,00" }),
     ];
     const result = deriveReceivables(entriesOf(rows), { today: TODAY });
-    expect(result.warnings.some((w) => w.includes("non rattachée"))).toBe(false);
-    expect(result.warnings.some((w) => w.includes("411 + code client"))).toBe(true);
+    const warning = result.warnings.find((w) => w.includes("4117 au débit"));
+    expect(warning).toBeDefined();
+    // La conséquence est dite ; la cause reste ouverte.
+    expect(warning).toContain("rien n'est déduit des impayés");
+    expect(warning).toContain("ou retenue non rattachable");
+  });
+
+  it("BLOQUANT : sans compte auxiliaire, la retenue reste rattachée à SA facture", () => {
+    // Plan sans auxiliaire : la facture vit au 411000, la retenue au 411700.
+    // Notre clé de regroupement est (client, pièce) et le « client » vient du
+    // compte à défaut d'auxiliaire : deux clients pour la clé, une seule
+    // facture pour l'artisan. La retenue formait alors une facture FANTÔME de
+    // 500 €, comptée en impayé — donc relançable. Le défaut du ticket, intact.
+    const rows = [
+      row({ num: "1", date: "20260110", compte: "411000", compteLib: "Clients", piece: "F-800", pieceDate: "20260110", lib: "Facture F-800", debit: "10000,00" }),
+      row({ num: "1", date: "20260110", compte: "706000", compteLib: "Prestations", piece: "F-800", pieceDate: "20260110", lib: "Facture F-800", credit: "10000,00" }),
+      row({ num: "2", date: "20260110", compte: "411700", compteLib: "Retenues de garantie", piece: "F-800", lib: "Retenue 5%", debit: "500,00" }),
+      row({ num: "2", date: "20260110", compte: "411000", compteLib: "Clients", piece: "F-800", lib: "Retenue 5%", credit: "500,00" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    // UNE facture, pas deux : la retenue n'est pas une créance de plus.
+    expect(result.invoices).toHaveLength(1);
+    const invoice = result.invoices[0];
+    expect(invoice?.number).toBe("F-800");
+    expect(invoice?.amountCents).toBe(1_000_000);
+    expect(invoice?.retainedCents).toBe(50_000);
+    // Exigible : 9 500 €. Et surtout : la retenue n'est pas dans les impayés.
+    expect(result.overdueCents).toBe(950_000);
+    expect(result.overdueCount).toBe(1);
+  });
+
+  it("BLOQUANT : la libération ne gonfle pas le montant facturé", () => {
+    // Levée des réserves : le solde repasse du 4117 au 411 (débit 411 /
+    // crédit 4117). Ce débit n'est PAS une vente — c'est un reclassement
+    // d'une somme déjà facturée. L'additionner surévaluerait le CA (2.11/3.1)
+    // et le dénominateur de la marge (2.8) de 5 %, dans la direction
+    // flatteuse que 2.8 s'interdit précisément.
+    const rows = [
+      row({ num: "1", date: "20260110", compte: "41100008", aux: "CLIB", piece: "F-900", pieceDate: "20260110", lib: "Facture F-900", debit: "10000,00" }),
+      row({ num: "1", date: "20260110", compte: "706000", compteLib: "Prestations", piece: "F-900", pieceDate: "20260110", lib: "Facture F-900", credit: "10000,00" }),
+      row({ num: "2", date: "20260110", compte: "41170008", aux: "CLIB", piece: "F-900", lib: "Retenue 5%", debit: "500,00" }),
+      row({ num: "2", date: "20260110", compte: "41100008", aux: "CLIB", piece: "F-900", lib: "Retenue 5%", credit: "500,00" }),
+      // Un an plus tard : réserves levées, la retenue redevient exigible.
+      row({ num: "3", date: "20270115", compte: "41100008", aux: "CLIB", piece: "F-900", lib: "Levée des réserves", debit: "500,00" }),
+      row({ num: "3", date: "20270115", compte: "41170008", aux: "CLIB", piece: "F-900", lib: "Levée des réserves", credit: "500,00" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    const invoice = result.invoices.find((i) => i.number === "F-900");
+    expect(invoice?.amountCents).toBe(1_000_000);
+    // Plus rien de retenu, et les 500 € sont redevenus exigibles.
+    expect(invoice?.retainedCents).toBe(0);
+    expect(result.retainedCents).toBe(0);
+    expect(invoice?.residualCents).toBe(1_000_000);
+  });
+
+  it("BLOQUANT : une libération encaissée sous SA pièce ne laisse pas une retenue fantôme", () => {
+    // `débit 512 / crédit 4117` sous la pièce du règlement : rattachable à
+    // aucune facture. Sommer les retenues PAR FACTURE annoncerait encore
+    // « 500 € de retenue en cours » sur une somme déjà encaissée. Le total se
+    // lit donc sur le SOLDE du compte 4117, qui n'a rien à rattacher.
+    const rows = [
+      row({ num: "1", date: "20260110", compte: "41100010", aux: "CENC", piece: "F-950", pieceDate: "20260110", lib: "Facture F-950", debit: "10000,00", let: "AA" }),
+      row({ num: "1", date: "20260110", compte: "706000", compteLib: "Prestations", piece: "F-950", pieceDate: "20260110", lib: "Facture F-950", credit: "10000,00" }),
+      row({ num: "2", date: "20260110", compte: "41170010", aux: "CENC", piece: "F-950", lib: "Retenue 5%", debit: "500,00" }),
+      row({ num: "2", date: "20260110", compte: "41100010", aux: "CENC", piece: "F-950", lib: "Retenue 5%", credit: "500,00", let: "AA" }),
+      row({ journal: "BQ", num: "3", date: "20260214", compte: "512000", compteLib: "Banque", piece: "REG-950", lib: "Encaissement", debit: "9500,00" }),
+      row({ journal: "BQ", num: "3", date: "20260214", compte: "41100010", aux: "CENC", piece: "F-950", lib: "Règlement", credit: "9500,00", let: "AA" }),
+      // Levée des réserves encaissée, sous la pièce du règlement.
+      row({ journal: "BQ", num: "4", date: "20270120", compte: "512000", compteLib: "Banque", piece: "REG-RG950", lib: "Encaissement retenue", debit: "500,00" }),
+      row({ journal: "BQ", num: "4", date: "20270120", compte: "41170010", aux: "CENC", piece: "REG-RG950", lib: "Encaissement retenue", credit: "500,00" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    // Le compte de retenue est soldé : plus rien n'est en cours.
+    expect(result.retainedCents).toBe(0);
+    // Et la libération encaissée ne fabrique pas une créance de plus.
+    expect(result.overdueCount).toBe(0);
+    expect(result.invoices.find((i) => i.number === "REG-RG950")).toBeUndefined();
+  });
+
+  it("un crédit client qui n'est PAS un transfert ne fait pas perdre la retenue", () => {
+    // Écriture de vente portant un escompte au crédit du client : le montant
+    // du crédit ne correspond pas au débit 4117, ce n'est donc pas un
+    // transfert. Le confondre amputerait le montant facturé de la retenue.
+    const rows = [
+      row({ num: "1", date: "20260110", compte: "41100011", aux: "CESC", piece: "F-960", pieceDate: "20260110", lib: "Facture F-960", debit: "9500,00" }),
+      row({ num: "1", date: "20260110", compte: "41170011", aux: "CESC", piece: "F-960", pieceDate: "20260110", lib: "Retenue 5%", debit: "500,00" }),
+      row({ num: "1", date: "20260110", compte: "41100011", aux: "CESC", piece: "F-960", pieceDate: "20260110", lib: "Escompte", credit: "100,00" }),
+      row({ num: "1", date: "20260110", compte: "706000", compteLib: "Prestations", piece: "F-960", pieceDate: "20260110", lib: "Facture F-960", credit: "9900,00" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    const invoice = result.invoices.find((i) => i.number === "F-960");
+    expect(invoice?.amountCents).toBe(1_000_000);
+    expect(invoice?.retainedCents).toBe(50_000);
+    expect(invoice?.residualCents).toBe(940_000);
   });
 
   it("sans retenue, rien ne change (non-régression 2.14)", () => {
