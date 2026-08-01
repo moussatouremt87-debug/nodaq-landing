@@ -189,9 +189,9 @@ describe("retenue de garantie (US-8) — bout en bout", () => {
       url: "/connectors/fec",
       headers: { cookie: ownerCookie },
     });
-    const body = status.json() as { retention: { count: number; totalCents: number } };
-    expect(body.retention.count).toBe(1);
+    const body = status.json() as { retention: { totalCents: number; inProgress: boolean } };
     expect(body.retention.totalCents).toBe(50_000);
+    expect(body.retention.inProgress).toBe(true);
   });
 
   it("le MONTANT des retenues est owner-only ; le fait, lui, est dit au membre", async () => {
@@ -204,9 +204,10 @@ describe("retenue de garantie (US-8) — bout en bout", () => {
       url: "/connectors/fec",
       headers: { cookie: memberCookie },
     });
-    const body = asMember.json() as { retention: { count: number; totalCents: number | null } };
+    const body = asMember.json() as { retention: { totalCents: number | null; inProgress: boolean } };
     expect(body.retention.totalCents).toBeNull();
-    expect(body.retention.count).toBeGreaterThan(0);
+    // Le FAIT reste dit : sans lui, le membre relancerait ces lignes.
+    expect(body.retention.inProgress).toBe(true);
   });
 
   it("BLOQUANT : sur un chantier NON réglé, l'aval ne peut réclamer que l'exigible", async () => {
@@ -371,7 +372,7 @@ describe("POST /connectors/fec/import", () => {
     expect(status.json()).toEqual({
       imported: false,
       lastImport: null,
-      retention: { count: 0, totalCents: 0, releaseDateKnown: false },
+      retention: { totalCents: 0, releaseDateKnown: false, inProgress: false },
     });
   });
 });

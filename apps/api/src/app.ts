@@ -800,7 +800,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     // Métadonnées et retenues LUES ENSEMBLE, dans la MÊME transaction : deux
     // lectures séparées peuvent encadrer un import concurrent et afficher les
     // compteurs d'un import avec les retenues d'un autre.
-    const { lastImport, retention } = await withTenant(request.tenantId, async (tx) => {
+    const { lastImport } = await withTenant(request.tenantId, async (tx) => {
       const last = await tx.fecImport.findFirst({
         orderBy: { importedAt: "desc" },
         select: {
@@ -823,14 +823,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           retainedCents: true,
         },
       });
-      // Nombre de FACTURES concernées — un fait par facture, celui-là
-      // s'agrège. Scopé au dernier import, celui servi à l'aval (fec.ts).
-      const count = last
-        ? await tx.fecInvoice.count({
-            where: { importId: last.id, retainedCents: { gt: 0 } },
-          })
-        : 0;
-      return { lastImport: last, retention: count };
+      return { lastImport: last };
     });
     const { id: _importId, retainedCents, warnings, ...lastImportPublic } = lastImport ?? {};
     return {
@@ -839,16 +832,17 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         ? { ...lastImportPublic, warnings: FecWarnings.parse(warnings) }
         : null,
       retention: {
-        // Le compteur suit le SOLDE : une facture peut porter une retenue déjà
-        // libérée sous une autre pièce. Annoncer « 0 € en cours (2 factures
-        // concernées) » — ou, pour un membre qui ne voit pas le montant,
-        // « des retenues sont en cours » sur un compte soldé — serait faux.
-        count: (retainedCents ?? 0n) > 0n ? retention : 0,
+        // PAS de nombre de factures : une libération comptabilisée sous une
+        // autre pièce n'est rattachable à aucune facture, donc « 1 000 € en
+        // cours (2 factures concernées) » peut compter une facture dont la
+        // retenue est déjà encaissée. Le solde du compte, lui, est juste — il
+        // reste la seule vérité affichée.
         // Le MONTANT est une créance en euros : owner-only, comme
         // `overdueCents` (volontairement absent de cette route), la marge et
-        // le rapport mensuel. Un membre voit qu'il existe des retenues — leur
-        // nombre, et le fait qu'elles ne sont pas des impayés — pas la somme.
+        // le rapport mensuel. Le FAIT, lui, est dit à tout membre — le taire
+        // le ramènerait au geste qu'on veut éviter : relancer ces lignes.
         totalCents: request.membershipRole === "owner" ? Number(retainedCents ?? 0n) : null,
+        inProgress: (retainedCents ?? 0n) > 0n,
         // La date de libération est CONTRACTUELLE : elle n'est nulle part
         // dans un FEC. On ne l'invente pas — la saisir est un ticket à part.
         releaseDateKnown: false,

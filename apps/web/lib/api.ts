@@ -233,9 +233,14 @@ export const FecStatus = z.object({
    * `totalCents` est `null` hors rôle owner : une créance en euros se lit avec
    * le même droit ici que dans la marge ou le rapport mensuel. */
   retention: z.object({
-    count: z.number(),
+    /** `null` hors rôle owner (créance en euros). Pas de nombre de factures :
+     * une libération sous une autre pièce n'étant rattachable à aucune
+     * facture, un compteur contredirait le solde. */
     totalCents: z.number().nullable(),
     releaseDateKnown: z.boolean(),
+    /** Vrai dès qu'une retenue est en cours — dit au membre qui ne voit pas
+     * le montant, pour qu'il ne relance pas ces lignes à la main. */
+    inProgress: z.boolean(),
   }),
 });
 export type FecStatus = z.infer<typeof FecStatus>;

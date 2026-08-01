@@ -1663,7 +1663,7 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
         // due, mais pas réclamable — la relance ne porte que sur l'exigible.
         (retainedCents > 0
           ? ` Une retenue de garantie de ${retainedCents / 100} ${invoice.currency ?? "EUR"} ` +
-            "reste retenue jusqu'à la levée des réserves : elle n'est PAS réclamée."
+            "est constatée sur cette facture : elle n'est PAS réclamée."
           : "");
       const draft = await route({
         text: DUNNING_PROMPT + facts,

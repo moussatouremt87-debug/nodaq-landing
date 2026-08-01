@@ -62,7 +62,6 @@ describe("retenue de garantie — jamais un impayé", () => {
     // 5 % de 10 000 € : la somme existe, elle n'est simplement pas exigible.
     expect(invoice?.retainedCents).toBe(50_000);
     expect(result.retainedCents).toBe(50_000);
-    expect(result.retentionCount).toBe(1);
   });
 
   it("le montant de la facture reste le montant du marché", () => {

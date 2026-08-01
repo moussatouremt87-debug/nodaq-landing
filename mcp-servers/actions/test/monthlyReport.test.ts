@@ -318,6 +318,45 @@ describe("invariants", () => {
     expect(report.revenueCents).toBe(500_000);
   });
 
+  it("la levée de réserves compte AUSSI dans le mois de référence", () => {
+    // L'encours du mois précédent sert de référence à `impayes_en_hausse`.
+    // Nourrir le mois courant sans nourrir la référence sous-évalue celle-ci
+    // et gonfle la hausse : la règle se déclencherait sur un artefact
+    // comptable, c'est-à-dire qu'elle pousserait à relancer — exactement ce
+    // que ce ticket ferme.
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-04-10", 5_000),
+        { date: "2026-03-12", amount: 0, currency: "EUR", status: "late", residual_amount: 300 },
+        { date: "2026-04-12", amount: 0, currency: "EUR", status: "late", residual_amount: 500 },
+      ],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(50_000);
+    // La référence connaît les 300 € de mars : la hausse est MESURÉE contre
+    // eux, pas fabriquée par une asymétrie de comptage (une référence à zéro
+    // aurait rendu la règle non évaluable, ou la hausse infinie).
+    const anomaly = report.anomalies.find((a) => a.kind === "impayes_en_hausse");
+    expect(anomaly?.reference).toBe(30_000);
+    expect(anomaly?.observed).toBe(50_000);
+  });
+
+  it("un avoir ne devient pas un impayé parce qu'il porte un solde", () => {
+    // La branche « pas une vente mais exigible » vise le montant NUL (levée
+    // de réserves). Un montant négatif est un avoir : il ne se compte pas en
+    // impayé, quoi qu'annonce un `residual_amount`.
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        { date: "2026-04-12", amount: -500, currency: "EUR", status: "unpaid", residual_amount: 500 },
+      ],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(0);
+    expect(report.overdueCount).toBe(0);
+  });
+
   it("factures non attribuées : comptées au CA, jamais tues", () => {
     const report = buildMonthlyReport(
       [

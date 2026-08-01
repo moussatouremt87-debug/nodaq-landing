@@ -216,7 +216,7 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
       setStatus({
         imported: false,
         lastImport: null,
-        retention: { count: 0, totalCents: 0, releaseDateKnown: false },
+        retention: { totalCents: 0, releaseDateKnown: false, inProgress: false },
       });
       setNotice("Données importées supprimées.");
       onChanged();
@@ -280,20 +280,17 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
             {status.lastImport.overdueCount} impayé{status.lastImport.overdueCount > 1 ? "s" : ""}.
             Ré-importer remplace ces données.
           </p>
-          {((status.retention.totalCents ?? 0) > 0 || status.retention.count > 0) && (
+          {status.retention.inProgress && (
             // US-8 : dite À PART des impayés, et jamais dans le même compteur.
             // Une retenue muette laisse croire que ces 5 % sont perdus — ou
             // pousse à les réclamer à la main. Le total est le SOLDE du compte
             // 4117 : une retenue déjà libérée n'y figure plus, quelle que soit
             // la pièce sous laquelle la libération a été comptabilisée.
-            // Le MONTANT est owner-only ; le fait, lui, se dit à tout membre —
-            // c'est ce qui évite qu'on relance ces lignes à la main.
+            // Le MONTANT est owner-only ; le fait, lui, se dit à tout membre.
             <p className="hint">
               {status.retention.totalCents === null
                 ? "Des retenues de garantie sont en cours"
                 : `Dont ${formatEuroCents(status.retention.totalCents)} de retenue de garantie en cours`}
-              {status.retention.count > 0 &&
-                ` (${status.retention.count} facture${status.retention.count > 1 ? "s" : ""} concernée${status.retention.count > 1 ? "s" : ""})`}
               {" "}: due, mais pas exigible — jamais comptée en impayé ni relancée.
               {!status.retention.releaseDateKnown &&
                 " La date de levée des réserves est contractuelle : elle n'est pas dans le FEC."}

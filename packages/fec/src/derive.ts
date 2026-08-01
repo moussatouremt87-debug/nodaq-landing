@@ -62,8 +62,6 @@ export interface FecDerivation {
    * l'ignorer annoncerait comme « en cours » des sommes déjà encaissées.
    * Affiché À PART des impayés. */
   retainedCents: number;
-  /** Nombre de factures portant une retenue rattachée à leur pièce. */
-  retentionCount: number;
   warnings: string[];
 }
 
@@ -156,7 +154,6 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   let openCount = 0;
   let overdueCount = 0;
   let overdueCents = 0;
-  let retentionCount = 0;
   let unattachedRetentionCount = 0;
   let lookalikeAccountCount = 0;
   let negativeRetentionCount = 0;
@@ -337,7 +334,6 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   // facturé.
 
   for (const invoice of invoices) {
-    if (invoice.retainedCents > 0) retentionCount++;
     if (!invoice.settled && invoice.residualCents > 0) {
       openCount++;
       if (invoice.dueDate < todayIso) {
@@ -501,11 +497,6 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
     overdueCount,
     overdueCents,
     retainedCents: retainedTotalCents,
-    // Le compteur suit le SOLDE : une facture peut porter une retenue déjà
-    // libérée sous une autre pièce. « 1 retenue en cours » pour 0 € serait
-    // faux, et c'est la dérivation qui doit être juste — pas seulement la
-    // route qui la sert.
-    retentionCount: retainedTotalCents > 0 ? retentionCount : 0,
     warnings,
   };
 }

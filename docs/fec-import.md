@@ -168,6 +168,13 @@ Seules les lignes **reconnues** comme retenue y entrent — plus les mouvements 
 lui, est déjà compté dans les impayés : l'ajouter ici annoncerait la même somme
 deux fois, en créance et en retenue.
 
+L'écran n'affiche **pas** de nombre de factures concernées : une libération
+comptabilisée sous une autre pièce n'étant rattachable à aucune facture,
+« 1 000 € en cours (2 factures) » pourrait compter une facture dont la retenue
+est déjà encaissée. Le solde, lui, est juste — il reste la seule vérité
+affichée, et le **fait** qu'une retenue soit en cours est dit à tout membre
+(le montant reste owner-only).
+
 Le seau est le **compte auxiliaire** quand la comptabilité en tient un : un
 client sur-libéré ne masque alors pas la retenue d'un autre. **Sans
 auxiliaire**, toutes les retenues vivent sur le même compte, le seau est unique
@@ -193,10 +200,18 @@ l'instant même de son enregistrement. Relancer un bon client sur une somme
 exigible depuis quatre jours, c'est la faute du ticket un cran plus loin.
 
 La relance sait la réclamer parce qu'elle juge la lisibilité sur le **solde
-restant dû**, pas sur le montant facturé. En revanche le rapport mensuel
-(2.11) ne la compte pas dans son encours : il parle de **factures du mois**, et
-une pièce de levée n'en est pas une. Les deux écrans disent donc chacun ce
-qu'ils mesurent.
+restant dû**, pas sur le montant facturé. Le rapport mensuel (2.11) la compte
+dans son **encours** du mois de **sa** date — jamais au CA : une écriture peut
+n'être pas une vente et porter quand même un solde exigible. L'en écarter
+faisait dire deux chiffres d'impayés différents au rapport et au connecteur
+pour la même donnée, et la rangeait à l'écran parmi les brouillons et les
+avoirs. Le mois de **référence** est nourri par le même chemin : le nourrir
+d'un côté seulement sous-évaluerait la référence, gonflerait la hausse et
+déclencherait `impayes_en_hausse` sur un artefact comptable — c'est-à-dire
+pousserait à relancer, ce que ce ticket ferme.
+
+Le montant doit être **nul**, pas seulement « non positif » : un avoir ne
+devient pas un impayé parce qu'il porterait un solde.
 
 Une libération saisie **sans auxiliaire** alors que la retenue en portait un
 tomberait dans un autre seau et ne compenserait jamais : quand le compte de
