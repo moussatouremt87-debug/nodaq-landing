@@ -142,6 +142,58 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
+/**
+ * Chantier BTP soldé HORS retenue de garantie : 10 000 € facturés, 500 € (5 %)
+ * transférés au 4117 jusqu'à la levée des réserves, 9 500 € encaissés.
+ * Rien n'est dû aujourd'hui — et rien ne doit être relancé (US-8).
+ */
+function fixtureRetenue(): string {
+  return [
+    HEADER,
+    line({ num: "1", date: "20250110", compte: "41100003", aux: "CBTP", auxLib: "SCI Chantier", piece: "FA-RG", debit: "10000,00", let: "AA" }),
+    line({ num: "1", date: "20250110", compte: "706000", piece: "FA-RG", credit: "10000,00" }),
+    line({ num: "2", date: "20250110", compte: "41170003", aux: "CBTP", auxLib: "SCI Chantier", piece: "FA-RG", debit: "500,00" }),
+    line({ num: "2", date: "20250110", compte: "41100003", aux: "CBTP", auxLib: "SCI Chantier", piece: "FA-RG", credit: "500,00", let: "AA" }),
+    line({ num: "3", date: "20250214", compte: "512000", piece: "REG-RG", debit: "9500,00" }),
+    line({ num: "3", date: "20250214", compte: "41100003", aux: "CBTP", auxLib: "SCI Chantier", piece: "FA-RG", credit: "9500,00", let: "AA" }),
+  ].join("\r\n");
+}
+
+describe("retenue de garantie (US-8) — bout en bout", () => {
+  it("BLOQUANT : la facture n'est ni impayée ni relançable, la retenue est dite", async () => {
+    const res = await importFec(fixtureRetenue(), ownerCookie, "retenue.txt");
+    expect(res.statusCode).toBe(201);
+    const report = res.json() as { overdueCount: number; overdueCents: number };
+    // Une relance ici ferait perdre un bon client : rien n'est exigible.
+    expect(report.overdueCount).toBe(0);
+    expect(report.overdueCents).toBe(0);
+
+    // La facture existe, soldée, avec sa retenue conservée à part.
+    const invoice = await admin.fecInvoice.findFirstOrThrow({ where: { number: "FA-RG" } });
+    expect(invoice.settled).toBe(true);
+    expect(Number(invoice.residualCents)).toBe(0);
+    expect(Number(invoice.retainedCents)).toBe(50_000);
+    // Le montant facturé reste celui du marché, pas 10 500 €.
+    expect(Number(invoice.amountCents)).toBe(1_000_000);
+
+    // L'interface facturier ne la présente pas comme en retard : c'est CE
+    // statut qui décide d'une proposition de relance.
+    const pennylane = await getPennylaneClient(orgA);
+    const { items } = await pennylane.listCustomerInvoices({ limit: 50 });
+    expect(items.find((i) => i.invoice_number === "FA-RG")?.status).toBe("paid");
+
+    // Et la retenue est VISIBLE, pas silencieusement absorbée.
+    const status = await app.inject({
+      method: "GET",
+      url: "/connectors/fec",
+      headers: { cookie: ownerCookie },
+    });
+    const body = status.json() as { retention: { count: number; totalCents: number } };
+    expect(body.retention.count).toBe(1);
+    expect(body.retention.totalCents).toBe(50_000);
+  });
+});
+
 describe("POST /connectors/fec/import", () => {
   it("401 sans session, 403 pour un MEMBER (owner only)", async () => {
     const anonymous = await app.inject({
@@ -225,7 +277,13 @@ describe("POST /connectors/fec/import", () => {
       url: "/connectors/fec",
       headers: { cookie: otherCookie },
     });
-    expect(status.json()).toEqual({ imported: false, lastImport: null });
+    // Retenues à zéro et non « absentes » : un tenant sans import n'a aucune
+    // retenue, et le dire vaut mieux qu'un champ manquant à interpréter.
+    expect(status.json()).toEqual({
+      imported: false,
+      lastImport: null,
+      retention: { count: 0, totalCents: 0, releaseDateKnown: false },
+    });
   });
 });
 

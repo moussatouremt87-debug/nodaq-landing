@@ -55,3 +55,50 @@ analysées, clients, factures, impayés (nombre + montant), avertissements.
 - Générer un FEC (jamais notre rôle) ou l'utiliser comme import comptable
   complet : seule la dérivation créances clients est couverte (V1).
 - Poser le statut connecteur `file` ailleurs que via l'endpoint d'import.
+
+## Retenue de garantie — jamais un impayé (US-8, ticket 2.20)
+
+Dans le bâtiment, le client retient contractuellement 5 % du marché jusqu'à la
+levée des réserves, souvent un an après la réception. **Ce n'est pas un
+impayé** : c'est une somme non encore exigible, prévue au contrat.
+
+Comptablement, la retenue vit au **4117 « Clients — Retenues de garantie »**.
+Or `4117` est une **subdivision de `411`** — et la dérivation des créances
+filtrait sur le préfixe `411`. La retenue était donc :
+
+1. agrégée à la facture, ce qui **gonflait le montant facturé** de 5 % ;
+2. non lettrée jusqu'à la libération, ce qui laissait la facture **ouverte** ;
+3. comptée dans `overdueCents`, donc **candidate à une relance**.
+
+Relancer un bon client sur sa retenue de garantie est la faute qui coûte le
+plus cher en crédibilité devant un artisan : elle prouve en une phrase que
+l'outil ne connaît pas son métier.
+
+### Ce qui a changé
+
+`classifyReceivableAccount` (config versionnée datée sourcée PCG,
+`packages/shared/src/receivableAccounts.ts`) sépare désormais trois natures :
+`retenue` (4117), `client` (411), `hors_clients`. Le préfixe le plus long
+l'emporte — sinon la retenue redevient une créance ordinaire.
+
+| Grandeur | Contenu |
+|---|---|
+| `amountCents` | débits 411 de la pièce — la retenue y est **carvée** par le transfert, pas ajoutée (l'additionner comptait les 5 % deux fois) |
+| `residualCents` | part **exigible** restant due, retenue **exclue** |
+| `retainedCents` | la retenue elle-même — conservée, jamais effacée |
+| `settled` | jugé sur les seules lignes **exigibles** : la retenue, non lettrée par nature, ne peut plus à elle seule faire passer une facture réglée pour ouverte |
+
+`overdueCents` et `overdueCount` excluent la retenue, donc le statut renvoyé
+par l'interface facturier est `paid` — et c'est ce statut qui décide d'une
+proposition de relance.
+
+### Ce que le produit ne prétend pas savoir
+
+La **date de libération** est contractuelle : elle n'existe nulle part dans un
+FEC. Le produit ne l'invente pas (`releaseDateKnown: false`) ; la saisir est un
+ticket à part. Une retenue est donc affichée pour son montant et son nombre,
+sans échéance — dire « libérable le … » sans le savoir serait exactement le
+genre d'affirmation que le reste du produit s'interdit.
+
+Une retenue **négative** est refusée en base (CHECK) : elle signalerait une
+libération sur-comptabilisée, qui doit être vue et non absorbée en silence.

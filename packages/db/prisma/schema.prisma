@@ -418,7 +418,12 @@ model FecInvoice {
   issuedDate    DateTime  @map("issued_date") @db.Date
   dueDate       DateTime  @map("due_date") @db.Date
   amountCents   BigInt    @map("amount_cents")
+  /// Part EXIGIBLE restant due — retenue de garantie exclue (US-8).
   residualCents BigInt    @map("residual_cents")
+  /// Retenue de garantie (compte 4117) : due, mais pas encore exigible. Elle
+  /// n'entre ni dans le solde, ni dans les impayés, ni dans une relance —
+  /// relancer un client sur sa retenue est la faute qui coûte le plus cher.
+  retainedCents BigInt    @default(0) @map("retained_cents")
   settled       Boolean
   tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   import        FecImport @relation(fields: [importId], references: [id], onDelete: Cascade)

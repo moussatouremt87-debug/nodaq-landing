@@ -806,7 +806,28 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         },
       }),
     );
-    return { imported: lastImport !== null, lastImport };
+    // Retenues de garantie en cours (US-8) : agrégées depuis les factures du
+    // dernier import et affichées À PART des impayés. Une retenue tue n'est
+    // pas neutre — le dirigeant croirait ces 5 % perdus ou, pire, les
+    // relancerait à la main.
+    const retention = await withTenant(request.tenantId, (tx) =>
+      tx.fecInvoice.aggregate({
+        where: { retainedCents: { gt: 0 } },
+        _sum: { retainedCents: true },
+        _count: { _all: true },
+      }),
+    );
+    return {
+      imported: lastImport !== null,
+      lastImport,
+      retention: {
+        count: retention._count._all,
+        totalCents: Number(retention._sum.retainedCents ?? 0n),
+        // La date de libération est CONTRACTUELLE : elle n'est nulle part
+        // dans un FEC. On ne l'invente pas — la saisir est un ticket à part.
+        releaseDateKnown: false,
+      },
+    };
   });
 
   // Le parser binaire est CANTONNÉ à cette route (plugin encapsulé) : le
@@ -917,6 +938,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
                     dueDate: new Date(`${invoice.dueDate}T00:00:00Z`),
                     amountCents: BigInt(invoice.amountCents),
                     residualCents: BigInt(invoice.residualCents),
+                    // Retenue de garantie (US-8) : conservée à part, jamais
+                    // fondue dans le solde exigible.
+                    retainedCents: BigInt(invoice.retainedCents),
                     settled: invoice.settled,
                   })),
                 });

@@ -70,6 +70,20 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > effacés, compteurs gardés) ; la file affiche provenance + lignes + non
 > reconnues avant validation ; corps jamais logué ni renvoyé
 > (`docs/devis-email.md`).
+> **Retenue de garantie (US-8 / 2.20)** : `4117` (« Clients — Retenues de
+> garantie ») est une SUBDIVISION de `411` — la dérivation des créances (2.14)
+> filtrait sur `411` et l'embarquait : montant facturé gonflé de 5 %, facture
+> laissée ouverte (retenue non lettrée par nature), et comptée en impayé donc
+> CANDIDATE À UNE RELANCE. Relancer un bon client sur sa retenue est la faute
+> qui coûte le plus cher devant un artisan. `classifyReceivableAccount`
+> (config versionnée datée sourcée PCG, `receivableAccounts.ts`, préfixe le
+> plus long gagnant) sépare `retenue`|`client`|`hors_clients` ; `settled` jugé
+> sur les seules lignes EXIGIBLES, `residualCents` hors retenue,
+> `retainedCents` conservé et AFFICHÉ à part, `amountCents` = débits 411 (la
+> retenue y est carvée par le transfert, l'additionner comptait 5 % deux fois) ;
+> date de libération JAMAIS inventée (contractuelle, absente du FEC —
+> `releaseDateKnown: false`) ; test BLOQUANT bout en bout : facture soldée hors
+> retenue => statut `paid`, aucune relance (`docs/fec-import.md`).
 > **Marge (2.8)** : le ticket que 2.11 avait refusé de faire à moitié. Le
 > danger est ASYMÉTRIQUE — une charge oubliée fait TOUJOURS paraître la marge
 > meilleure. Règle centrale : une base de charges incomplète ne produit PAS un

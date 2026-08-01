@@ -1,3 +1,4 @@
+import { classifyReceivableAccount } from "@nodaq/shared";
 import type { FecEntry } from "./parse.js";
 
 /*
@@ -30,11 +31,16 @@ export interface FecDerivedInvoice {
   number: string;
   /** ISO yyyy-mm-dd (PieceDate, à défaut EcritureDate). */
   issuedDate: string;
-  /** Somme des débits 411 de la pièce (total facturé). */
+  /** Somme des débits 411 de la pièce (total facturé). La retenue y est déjà
+   * comprise : elle est carvée par le transfert vers le 4117, pas ajoutée. */
   amountCents: number;
-  /** Débits - crédits : part restant due (0 si soldée). */
+  /** Part restant due et EXIGIBLE (0 si soldée) — retenue de garantie EXCLUE. */
   residualCents: number;
-  /** Toutes les lignes de la pièce sont lettrées. */
+  /** Retenue de garantie (4117) : due, mais pas encore exigible. Elle n'entre
+   * ni dans `residualCents`, ni dans les impayés, ni dans une relance. */
+  retainedCents: number;
+  /** Toutes les lignes EXIGIBLES de la pièce sont lettrées. La retenue, non
+   * lettrée jusqu'à la levée des réserves, ne peut pas empêcher ce solde. */
   settled: boolean;
   /** Échéance ESTIMÉE (issuedDate + dueDays). */
   dueDate: string;
@@ -46,6 +52,10 @@ export interface FecDerivation {
   openCount: number;
   overdueCount: number;
   overdueCents: number;
+  /** Total des retenues de garantie en cours — affiché À PART des impayés. */
+  retainedCents: number;
+  /** Nombre de factures portant une retenue. */
+  retentionCount: number;
   warnings: string[];
 }
 
@@ -68,7 +78,13 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   const todayIso = (options.today ?? new Date()).toISOString().slice(0, 10);
   const warnings: string[] = [];
 
-  const clientEntries = entries.filter((entry) => entry.compteNum.startsWith("411"));
+  // 4117 (« Clients — Retenues de garantie ») est une SUBDIVISION de 411 :
+  // filtrer sur "411" l'embarquait avec les créances ordinaires. La retenue
+  // gonflait alors le montant facturé, laissait la pièce non lettrée, et
+  // ressortait en impayé — jusqu'à une proposition de relance (US-8).
+  const clientEntries = entries.filter(
+    (entry) => classifyReceivableAccount(entry.compteNum) !== "hors_clients",
+  );
 
   const customers = new Map<string, FecCustomer>();
   const groups = new Map<string, FecEntry[]>();
@@ -99,13 +115,28 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   let openCount = 0;
   let overdueCount = 0;
   let overdueCents = 0;
+  let retainedTotalCents = 0;
+  let retentionCount = 0;
 
   for (const [key, group] of groups) {
-    const debitCents = group.reduce((sum, e) => sum + e.debitCents, 0);
-    const creditCents = group.reduce((sum, e) => sum + e.creditCents, 0);
-    if (debitCents === 0) continue; // pièce purement au crédit (avoir isolé) : pas une facture
+    // Deux populations DISTINCTES : l'exigible (411) et la retenue (4117).
+    const dueLines = group.filter((e) => classifyReceivableAccount(e.compteNum) === "client");
+    const retentionLines = group.filter(
+      (e) => classifyReceivableAccount(e.compteNum) === "retenue",
+    );
+    const debitCents = dueLines.reduce((sum, e) => sum + e.debitCents, 0);
+    const creditCents = dueLines.reduce((sum, e) => sum + e.creditCents, 0);
+    // Retenue = solde du 4117 (débit au transfert, crédit à la libération).
+    const retainedCents = Math.max(
+      0,
+      retentionLines.reduce((sum, e) => sum + e.debitCents - e.creditCents, 0),
+    );
+    if (debitCents === 0 && retainedCents === 0) continue; // avoir isolé : pas une facture
     const residualCents = Math.max(0, debitCents - creditCents);
-    const settled = group.every((e) => e.ecritureLet !== null);
+    // Le lettrage ne se juge QUE sur les lignes exigibles : la retenue reste
+    // non lettrée jusqu'à la levée des réserves, et ne doit pas à elle seule
+    // faire passer une facture réglée pour ouverte.
+    const settled = dueLines.every((e) => e.ecritureLet !== null);
     const [customerRef] = key.split("␟");
     const first = group.reduce((a, b) => (a.ecritureDate <= b.ecritureDate ? a : b));
     const issuedDate = first.pieceDate ?? first.ecritureDate;
@@ -116,13 +147,21 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
       customerName: customers.get(customerRef!)?.name ?? null,
       number: first.pieceRef!,
       issuedDate,
+      // Débits 411 de la pièce : la retenue est CARVÉE dans ce montant par le
+      // transfert vers le 4117 (crédit 411 / débit 4117), pas ajoutée à côté.
+      // L'additionner compterait les 5 % deux fois.
       amountCents: debitCents,
       residualCents: settled ? 0 : residualCents,
+      retainedCents,
       settled,
       dueDate,
     };
     invoices.push(invoice);
 
+    if (retainedCents > 0) {
+      retainedTotalCents += retainedCents;
+      retentionCount++;
+    }
     if (!settled && invoice.residualCents > 0) {
       openCount++;
       if (dueDate < todayIso) {
@@ -140,6 +179,8 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
     openCount,
     overdueCount,
     overdueCents,
+    retainedCents: retainedTotalCents,
+    retentionCount,
     warnings,
   };
 }
