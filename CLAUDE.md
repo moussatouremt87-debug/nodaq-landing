@@ -88,16 +88,25 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > MONTANT (un escompte n'est pas un transfert) ; le reclassement de la
 > libération n'est pas une vente. Rattachement PAR PIÈCE même sans compte
 > auxiliaire (sinon la retenue du `411700` devenait une facture fantôme
-> relançable) — MAIS seulement si chaque débit 4117 a, dans son écriture, une
-> contrepartie client au crédit du MÊME montant : sans cette condition, un lot
-> de facturation partagé faisait changer une créance de client (une facture a
-> pour contrepartie une VENTE, jamais un crédit client) ; total des retenues =
-> SOLDE du compte 4117, lignes RECONNUES seulement, planché par seau (compte
-> auxiliaire s'il existe, sinon le compte — limite DITE)
+> relançable) — sous TROIS conditions : une seule facture candidate, pas
+> d'auxiliaire propre distinct (le vrai discriminant du plan « 411 + code
+> client » : un client est un TIERS, un compte de retenue n'en a pas), et
+> chaque débit 4117 jambe de la MÊME écriture qu'une créance de la cible ou
+> contrepartie d'un crédit client de MÊME montant. N'exiger que la signature
+> du transfert laissait la facture fantôme revenir sur le CROISEMENT des deux
+> conventions (sans auxiliaire ET directe) ; ne rien exiger faisait changer
+> une créance de client sous une pièce partagée ;
+> levée des réserves RECOLLÉE à la facture qui porte la retenue quand il n'y
+> en a qu'une (sinon la pièce de levée, montant facturé nul, n'était
+> réclamable NULLE PART : relance sur « montant illisible », hors encours
+> 2.11) ; total des retenues =
+> SOLDE du compte 4117 — lignes RECONNUES, plus les seules SORTIES du même
+> compte (un débit non reconnu est déjà dans les impayés : l'ajouter comptait
+> deux fois) — planché par seau (compte auxiliaire s'il existe, sinon le
+> compte — limite DITE quand le risque est réel)
 > (`fec_imports.retained_cents`), jamais la somme par facture — une
 > libération sous sa propre pièce annoncerait sinon « en cours » des sommes
-> encaissées ; une libération non encaissée reste RÉCLAMABLE (montant facturé
-> nul, donc hors CA, mais solde exigible) ; cause NON devinée quand une ligne
+> encaissées ; cause NON devinée quand une ligne
 > 4117 n'a aucune créance 411 dans sa pièce (compte client en 4117xxxx ou
 > retenue orpheline : on dit le fait et sa conséquence) ; montant des retenues
 > OWNER-ONLY sur la route (créance en euros), le fait reste dit aux membres. La garde ne s'arrête pas au FEC : `retained_amount`

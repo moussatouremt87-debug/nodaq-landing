@@ -155,11 +155,17 @@ que la dérivation a **reconnues** comme retenue y entrent — une ligne `4117`
 laissée en créance ordinaire est déjà comptée dans les impayés, l'ajouter ici
 l'annoncerait une seconde fois.
 
+Seules les lignes **reconnues** comme retenue y entrent — plus les mouvements de
+**sortie** du même compte, qui sont alors des libérations. Un débit non reconnu,
+lui, est déjà compté dans les impayés : l'ajouter ici annoncerait la même somme
+deux fois, en créance et en retenue.
+
 Le seau est le **compte auxiliaire** quand la comptabilité en tient un : un
 client sur-libéré ne masque alors pas la retenue d'un autre. **Sans
 auxiliaire**, toutes les retenues vivent sur le même compte, le seau est unique
 et une libération excessive peut y compenser la retenue d'un autre client :
-c'est une limite du plan comptable, et elle est **dite** (avertissement dédié)
+c'est une limite du plan comptable, et elle est **dite** (avertissement dédié,
+émis seulement quand le risque est réel — plusieurs pièces *et* une libération)
 plutôt que promise résolue.
 
 La colonne par facture reste, elle, ce qu'elle dit : la retenue **constatée sur
@@ -167,10 +173,16 @@ cette pièce**. Une libération comptabilisée séparément n'y est pas déduite
 c'est pourquoi la mesure du cockpit s'appelle `retenue_constatee_sur_la_facture`
 et porte cette limite dans son libellé.
 
-Une libération non encaissée rend la somme **exigible** : la pièce de levée des
-réserves a un montant facturé nul (ce n'est pas une vente, elle n'entre donc
-pas au CA) mais un solde restant dû, et elle est **réclamable** — l'écarter
-ferait disparaître une créance réelle de tous les compteurs.
+Une libération non encaissée rend la somme **exigible**, et cette somme est
+recollée à **la facture qui porte la retenue** — quand il n'y en a qu'une pour
+ce client. Une seule candidate n'est pas une supposition ; plusieurs le
+seraient, et la pièce reste alors telle quelle avec un avertissement.
+
+Ce recollage n'est pas cosmétique : laissée à part, la pièce de levée a un
+montant facturé nul (ce n'est pas une vente), et **aucune surface aval ne sait
+la réclamer** — la relance refuserait sur « montant illisible », et le rapport
+mensuel la rangerait parmi les exclusions du CA au lieu de l'encours. Une
+créance que personne ne sait réclamer est une créance perdue.
 
 ### Ce que le produit ne prétend pas savoir
 
@@ -207,14 +219,26 @@ traitée comme une créance ordinaire, rien n'est déduit des impayés — sans
 trancher la cause. Un diagnostic inventé, répété à chaque pièce, use la
 confiance aussi sûrement qu'un chiffre faux.
 
-Le rattachement par pièce ne suffit d'ailleurs pas à lui seul : il exige aussi
-que **chaque débit `4117` ait, dans son écriture, une contrepartie client au
-crédit du même montant** — la signature d'un transfert. Sans cette seconde
-condition, une pièce partagée par deux clients (un lot de facturation) où l'un
-porte le compte `41170003` voyait **sa** créance ré-étiquetée « retenue » et
-rattachée à la facture de **l'autre** : un vrai dû sortait des impayés et
-changeait de client au passage. Une facture a pour contrepartie une vente
-(`7xx`), jamais un crédit client.
+Le rattachement par pièce ne suffit d'ailleurs pas à lui seul — il peut faire
+disparaître une créance, et lui faire changer de client, ce qui est pire. Il
+exige donc **trois** conditions cumulatives :
+
+1. une seule facture candidate dans la pièce (deux : on ne devine pas) ;
+2. les lignes `4117` n'ont **pas d'auxiliaire propre**, ou le même que la
+   facture cible. C'est le vrai discriminant du plan « 411 + code client » : le
+   client n° 70003 y est un **tiers**, avec son auxiliaire ; un compte de
+   retenue n'en a pas ;
+3. chaque débit `4117` est une jambe de la **même écriture** qu'une créance de
+   la facture cible (comptabilisation directe), ou a pour contrepartie un
+   crédit client du même montant dans son écriture (transfert).
+
+Sans 2 et 3, une pièce partagée par deux clients (un lot de facturation) où
+l'un porte le compte `41170003` voyait **sa** créance ré-étiquetée « retenue »
+et rattachée à la facture de **l'autre** : un vrai dû sortait des impayés et
+changeait de client au passage. Une condition qui n'aurait retenu que la
+signature du transfert aurait, elle, laissé la facture fantôme réapparaître sur
+le **croisement** des deux conventions (sans auxiliaire *et* comptabilisée
+directement) — les deux conventions se croisent dans la vraie vie.
 
 Sans **compte auxiliaire**, la facture vit au `411000` et sa retenue au
 `411700` : deux « clients » pour notre clé de regroupement (client, pièce), une

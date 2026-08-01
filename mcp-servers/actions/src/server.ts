@@ -56,6 +56,7 @@ import {
   claimableCents,
   fetchInvoiceWindow,
   forecastSales,
+  residualCentsOf,
   retainedCentsOf,
   UNPAID_STATUSES,
 } from "./salesForecast.js";
@@ -1606,8 +1607,14 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
           `invoice "${invoiceId}" is not eligible for dunning (status: ${invoice.status ?? "unknown"})`,
         );
       }
-      const totalCents = Math.round(Number.parseFloat(String(invoice.amount)) * 100);
-      if (!Number.isFinite(totalCents) || totalCents <= 0) {
+      const parsedTotal = Math.round(Number.parseFloat(String(invoice.amount)) * 100);
+      const totalCents = Number.isFinite(parsedTotal) ? parsedTotal : null;
+      // La lisibilité se juge sur ce qu'on peut RÉCLAMER, pas sur le montant
+      // facturé : une pièce de levée des réserves a un montant facturé nul
+      // (ce n'est pas une vente) mais un solde bien exigible. Refuser sur
+      // « montant illisible » y serait un motif faux, et la somme ne serait
+      // réclamable nulle part.
+      if (totalCents === null && residualCentsOf(invoice) === null) {
         throw new Error(`invoice "${invoiceId}" has no readable amount`);
       }
       // RETENUE DE GARANTIE (US-8) : on ne relance QUE la part exigible.
@@ -1615,7 +1622,7 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       // les réclamer, c'est réclamer une somme que le client a le droit de
       // garder. Même décision partagée que l'encours échu (2.11).
       const retainedCents = retainedCentsOf(invoice);
-      const amountCents = claimableCents(invoice, totalCents);
+      const amountCents = claimableCents(invoice, totalCents ?? 0);
       if (amountCents <= 0) {
         // Refus MOTIVÉ, pas un montant nul silencieux : le modèle reformule
         // au lieu de préparer une relance sur une somme non exigible. Le
