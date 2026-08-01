@@ -117,26 +117,57 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   let overdueCents = 0;
   let retainedTotalCents = 0;
   let retentionCount = 0;
+  let unattachedRetentionCount = 0;
+  let negativeRetentionCount = 0;
 
   for (const [key, group] of groups) {
     // Deux populations DISTINCTES : l'exigible (411) et la retenue (4117).
-    const dueLines = group.filter((e) => classifyReceivableAccount(e.compteNum) === "client");
-    const retentionLines = group.filter(
-      (e) => classifyReceivableAccount(e.compteNum) === "retenue",
-    );
+    //
+    // NARROWING DE SÛRETÉ (audit US-8). Le préfixe seul ne suffit PAS à
+    // reconnaître une retenue : sous le schéma courant « 411 + code client »,
+    // le client n° 70003 porte le compte `41170003`, indiscernable d'un
+    // `4117` + code. Classer ses créances en « retenue » les sortirait des
+    // impayés — un vrai dû disparaîtrait en silence, ce qui est PIRE que la
+    // relance abusive qu'on corrige.
+    //
+    // Une retenue n'est donc reconnue que si la pièce porte AUSSI une créance
+    // ordinaire AU DÉBIT dont elle a pu être carvée. Sinon, la ligne reste une
+    // créance comme avant (comportement 2.14 strictement inchangé).
+    //
+    // Le débit, et pas la simple présence d'une ligne 411 : quand l'OD de
+    // transfert porte sa PROPRE référence de pièce (convention fréquente), le
+    // groupe ne contient que la contrepartie au CRÉDIT — il n'y a là aucune
+    // facture à alléger, et faire semblant produirait une pièce fantôme à 0 €
+    // pendant que la vraie facture garderait sa retenue en impayé, sans un mot.
+    const ordinary = group.filter((e) => classifyReceivableAccount(e.compteNum) === "client");
+    const flagged = group.filter((e) => classifyReceivableAccount(e.compteNum) === "retenue");
+    const ordinaryDebitCents = ordinary.reduce((sum, e) => sum + e.debitCents, 0);
+    const retentionRecognised = ordinaryDebitCents > 0 && flagged.length > 0;
+    const dueLines = retentionRecognised ? ordinary : group;
+    const retentionLines = retentionRecognised ? flagged : [];
+    if (flagged.length > 0 && !retentionRecognised) {
+      // Dit, jamais tu : soit le plan de comptes n'est pas celui qu'on croit,
+      // soit le transfert est comptabilisé sous sa propre pièce (cas fréquent)
+      // — dans les deux cas la garde NE s'applique pas ici.
+      unattachedRetentionCount += flagged.length;
+    }
     const debitCents = dueLines.reduce((sum, e) => sum + e.debitCents, 0);
     const creditCents = dueLines.reduce((sum, e) => sum + e.creditCents, 0);
     // Retenue = solde du 4117 (débit au transfert, crédit à la libération).
-    const retainedCents = Math.max(
-      0,
-      retentionLines.reduce((sum, e) => sum + e.debitCents - e.creditCents, 0),
-    );
+    const rawRetained = retentionLines.reduce((sum, e) => sum + e.debitCents - e.creditCents, 0);
+    // Une retenue négative = libération sur-comptabilisée. La ramener à zéro
+    // en silence contredirait la garde annoncée : on la compte et on la dit.
+    if (rawRetained < 0) negativeRetentionCount += 1;
+    const retainedCents = Math.max(0, rawRetained);
     if (debitCents === 0 && retainedCents === 0) continue; // avoir isolé : pas une facture
     const residualCents = Math.max(0, debitCents - creditCents);
     // Le lettrage ne se juge QUE sur les lignes exigibles : la retenue reste
     // non lettrée jusqu'à la levée des réserves, et ne doit pas à elle seule
     // faire passer une facture réglée pour ouverte.
-    const settled = dueLines.every((e) => e.ecritureLet !== null);
+    // `every` sur un tableau VIDE renvoie `true` : sans cette garde, une pièce
+    // sans aucune ligne exigible serait déclarée SOLDÉE, et un vrai impayé
+    // disparaîtrait sans un mot (audit US-8).
+    const settled = dueLines.length > 0 && dueLines.every((e) => e.ecritureLet !== null);
     const [customerRef] = key.split("␟");
     const first = group.reduce((a, b) => (a.ecritureDate <= b.ecritureDate ? a : b));
     const issuedDate = first.pieceDate ?? first.ecritureDate;
@@ -169,6 +200,19 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
         overdueCents += invoice.residualCents;
       }
     }
+  }
+
+  if (unattachedRetentionCount > 0) {
+    warnings.push(
+      `${unattachedRetentionCount} écriture(s) 4117 non rattachée(s) à une créance de la même ` +
+        "pièce : traitées comme des créances ordinaires (retenue NON déduite des impayés)",
+    );
+  }
+  if (negativeRetentionCount > 0) {
+    warnings.push(
+      `${negativeRetentionCount} retenue(s) de garantie négative(s) (libération ` +
+        "sur-comptabilisée ?) — ramenée(s) à zéro, à vérifier",
+    );
   }
 
   invoices.sort((a, b) => (a.issuedDate < b.issuedDate ? 1 : -1));

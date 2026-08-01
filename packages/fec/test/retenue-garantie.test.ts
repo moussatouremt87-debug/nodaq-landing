@@ -90,6 +90,63 @@ describe("retenue de garantie — jamais un impayé", () => {
     expect(result.overdueCents).toBe(950_000);
   });
 
+  it("BLOQUANT : un compte client 411 + code commençant par 7 n'est PAS une retenue", () => {
+    // Schéma courant « 411 + code client » : le client n° 70003 porte le
+    // compte 41170003, indiscernable d'un « 4117 + code ». Le classer en
+    // retenue sortirait TOUTES ses créances des impayés — un vrai dû
+    // disparaîtrait en silence, pire que la relance abusive qu'on corrige.
+    const rows = [
+      row({ num: "1", date: "20260105", compte: "41170003", aux: "C70003", piece: "F-300", pieceDate: "20260105", lib: "Facture F-300", debit: "3000,00" }),
+      row({ num: "1", date: "20260105", compte: "706000", compteLib: "Prestations", piece: "F-300", pieceDate: "20260105", lib: "Facture F-300", credit: "3000,00" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    const invoice = result.invoices.find((i) => i.number === "F-300");
+    // Créance ordinaire : due, échue, relançable — comme avant le correctif.
+    expect(invoice?.settled).toBe(false);
+    expect(invoice?.residualCents).toBe(300_000);
+    expect(invoice?.retainedCents).toBe(0);
+    expect(result.overdueCount).toBe(1);
+  });
+
+  it("BLOQUANT : une pièce SANS ligne exigible n'est jamais « soldée » par défaut", () => {
+    // `every` sur un tableau vide renvoie true : sans garde, cette pièce
+    // passait pour réglée et sortait de tous les compteurs, sans un mot.
+    const rows = [
+      row({ num: "1", date: "20260105", compte: "41170002", aux: "CSEUL", piece: "F-400", pieceDate: "20260105", lib: "Facture F-400", debit: "10000,00" }),
+      row({ num: "1", date: "20260105", compte: "706000", compteLib: "Prestations", piece: "F-400", pieceDate: "20260105", lib: "Facture F-400", credit: "10000,00" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    const invoice = result.invoices.find((i) => i.number === "F-400");
+    expect(invoice?.settled).toBe(false);
+    expect(result.overdueCount).toBe(1);
+  });
+
+  it("transfert sous SA propre pièce : la garde ne s'applique pas, et elle le DIT", () => {
+    // Convention comptable fréquente : l'OD de transfert porte sa propre
+    // référence. La retenue n'est alors pas rattachable à la facture — on ne
+    // fait pas semblant, on avertit.
+    const rows = [
+      row({ num: "1", date: "20260110", compte: "41100004", aux: "COD", piece: "F-500", pieceDate: "20260110", lib: "Facture F-500", debit: "10000,00" }),
+      row({ num: "1", date: "20260110", compte: "706000", compteLib: "Prestations", piece: "F-500", pieceDate: "20260110", lib: "Facture F-500", credit: "10000,00" }),
+      row({ num: "2", date: "20260110", compte: "41170004", aux: "COD", piece: "RG-500", lib: "Retenue", debit: "500,00" }),
+      row({ num: "2", date: "20260110", compte: "41100004", aux: "COD", piece: "RG-500", lib: "Retenue", credit: "500,00" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    expect(result.warnings.some((w) => w.includes("non rattachée"))).toBe(true);
+  });
+
+  it("retenue négative : ramenée à zéro mais SIGNALÉE, jamais absorbée", () => {
+    const rows = [
+      row({ num: "1", date: "20260110", compte: "41100005", aux: "CNEG", piece: "F-600", pieceDate: "20260110", lib: "Facture F-600", debit: "10000,00", let: "AA" }),
+      row({ num: "1", date: "20260110", compte: "706000", compteLib: "Prestations", piece: "F-600", pieceDate: "20260110", lib: "Facture F-600", credit: "10000,00" }),
+      row({ num: "2", date: "20260210", compte: "41170005", aux: "CNEG", piece: "F-600", lib: "Libération excessive", credit: "500,00" }),
+      row({ num: "2", date: "20260210", compte: "41100005", aux: "CNEG", piece: "F-600", lib: "Libération excessive", debit: "500,00", let: "AA" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    expect(result.invoices.find((i) => i.number === "F-600")?.retainedCents).toBe(0);
+    expect(result.warnings.some((w) => w.includes("négative"))).toBe(true);
+  });
+
   it("sans retenue, rien ne change (non-régression 2.14)", () => {
     const rows = [
       row({ num: "1", date: "20260105", compte: "41100002", aux: "CBETA", piece: "F-200", pieceDate: "20260105", lib: "Facture F-200", debit: "2500,00" }),

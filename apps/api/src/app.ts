@@ -794,35 +794,41 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   // Métadonnées du dernier import — visibles de tout membre (compteurs only).
   app.get("/connectors/fec", { preHandler: businessRoute }, async (request) => {
-    const lastImport = await withTenant(request.tenantId, (tx) =>
-      tx.fecImport.findFirst({
+    // Métadonnées et retenues LUES ENSEMBLE, dans la MÊME transaction : deux
+    // lectures séparées peuvent encadrer un import concurrent et afficher les
+    // compteurs d'un import avec les retenues d'un autre.
+    const { lastImport, retention } = await withTenant(request.tenantId, async (tx) => {
+      const last = await tx.fecImport.findFirst({
         orderBy: { importedAt: "desc" },
         select: {
+          id: true,
           importedAt: true,
           fileName: true,
           entryCount: true,
           invoiceCount: true,
           overdueCount: true,
         },
-      }),
-    );
-    // Retenues de garantie en cours (US-8) : agrégées depuis les factures du
-    // dernier import et affichées À PART des impayés. Une retenue tue n'est
-    // pas neutre — le dirigeant croirait ces 5 % perdus ou, pire, les
-    // relancerait à la main.
-    const retention = await withTenant(request.tenantId, (tx) =>
-      tx.fecInvoice.aggregate({
-        where: { retainedCents: { gt: 0 } },
-        _sum: { retainedCents: true },
-        _count: { _all: true },
-      }),
-    );
+      });
+      // Retenues de garantie en cours (US-8) : agrégées sur les factures du
+      // DERNIER import — celui-là même qui est servi à l'aval (fec.ts) — et
+      // affichées À PART des impayés. Une retenue tue n'est pas neutre : le
+      // dirigeant croirait ces 5 % perdus ou, pire, les relancerait à la main.
+      const sum = last
+        ? await tx.fecInvoice.aggregate({
+            where: { importId: last.id, retainedCents: { gt: 0 } },
+            _sum: { retainedCents: true },
+            _count: { _all: true },
+          })
+        : null;
+      return { lastImport: last, retention: sum };
+    });
+    const { id: _importId, ...lastImportPublic } = lastImport ?? {};
     return {
       imported: lastImport !== null,
-      lastImport,
+      lastImport: lastImport ? lastImportPublic : null,
       retention: {
-        count: retention._count._all,
-        totalCents: Number(retention._sum.retainedCents ?? 0n),
+        count: retention?._count._all ?? 0,
+        totalCents: Number(retention?._sum.retainedCents ?? 0n),
         // La date de libération est CONTRACTUELLE : elle n'est nulle part
         // dans un FEC. On ne l'invente pas — la saisir est un ticket à part.
         releaseDateKnown: false,

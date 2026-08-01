@@ -235,6 +235,32 @@ describe("invariants", () => {
     expect(withPending.overdueCents).toBe(0);
   });
 
+  it("retenue de garantie (US-8) : hors encours échu, mais TOUJOURS dans le CA", () => {
+    // 5 000 € facturés dont 500 € retenus au 4117 jusqu'à la levée des
+    // réserves. La retenue est due mais pas exigible : la compter en impayé
+    // ferait monter « les impayés » sans qu'un client soit en retard — et la
+    // règle `impayes_en_hausse` pousserait à relancer là-dessus.
+    const report = buildMonthlyReport(
+      [...HISTORY, invoice("2026-04-10", 5_000, { status: "late", retained_amount: 500 })],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(450_000);
+    expect(report.overdueCount).toBe(1);
+    // Le chantier vaut bien 5 000 € : sortir la retenue de l'encours échu ne
+    // réécrit pas le chiffre d'affaires.
+    expect(report.revenueCents).toBe(500_000);
+  });
+
+  it("retenue = TOUT le solde : aucun impayé compté, pas même une facture", () => {
+    const report = buildMonthlyReport(
+      [...HISTORY, invoice("2026-04-10", 5_000, { status: "late", retained_amount: 5_000 })],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(0);
+    expect(report.overdueCount).toBe(0);
+    expect(report.revenueCents).toBe(500_000);
+  });
+
   it("factures non attribuées : comptées au CA, jamais tues", () => {
     const report = buildMonthlyReport(
       [

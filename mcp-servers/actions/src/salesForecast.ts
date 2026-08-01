@@ -122,6 +122,40 @@ export function normalizeSaleInvoice(candidate: unknown): NormalizedInvoice {
   return { ok: true, cents, month: monthKey(date) };
 }
 
+/** Champ porté par l'interface facturier quand une part du montant N'EST PAS
+ * exigible (retenue de garantie au 4117 — US-8). Absent chez Pennylane : la
+ * valeur par défaut est 0, et rien ne change pour les autres facturiers. */
+const RetainedShape = z.object({
+  retained_amount: z.union([z.string(), z.number()]).nullish(),
+});
+
+/**
+ * Retenue de garantie portée par une facture, en centimes (0 par défaut).
+ *
+ * Une valeur illisible ou négative vaut 0 : dans le doute on ne DÉDUIT rien —
+ * déduire au hasard effacerait une créance réelle, ce qui est pire que la
+ * relance abusive que la retenue fait éviter.
+ */
+export function retainedCentsOf(candidate: unknown): number {
+  const parsed = RetainedShape.safeParse(candidate);
+  if (!parsed.success || parsed.data.retained_amount == null) return 0;
+  const cents = euroToCents(parsed.data.retained_amount);
+  return cents !== null && cents > 0 ? cents : 0;
+}
+
+/**
+ * Part EXIGIBLE d'une facture — l'UNIQUE endroit où le produit décide de ce
+ * qu'il peut réclamer aujourd'hui.
+ *
+ * Le montant facturé reste le montant du marché (il fait le CA) ; la retenue
+ * de garantie est due mais pas encore exigible : elle ne se relance pas et
+ * n'entre pas dans l'encours échu. Deux écrans qui trancheraient séparément
+ * finiraient par réclamer 10 000 € ici et 9 500 € là pour la même facture.
+ */
+export function claimableCents(candidate: unknown, totalCents: number): number {
+  return Math.max(0, totalCents - retainedCentsOf(candidate));
+}
+
 function monthKey(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
 }

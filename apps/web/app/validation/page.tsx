@@ -544,6 +544,24 @@ export default function ValidationPage() {
                               : "—"}
                           </div>
                         </div>
+                        {(asNumber(invoice.retainedCents) ?? 0) > 0 && (
+                          // US-8 : la retenue de garantie est due mais pas
+                          // exigible. Le montant réclamé l'exclut — le dire
+                          // AVANT la validation, sinon l'écart entre la
+                          // facture et la relance passe pour une erreur.
+                          <div className="meta">
+                            <span className="overline">Retenue de garantie (non réclamée)</span>
+                            <div className="value">
+                              {formatEuroCents(asNumber(invoice.retainedCents) ?? 0)}
+                              {asNumber(invoice.totalCents) !== null && (
+                                <span className="hint">
+                                  {" "}
+                                  sur {formatEuroCents(asNumber(invoice.totalCents) ?? 0)} facturés
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
                         <div className="meta">
                           <span className="overline">Échéance</span>
                           <div className="value">

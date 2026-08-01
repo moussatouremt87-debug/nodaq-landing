@@ -92,6 +92,28 @@ l'emporte — sinon la retenue redevient une créance ordinaire.
 par l'interface facturier est `paid` — et c'est ce statut qui décide d'une
 proposition de relance.
 
+### La garde ne s'arrête pas au FEC
+
+Sortir la retenue du solde ne suffit pas : sur un chantier **non réglé**, la
+facture reste bien en retard — mais pour l'exigible seulement. L'interface
+facturier porte donc un champ `retained_amount` **à côté** de `amount` (le
+montant du marché, qui fait le CA et ne doit pas être réécrit). Une seule
+fonction en tire les conséquences, `claimableCents`
+(`mcp-servers/actions/src/salesForecast.ts`, à côté de `normalizeSaleInvoice`
+pour la même raison : deux écrans qui trancheraient séparément réclameraient
+10 000 € ici et 9 500 € là pour la même facture) :
+
+- **`draft_dunning`** ne réclame que l'exigible ; le brouillon est rédigé sur ce
+  montant, la file affiche les trois chiffres (réclamé / facturé / retenu), et
+  une facture dont le solde n'est **que** de la retenue provoque un **refus
+  motivé** — jamais une relance à 0 € qu'un humain validerait sans comprendre.
+- **Rapport mensuel (2.11)** : l'encours échu se compte sur l'exigible. Compter
+  la retenue ferait monter « les impayés » sans qu'un seul client soit en
+  retard, et la règle `impayes_en_hausse` pousserait à relancer là-dessus.
+
+Le chiffre d'affaires, lui, garde le montant du marché : c'est bien ce qui a
+été facturé.
+
 ### Ce que le produit ne prétend pas savoir
 
 La **date de libération** est contractuelle : elle n'existe nulle part dans un
@@ -102,3 +124,28 @@ genre d'affirmation que le reste du produit s'interdit.
 
 Une retenue **négative** est refusée en base (CHECK) : elle signalerait une
 libération sur-comptabilisée, qui doit être vue et non absorbée en silence.
+Dans la dérivation, elle est ramenée à zéro **et comptée dans un
+avertissement** — la ramener en silence contredirait la garde annoncée.
+
+### Une reconnaissance qui refuse de deviner
+
+Le préfixe `4117` ne suffit pas à lui seul. Sous le schéma courant
+« 411 + code client », le client n° 70003 porte le compte `41170003`,
+**indiscernable** d'un `4117` + code : classer ses créances en « retenue » les
+sortirait des impayés, et un vrai dû disparaîtrait en silence — pire que la
+relance abusive qu'on corrige.
+
+Une retenue n'est donc reconnue que si la pièce porte **aussi une créance
+ordinaire au débit**, dont elle a pu être carvée. Le débit, et pas la simple
+présence d'une ligne 411 : quand l'OD de transfert porte sa **propre**
+référence de pièce (convention fréquente), le groupe ne contient que la
+contrepartie au crédit — il n'y a là aucune facture à alléger.
+
+**Limite assumée, et dite.** Sous cette seconde convention, la retenue n'est
+rattachable à aucune facture : elle reste comptée comme une créance ordinaire,
+exactement comme avant le correctif. Le produit ne fait pas semblant — l'import
+émet un avertissement nominatif (« N écriture(s) 4117 non rattachée(s) … —
+retenue NON déduite des impayés »), et l'écran Connecteurs affiche désormais le
+**texte** des avertissements, pas seulement leur nombre : une limite qui change
+le chiffre affiché n'a aucune raison d'être invisible. Le rattachement
+inter-pièces est un ticket à part.

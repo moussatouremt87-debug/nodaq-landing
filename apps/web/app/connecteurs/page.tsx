@@ -213,7 +213,11 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
       if (!response.ok && response.status !== 404) {
         throw new ApiError(response.status, `HTTP ${response.status}`);
       }
-      setStatus({ imported: false, lastImport: null });
+      setStatus({
+        imported: false,
+        lastImport: null,
+        retention: { count: 0, totalCents: 0, releaseDateKnown: false },
+      });
       setNotice("Données importées supprimées.");
       onChanged();
     } catch (error) {
@@ -276,6 +280,18 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
             {status.lastImport.overdueCount} impayé{status.lastImport.overdueCount > 1 ? "s" : ""}.
             Ré-importer remplace ces données.
           </p>
+          {status.retention.count > 0 && (
+            // US-8 : dite À PART des impayés, et jamais dans le même compteur.
+            // Une retenue muette laisse croire que ces 5 % sont perdus — ou
+            // pousse à les réclamer à la main.
+            <p className="hint">
+              Dont {formatEuroCents(status.retention.totalCents)} de retenue de garantie sur{" "}
+              {status.retention.count} facture{status.retention.count > 1 ? "s" : ""} : due, mais
+              pas exigible — jamais comptée en impayé ni relancée.
+              {!status.retention.releaseDateKnown &&
+                " La date de levée des réserves est contractuelle : elle n'est pas dans le FEC."}
+            </p>
+          )}
           <button
             className="danger"
             disabled={busy}
@@ -305,8 +321,20 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
           ✅ {report.entryCount} écritures analysées — {report.customerCount} clients,{" "}
           {report.invoiceCount} factures, dont {report.overdueCount} impayé
           {report.overdueCount > 1 ? "s" : ""} ({formatEuroCents(report.overdueCents)}).
-          {report.warnings.length > 0 && ` ${report.warnings.length} avertissement(s).`}
         </p>
+      )}
+      {report && !report.alreadyImported && report.warnings.length > 0 && (
+        // Les avertissements sont des COMPTEURS (jamais une ligne du journal —
+        // donnée confidentielle 2.14), et ils portent les limites de la
+        // dérivation : une retenue non rattachable, par exemple, reste comptée
+        // en impayé. Un simple « 3 avertissement(s) » laisserait cette limite
+        // invisible juste là où elle change le chiffre affiché.
+        <ul className="hint" style={{ paddingLeft: 18 }}>
+          {report.warnings.slice(0, 5).map((warning, index) => (
+            <li key={index}>{warning}</li>
+          ))}
+          {report.warnings.length > 5 && <li>…et {report.warnings.length - 5} autre(s).</li>}
+        </ul>
       )}
       {issues && issues.length > 0 && (
         <ul className="hint" style={{ paddingLeft: 18 }}>

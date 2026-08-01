@@ -3,9 +3,11 @@ export { forecastTreasury, TreasuryTransaction } from "./treasury.js";
 export type { TreasuryForecast, TreasuryForecastPoint } from "./treasury.js";
 export {
   buildMonthlySeries,
+  claimableCents,
   fetchInvoiceWindow,
   forecastSales,
   ForecastInvoice,
+  retainedCentsOf,
 } from "./salesForecast.js";
 export type { InvoiceLister, InvoiceWindow, MonthlyRevenuePoint, SalesForecast } from "./salesForecast.js";
 export {

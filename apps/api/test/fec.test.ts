@@ -4,6 +4,7 @@ import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
 import { getPennylaneClient } from "@nodaq/mcp-connectors";
+import { claimableCents } from "@nodaq/mcp-actions";
 import { buildApp } from "../src/app.js";
 
 /*
@@ -191,6 +192,30 @@ describe("retenue de garantie (US-8) — bout en bout", () => {
     const body = status.json() as { retention: { count: number; totalCents: number } };
     expect(body.retention.count).toBe(1);
     expect(body.retention.totalCents).toBe(50_000);
+  });
+
+  it("BLOQUANT : sur un chantier NON réglé, l'aval ne peut réclamer que l'exigible", async () => {
+    // Même chantier, rien d'encaissé : 10 000 € facturés, 500 € retenus. La
+    // facture est bien en retard — mais pour 9 500 €, pas 10 000 €. Le
+    // montant du marché reste le montant du marché (il fait le CA) ; la part
+    // non exigible voyage À CÔTÉ, jamais fondue dedans.
+    const impaye = [
+      HEADER,
+      line({ num: "1", date: "20250110", compte: "41100009", aux: "CBTP2", piece: "FA-RG2", debit: "10000,00" }),
+      line({ num: "1", date: "20250110", compte: "706000", piece: "FA-RG2", credit: "10000,00" }),
+      line({ num: "2", date: "20250110", compte: "41170009", aux: "CBTP2", piece: "FA-RG2", debit: "500,00" }),
+      line({ num: "2", date: "20250110", compte: "41100009", aux: "CBTP2", piece: "FA-RG2", credit: "500,00" }),
+    ].join("\r\n");
+    expect((await importFec(impaye, ownerCookie, "retenue-impayee.txt")).statusCode).toBe(201);
+
+    const pennylane = await getPennylaneClient(orgA);
+    const { items } = await pennylane.listCustomerInvoices({ limit: 50 });
+    const invoice = items.find((i) => i.invoice_number === "FA-RG2");
+    expect(invoice?.status).toBe("late");
+    expect(invoice?.amount).toBe("10000.00");
+    // Le champ qui empêche la relance de réclamer la retenue (2.11 / relance).
+    expect(invoice?.retained_amount).toBe("500.00");
+    expect(claimableCents(invoice, 1_000_000)).toBe(950_000);
   });
 });
 

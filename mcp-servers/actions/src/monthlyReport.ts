@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { normalizeSaleInvoice, OVERDUE_STATUSES } from "./salesForecast.js";
+import { claimableCents, normalizeSaleInvoice, OVERDUE_STATUSES } from "./salesForecast.js";
 
 /*
  * Rapport mensuel + anomalies (ticket 2.11).
@@ -48,6 +48,8 @@ export const ANOMALY_THRESHOLDS = {
 /** Facture — même forme que l'interface facturier (Pennylane/démo/FEC). */
 export const ReportInvoice = z.object({
   amount: z.union([z.string(), z.number()]).nullish(),
+  /** Part non exigible (retenue de garantie 4117, US-8) — 0 si absente. */
+  retained_amount: z.union([z.string(), z.number()]).nullish(),
   currency: z.string().nullish(),
   date: z.string().nullish(),
   status: z.string().nullish(),
@@ -212,18 +214,24 @@ export function buildMonthlyReport(
     if (invoiceMonth <= month && invoiceMonth >= medianWindowStart) windowAmounts.push(cents);
 
     const overdue = invoice.status ? OVERDUE_STATUSES.has(invoice.status) : false;
+    // L'ENCOURS ÉCHU se compte sur la part exigible : une retenue de garantie
+    // (4117, US-8) est due mais pas encore réclamable — la compter ici ferait
+    // monter « les impayés » sans qu'un seul client soit en retard, et
+    // pousserait à relancer (règle `impayes_en_hausse`). Le CA, lui, garde le
+    // montant du marché : c'est bien ce qui a été facturé.
+    const claimable = claimableCents(invoice, cents);
     if (invoiceMonth === month) {
       monthInvoices.push({
         cents,
         customerId: invoice.customer?.id ?? "",
         customerName: invoice.customer?.name ?? null,
       });
-      if (overdue) {
-        overdueCents += cents;
+      if (overdue && claimable > 0) {
+        overdueCents += claimable;
         overdueCount += 1;
       }
     }
-    if (invoiceMonth === previous && overdue) previousOverdueCents += cents;
+    if (invoiceMonth === previous && overdue) previousOverdueCents += claimable;
   }
 
   const current = byMonth.get(month) ?? { cents: 0, count: 0 };

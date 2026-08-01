@@ -221,6 +221,14 @@ export const FecStatus = z.object({
       overdueCount: z.number(),
     })
     .nullable(),
+  /** Retenues de garantie du dernier import (US-8) — affichées À PART des
+   * impayés. Sans ce champ ici, Zod le supprimait et l'écran n'en parlait
+   * jamais : la garantie annoncée ne se voyait nulle part. */
+  retention: z.object({
+    count: z.number(),
+    totalCents: z.number(),
+    releaseDateKnown: z.boolean(),
+  }),
 });
 export type FecStatus = z.infer<typeof FecStatus>;
 

@@ -53,7 +53,11 @@ export class FecPennylaneClient extends PennylaneClient {
         return {
           id: row.id,
           invoice_number: row.number,
+          // Montant du MARCHÉ (il fait le CA), retenue comprise…
           amount: (Number(row.amountCents) / 100).toFixed(2),
+          // …et la part non exigible, dite à part : l'aval en déduit ce qu'il
+          // peut réclamer (relance, encours échu) sans jamais toucher au CA.
+          retained_amount: (Number(row.retainedCents) / 100).toFixed(2),
           currency: "EUR",
           date: row.issuedDate.toISOString().slice(0, 10),
           deadline: dueIso,
