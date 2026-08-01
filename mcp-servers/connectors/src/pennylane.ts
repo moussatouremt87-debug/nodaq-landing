@@ -23,6 +23,10 @@ const CustomerInvoice = z.object({
    * Absente de l'API Pennylane : seul le connecteur fichier FEC la renseigne,
    * et l'absence vaut 0 (aucun changement pour les autres facturiers). */
   retained_amount: z.union([z.string(), z.number()]).nullish(),
+  /** Solde restant dû, quand le facturier le connaît (le connecteur FEC le
+   * dérive du lettrage). Absent = inconnu : l'aval retombe sur le montant
+   * facturé, jamais sur un solde supposé. */
+  residual_amount: z.union([z.string(), z.number()]).nullish(),
   currency: z.string().nullish(),
   date: z.string().nullish(),
   deadline: z.string().nullish(),

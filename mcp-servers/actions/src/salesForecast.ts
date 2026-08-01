@@ -122,11 +122,13 @@ export function normalizeSaleInvoice(candidate: unknown): NormalizedInvoice {
   return { ok: true, cents, month: monthKey(date) };
 }
 
-/** Champ porté par l'interface facturier quand une part du montant N'EST PAS
- * exigible (retenue de garantie au 4117 — US-8). Absent chez Pennylane : la
- * valeur par défaut est 0, et rien ne change pour les autres facturiers. */
+/** Champs portés par l'interface facturier quand une part du montant n'est pas
+ * exigible (retenue de garantie au 4117 — US-8) ou quand le solde restant dû
+ * est connu. Absents chez Pennylane : la valeur par défaut est « inconnu », et
+ * rien ne change pour les autres facturiers. */
 const RetainedShape = z.object({
   retained_amount: z.union([z.string(), z.number()]).nullish(),
+  residual_amount: z.union([z.string(), z.number()]).nullish(),
 });
 
 /**
@@ -144,6 +146,17 @@ export function retainedCentsOf(candidate: unknown): number {
 }
 
 /**
+ * Solde restant dû EXIGIBLE, quand le facturier le connaît (`null` sinon).
+ * Le connecteur FEC le dérive du lettrage ; l'API Pennylane ne le donne pas.
+ */
+export function residualCentsOf(candidate: unknown): number | null {
+  const parsed = RetainedShape.safeParse(candidate);
+  if (!parsed.success || parsed.data.residual_amount == null) return null;
+  const cents = euroToCents(parsed.data.residual_amount);
+  return cents !== null && cents >= 0 ? cents : null;
+}
+
+/**
  * Part EXIGIBLE d'une facture — l'UNIQUE endroit où le produit décide de ce
  * qu'il peut réclamer aujourd'hui.
  *
@@ -151,8 +164,15 @@ export function retainedCentsOf(candidate: unknown): number {
  * de garantie est due mais pas encore exigible : elle ne se relance pas et
  * n'entre pas dans l'encours échu. Deux écrans qui trancheraient séparément
  * finiraient par réclamer 10 000 € ici et 9 500 € là pour la même facture.
+ *
+ * Quand le solde restant dû est CONNU, il fait foi : il tient compte des
+ * règlements partiels, et il est DÉJÀ net de la retenue (qui vit sur un autre
+ * compte). La redéduire compterait les 5 % deux fois et effacerait une
+ * créance réelle — l'erreur exacte que ce ticket corrige, à l'envers.
  */
 export function claimableCents(candidate: unknown, totalCents: number): number {
+  const residual = residualCentsOf(candidate);
+  if (residual !== null) return residual;
   return Math.max(0, totalCents - retainedCentsOf(candidate));
 }
 

@@ -147,6 +147,47 @@ describe("retenue de garantie — jamais un impayé", () => {
     expect(result.warnings.some((w) => w.includes("négative"))).toBe(true);
   });
 
+  it("BLOQUANT : retenue comptabilisée DIRECTEMENT à la facture — le marché vaut toujours 10 000 €", () => {
+    // Seconde convention, tout aussi courante : la facture débite 411 pour le
+    // net (9 500 €) ET 4117 pour la retenue (500 €) dans la MÊME écriture,
+    // face au 706. Il n'y a aucun transfert à carver.
+    //
+    // Prendre les seuls débits 411 amputerait le montant facturé de la
+    // retenue — donc le CA (2.11/3.1) et le dénominateur de la marge (2.8) —
+    // et, pire, l'aval déduirait la retenue une SECONDE fois : 9 500 − 500 =
+    // 9 000 réclamés sur 9 500 réellement dus. Une créance réelle
+    // disparaîtrait en silence, ce que ce ticket s'interdit précisément.
+    const rows = [
+      row({ num: "1", date: "20260110", compte: "41100007", aux: "CDIR", piece: "F-700", pieceDate: "20260110", lib: "Facture F-700", debit: "9500,00" }),
+      row({ num: "1", date: "20260110", compte: "41170007", aux: "CDIR", piece: "F-700", pieceDate: "20260110", lib: "Retenue de garantie 5%", debit: "500,00" }),
+      row({ num: "1", date: "20260110", compte: "706000", compteLib: "Prestations", piece: "F-700", pieceDate: "20260110", lib: "Facture F-700", credit: "10000,00" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    const invoice = result.invoices.find((i) => i.number === "F-700");
+    expect(invoice?.amountCents).toBe(1_000_000);
+    expect(invoice?.retainedCents).toBe(50_000);
+    // Exigible : le net facturé, ni plus ni moins.
+    expect(invoice?.residualCents).toBe(950_000);
+    expect(result.overdueCents).toBe(950_000);
+    // Rien d'anormal ici : la pièce se lit sans ambiguïté, aucun avertissement
+    // de rattachement ne doit être émis.
+    expect(result.warnings.some((w) => w.includes("non rattachée"))).toBe(false);
+  });
+
+  it("compte client en 4117xxxx : dit comme tel, jamais comme une retenue non rattachée", () => {
+    // Plan « 411 + code client » : chaque pièce du tenant sortirait sinon un
+    // avertissement « retenue non rattachée » alors qu'aucune retenue
+    // n'existe — un avertissement faux répété use la confiance aussi sûrement
+    // qu'un chiffre faux.
+    const rows = [
+      row({ num: "1", date: "20260105", compte: "41170003", aux: "C70003", piece: "F-300", pieceDate: "20260105", lib: "Facture F-300", debit: "3000,00" }),
+      row({ num: "1", date: "20260105", compte: "706000", compteLib: "Prestations", piece: "F-300", pieceDate: "20260105", lib: "Facture F-300", credit: "3000,00" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    expect(result.warnings.some((w) => w.includes("non rattachée"))).toBe(false);
+    expect(result.warnings.some((w) => w.includes("411 + code client"))).toBe(true);
+  });
+
   it("sans retenue, rien ne change (non-régression 2.14)", () => {
     const rows = [
       row({ num: "1", date: "20260105", compte: "41100002", aux: "CBETA", piece: "F-200", pieceDate: "20260105", lib: "Facture F-200", debit: "2500,00" }),

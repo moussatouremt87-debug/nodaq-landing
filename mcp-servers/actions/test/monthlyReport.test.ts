@@ -251,14 +251,51 @@ describe("invariants", () => {
     expect(report.revenueCents).toBe(500_000);
   });
 
-  it("retenue = TOUT le solde : aucun impayé compté, pas même une facture", () => {
+  it("retenue = TOUT le solde : aucun impayé compté, mais le retrait est DIT", () => {
     const report = buildMonthlyReport(
       [...HISTORY, invoice("2026-04-10", 5_000, { status: "late", retained_amount: 5_000 })],
       "2026-04",
     );
     expect(report.overdueCents).toBe(0);
     expect(report.overdueCount).toBe(0);
+    // Sortir d'un compteur sans un mot, c'est une donnée qui disparaît.
+    expect(report.overdueNotClaimableCount).toBe(1);
     expect(report.revenueCents).toBe(500_000);
+  });
+
+  it("solde restant dû connu : il fait foi, et la retenue n'est PAS redéduite", () => {
+    // Facture de 5 000 € dont 500 € retenus, 2 000 € déjà encaissés : il
+    // reste 2 500 € exigibles. Repartir du montant facturé en redéduisant la
+    // retenue donnerait 4 500 € — on réclamerait une somme déjà perçue ; et
+    // déduire la retenue d'un solde qui en est déjà net compterait les 5 %
+    // deux fois, effaçant une créance réelle.
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-04-10", 5_000, {
+          status: "late",
+          retained_amount: 500,
+          residual_amount: 2_500,
+        }),
+      ],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(250_000);
+    expect(report.overdueCount).toBe(1);
+    // Le CA reste le montant du marché.
+    expect(report.revenueCents).toBe(500_000);
+  });
+
+  it("solde restant dû nul : la facture échue sort de l'encours, et c'est DIT", () => {
+    // Facture encaissée mais restée « late » côté facturier (lettrage non
+    // fait, cas fréquent en PME). L'encours ne doit pas la compter — et son
+    // retrait ne doit pas être muet.
+    const report = buildMonthlyReport(
+      [...HISTORY, invoice("2026-04-10", 5_000, { status: "late", residual_amount: 0 })],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(0);
+    expect(report.overdueNotClaimableCount).toBe(1);
   });
 
   it("factures non attribuées : comptées au CA, jamais tues", () => {

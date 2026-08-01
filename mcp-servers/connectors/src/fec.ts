@@ -58,6 +58,10 @@ export class FecPennylaneClient extends PennylaneClient {
           // …et la part non exigible, dite à part : l'aval en déduit ce qu'il
           // peut réclamer (relance, encours échu) sans jamais toucher au CA.
           retained_amount: (Number(row.retainedCents) / 100).toFixed(2),
+          // Solde restant dû, DÉJÀ net de la retenue et des règlements
+          // partiels. Sans lui, une relance se calcule sur le montant facturé
+          // et réclame une somme déjà encaissée.
+          residual_amount: (Number(row.residualCents) / 100).toFixed(2),
           currency: "EUR",
           date: row.issuedDate.toISOString().slice(0, 10),
           deadline: dueIso,

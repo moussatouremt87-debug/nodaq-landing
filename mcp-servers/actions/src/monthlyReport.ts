@@ -50,6 +50,9 @@ export const ReportInvoice = z.object({
   amount: z.union([z.string(), z.number()]).nullish(),
   /** Part non exigible (retenue de garantie 4117, US-8) — 0 si absente. */
   retained_amount: z.union([z.string(), z.number()]).nullish(),
+  /** Solde restant dû quand le facturier le connaît — sinon le montant
+   * facturé fait foi (jamais un solde supposé). */
+  residual_amount: z.union([z.string(), z.number()]).nullish(),
   currency: z.string().nullish(),
   date: z.string().nullish(),
   status: z.string().nullish(),
@@ -92,6 +95,11 @@ export interface MonthlyReport {
   /** Encours échu à la fin du mois (factures en retard). */
   overdueCents: number;
   overdueCount: number;
+  /** Factures ÉCHUES dont il ne reste rien à réclamer aujourd'hui : solde
+   * entièrement composé d'une retenue de garantie (4117, US-8), ou déjà
+   * encaissé. Elles sortent de l'encours échu — et ce retrait est DIT, sinon
+   * c'est une donnée qui disparaît. */
+  overdueNotClaimableCount: number;
   /** Moyenne des mois de référence, `null` sans historique suffisant. */
   referenceRevenueCents: number | null;
   referenceMonths: number;
@@ -182,6 +190,7 @@ export function buildMonthlyReport(
   let excludedCount = 0;
   let overdueCents = 0;
   let overdueCount = 0;
+  let overdueNotClaimableCount = 0;
   let previousOverdueCents = 0;
   const previous = previousMonthKey(month);
 
@@ -229,9 +238,14 @@ export function buildMonthlyReport(
       if (overdue && claimable > 0) {
         overdueCents += claimable;
         overdueCount += 1;
+      } else if (overdue) {
+        // Sortie d'un compteur SANS un mot, c'est une donnée qui disparaît :
+        // une facture échue dont il ne reste que la retenue n'est pas un
+        // impayé, mais elle n'est pas non plus « rien ».
+        overdueNotClaimableCount += 1;
       }
     }
-    if (invoiceMonth === previous && overdue) previousOverdueCents += claimable;
+    if (invoiceMonth === previous && overdue && claimable > 0) previousOverdueCents += claimable;
   }
 
   const current = byMonth.get(month) ?? { cents: 0, count: 0 };
@@ -409,6 +423,7 @@ export function buildMonthlyReport(
     invoiceCount: current.count,
     overdueCents,
     overdueCount,
+    overdueNotClaimableCount,
     referenceRevenueCents,
     referenceMonths: history.length,
     topCustomer,

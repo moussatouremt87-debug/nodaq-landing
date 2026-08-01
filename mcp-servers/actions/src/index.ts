@@ -7,6 +7,7 @@ export {
   fetchInvoiceWindow,
   forecastSales,
   ForecastInvoice,
+  residualCentsOf,
   retainedCentsOf,
 } from "./salesForecast.js";
 export type { InvoiceLister, InvoiceWindow, MonthlyRevenuePoint, SalesForecast } from "./salesForecast.js";

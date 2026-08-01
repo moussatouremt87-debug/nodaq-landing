@@ -112,27 +112,43 @@ const fakeSaas = createServer((req, res) => {
           // lisent la même liste, et un test vert deviendrait un test faux.
           ...(retentionFixtures
             ? [
-                // 5 % retenus jusqu'à la levée des réserves.
+                // 5 % retenus jusqu'à la levée des réserves, rien d'encaissé.
                 {
                   id: "inv-rg",
                   invoice_number: "F-2026-100",
                   amount: "1200.00",
                   retained_amount: "60.00",
+                  residual_amount: "1140.00",
                   currency: "EUR",
                   date: "2026-05-01",
                   deadline: "2026-06-01",
                   status: "late",
                 },
-                // Solde composé UNIQUEMENT d'une retenue : rien d'exigible.
+                // Chantier RÉGLÉ hors retenue mais resté « pending » faute de
+                // lettrage (cas fréquent en PME) : il ne reste que la retenue,
+                // donc rien à réclamer.
                 {
                   id: "inv-rg-only",
                   invoice_number: "F-2026-101",
-                  amount: "500.00",
+                  amount: "10000.00",
                   retained_amount: "500.00",
+                  residual_amount: "0.00",
                   currency: "EUR",
                   date: "2026-05-01",
                   deadline: "2026-06-01",
-                  status: "late",
+                  status: "pending",
+                },
+                // Facture encaissée, sans aucune retenue : le refus doit dire
+                // CE motif-là, pas parler d'une retenue qui n'existe pas.
+                {
+                  id: "inv-paid-unlettered",
+                  invoice_number: "F-2026-102",
+                  amount: "800.00",
+                  residual_amount: "0.00",
+                  currency: "EUR",
+                  date: "2026-05-01",
+                  deadline: "2026-06-01",
+                  status: "pending",
                 },
               ]
             : []),
@@ -361,10 +377,12 @@ describe("ocr_and_book_invoice — human-in-the-loop", () => {
     expect(prompt).toContain("n'est PAS réclamée");
   });
 
-  it("BLOQUANT (US-8) : rien d'exigible => refus MOTIVÉ, aucune relance en file", async () => {
-    // Une facture dont le solde n'est QUE de la retenue n'est pas relançable.
-    // Un montant nul silencieux, lui, ferait naître une relance à 0 € dans la
-    // file — que l'humain validerait sans comprendre.
+  it("BLOQUANT (US-8) : chantier réglé hors retenue => refus MOTIVÉ, aucune relance", async () => {
+    // Le vrai cas du terrain : 10 000 € facturés, 9 500 € encaissés, lignes
+    // NON lettrées — le facturier laisse la facture « pending ». Sans le
+    // solde restant dû, la relance repartait du montant facturé et réclamait
+    // 9 500 € déjà perçus. Un montant nul silencieux, lui, ferait naître une
+    // relance à 0 € dans la file — que l'humain validerait sans comprendre.
     retentionFixtures = true;
     const client = await connectedClient();
     const before = await withTenant(tenantId, (tx) => tx.pendingAction.count());
@@ -376,6 +394,19 @@ describe("ocr_and_book_invoice — human-in-the-loop", () => {
     expect(JSON.stringify(result.content)).toContain("retainage");
     const after = await withTenant(tenantId, (tx) => tx.pendingAction.count());
     expect(after).toBe(before);
+  });
+
+  it("le refus dit le VRAI motif : sans retenue, on ne parle pas de retenue", async () => {
+    retentionFixtures = true;
+    const client = await connectedClient();
+    const result = await client.callTool({
+      name: "draft_dunning",
+      arguments: { invoiceId: "inv-paid-unlettered" },
+    });
+    expect(result.isError).toBe(true);
+    const text = JSON.stringify(result.content);
+    expect(text).toContain("no outstanding balance");
+    expect(text).not.toContain("retainage");
   });
 
   it("draft_dunning on an unknown invoice => error, no pending_action", async () => {

@@ -1618,10 +1618,14 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       const amountCents = claimableCents(invoice, totalCents);
       if (amountCents <= 0) {
         // Refus MOTIVÉ, pas un montant nul silencieux : le modèle reformule
-        // au lieu de préparer une relance sur une somme non exigible.
+        // au lieu de préparer une relance sur une somme non exigible. Le
+        // motif est le vrai : un statut resté « pending » sur une facture
+        // encaissée n'a rien à voir avec une retenue de garantie.
         throw new Error(
-          `invoice "${invoiceId}" has nothing claimable today: the outstanding balance is a ` +
-            "retainage (compte 4117), not yet due — no dunning can be drafted",
+          retainedCents > 0
+            ? `invoice "${invoiceId}" has nothing claimable today: the outstanding balance is a ` +
+              "retainage (compte 4117), not yet due — no dunning can be drafted"
+            : `invoice "${invoiceId}" has no outstanding balance today — no dunning can be drafted`,
         );
       }
       const dueDate = invoice.deadline;
