@@ -194,6 +194,21 @@ describe("retenue de garantie (US-8) — bout en bout", () => {
     expect(body.retention.totalCents).toBe(50_000);
   });
 
+  it("le MONTANT des retenues est owner-only ; le fait, lui, est dit au membre", async () => {
+    // Une créance en euros se lit avec le même droit ici qu'ailleurs
+    // (`overdueCents` est d'ailleurs volontairement absent de cette route).
+    // Mais taire jusqu'à l'existence des retenues ferait retomber le membre
+    // dans le geste qu'on veut éviter : les relancer à la main.
+    const asMember = await app.inject({
+      method: "GET",
+      url: "/connectors/fec",
+      headers: { cookie: memberCookie },
+    });
+    const body = asMember.json() as { retention: { count: number; totalCents: number | null } };
+    expect(body.retention.totalCents).toBeNull();
+    expect(body.retention.count).toBeGreaterThan(0);
+  });
+
   it("BLOQUANT : sur un chantier NON réglé, l'aval ne peut réclamer que l'exigible", async () => {
     // Même chantier, rien d'encaissé : 10 000 € facturés, 500 € retenus. La
     // facture est bien en retard — mais pour 9 500 €, pas 10 000 €. Le

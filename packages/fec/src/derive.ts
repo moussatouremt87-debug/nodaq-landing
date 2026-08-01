@@ -135,8 +135,26 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   // relançable — le défaut exact du ticket, intact.
   //
   // Une pièce entièrement composée de lignes 4117 est donc reversée dans la
-  // facture de la MÊME pièce quand il en existe une, et une seule : deux
-  // candidates, on ne devine pas.
+  // facture de la MÊME pièce — sous DEUX conditions cumulatives, parce que ce
+  // rattachement peut faire disparaître une créance :
+  //
+  //   1. une seule facture candidate dans la pièce (deux, on ne devine pas) ;
+  //   2. chaque débit 4117 doit avoir, dans SON écriture, une contrepartie
+  //      client au CRÉDIT du même montant — la signature d'un transfert.
+  //
+  // La seconde condition est celle qui protège du plan « 411 + code client ».
+  // Sans elle, une pièce partagée par deux clients (un lot de facturation) où
+  // l'un porte le compte `41170003` voyait SA créance ré-étiquetée « retenue »
+  // et rattachée à la facture de l'AUTRE : un vrai dû sortait des impayés, et
+  // changeait de client au passage — exactement ce que la garde de sûreté
+  // interdit. Une facture, elle, a pour contrepartie une vente (7xx), jamais
+  // un crédit client.
+  const ordinaryCreditByEcriture = new Map<string, number>();
+  for (const entry of clientEntries) {
+    if (classifyReceivableAccount(entry.compteNum) !== "client" || entry.creditCents === 0) continue;
+    const k = ecritureKey(entry);
+    ordinaryCreditByEcriture.set(k, (ordinaryCreditByEcriture.get(k) ?? 0) + entry.creditCents);
+  }
   const invoicePiece = new Map<string, string[]>();
   for (const [key, group] of groups) {
     const piece = key.slice(key.indexOf("␟") + 1);
@@ -147,6 +165,11 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   for (const [key, group] of [...groups]) {
     if (group.every((e) => classifyReceivableAccount(e.compteNum) !== "retenue")) continue;
     if (group.some((e) => classifyReceivableAccount(e.compteNum) === "client")) continue;
+    const debits = group.filter((e) => e.debitCents > 0);
+    const everyDebitIsATransfer =
+      debits.length > 0 &&
+      debits.every((e) => ordinaryCreditByEcriture.get(ecritureKey(e)) === e.debitCents);
+    if (!everyDebitIsATransfer) continue;
     const piece = key.slice(key.indexOf("␟") + 1);
     const candidates = invoicePiece.get(piece) ?? [];
     const target = candidates.length === 1 ? groups.get(candidates[0]!) : undefined;
@@ -163,6 +186,10 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   let unattachedRetentionCount = 0;
   let lookalikeAccountCount = 0;
   let negativeRetentionCount = 0;
+  /** Lignes 4117 effectivement reconnues comme retenue (et les tiers
+   * correspondants) : elles seules alimentent le solde des retenues. */
+  const recognisedRetentionLines = new Set<FecEntry>();
+  const recognisedRetentionRefs = new Set<string>();
 
   for (const [key, group] of groups) {
     // Deux populations DISTINCTES : l'exigible (411) et la retenue (4117).
@@ -189,6 +216,10 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
     const retentionRecognised = ordinaryDebitCents > 0 && flagged.length > 0;
     const dueLines = retentionRecognised ? ordinary : group;
     const retentionLines = retentionRecognised ? flagged : [];
+    for (const line of retentionLines) {
+      recognisedRetentionLines.add(line);
+      recognisedRetentionRefs.add(line.compAuxNum ?? line.compteNum);
+    }
     if (flagged.length > 0 && ordinary.length > 0 && !retentionRecognised) {
       // La pièce porte une créance ET une retenue, mais aucune créance AU
       // DÉBIT : c'est l'OD de transfert comptabilisée sous sa propre
@@ -259,8 +290,16 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
       .filter((e) => e.debitCents > 0 && retentionCreditByEcriture.get(ecritureKey(e)) === e.debitCents)
       .reduce((sum, e) => sum + e.debitCents, 0);
     const invoicedCents = debitCents - releaseReclassCents + directRetentionCents;
-    if (invoicedCents === 0 && retainedCents === 0) continue; // avoir isolé : pas une facture
     const residualCents = Math.max(0, debitCents - creditCents);
+    // Une pièce sans montant facturé ET sans rien de dû n'est pas une facture
+    // (un avoir isolé, par exemple).
+    //
+    // Le solde exigible fait partie de la condition : une LIBÉRATION
+    // comptabilisée sous sa propre pièce (débit 411 / crédit 4117) a un
+    // montant facturé nul — ce n'est pas une vente — mais elle rend 500 €
+    // EXIGIBLES. L'écarter les ferait disparaître de tous les compteurs, et
+    // personne ne pourrait plus les réclamer.
+    if (invoicedCents === 0 && retainedCents === 0 && residualCents === 0) continue;
     // Le lettrage ne se juge QUE sur les lignes exigibles : la retenue reste
     // non lettrée jusqu'à la levée des réserves, et ne doit pas à elle seule
     // faire passer une facture réglée pour ouverte.
@@ -311,23 +350,50 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   // cours » sur des sommes déjà encaissées. Un solde de compte, lui, n'a rien
   // à rattacher — il est juste par construction.
   //
-  // Plancher à zéro PAR TIERS : un compte sur-libéré ne doit pas venir masquer
-  // la retenue d'un autre client.
+  // Plancher à zéro par SEAU DE SOLDE — le compte auxiliaire quand la
+  // comptabilité en tient un, le compte lui-même sinon. Avec auxiliaire, un
+  // client sur-libéré ne masque donc pas la retenue d'un autre.
+  //
+  // SANS auxiliaire, toutes les retenues vivent sur le même compte : le seau
+  // est unique, et une sur-libération peut y compenser la retenue d'un autre
+  // client. C'est une limite du plan comptable, pas un choix — elle est DITE
+  // (avertissement ci-dessous) plutôt que promise résolue.
+  //
+  // Seules les lignes que la dérivation a RECONNUES comme retenue entrent
+  // dans ce solde — plus les mouvements du même compte, qui sont alors des
+  // libérations. Une ligne 4117 laissée en créance ordinaire (compte client
+  // en 4117xxxx) est déjà comptée dans les impayés : l'ajouter ici
+  // l'annoncerait une seconde fois, en retenue cette fois.
   const retentionBalances = new Map<string, number>();
+  const pooledRefs = new Map<string, Set<string>>();
   for (const entry of clientEntries) {
     if (classifyReceivableAccount(entry.compteNum) !== "retenue") continue;
     const ref = entry.compAuxNum ?? entry.compteNum;
+    if (!recognisedRetentionLines.has(entry) && !recognisedRetentionRefs.has(ref)) continue;
     retentionBalances.set(
       ref,
       (retentionBalances.get(ref) ?? 0) + entry.debitCents - entry.creditCents,
     );
+    if (entry.compAuxNum === null && entry.pieceRef) {
+      const pieces = pooledRefs.get(ref) ?? new Set<string>();
+      pieces.add(entry.pieceRef);
+      pooledRefs.set(ref, pieces);
+    }
   }
   let retainedTotalCents = 0;
   for (const balance of retentionBalances.values()) {
     if (balance < 0) negativeRetentionCount += 1;
     retainedTotalCents += Math.max(0, balance);
   }
+  const pooledAccounts = [...pooledRefs.values()].filter((pieces) => pieces.size > 1).length;
 
+  if (pooledAccounts > 0) {
+    warnings.push(
+      `${pooledAccounts} compte(s) de retenue de garantie sans compte auxiliaire portant ` +
+        "plusieurs pièces : le solde des retenues y est net par COMPTE et non par client " +
+        "(une libération excessive peut y compenser la retenue d'un autre client)",
+    );
+  }
   if (unattachedRetentionCount > 0) {
     warnings.push(
       `${unattachedRetentionCount} écriture(s) 4117 non rattachée(s) à une créance de la même ` +

@@ -840,7 +840,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         : null,
       retention: {
         count: retention,
-        totalCents: Number(retainedCents ?? 0n),
+        // Le MONTANT est une créance en euros : owner-only, comme
+        // `overdueCents` (volontairement absent de cette route), la marge et
+        // le rapport mensuel. Un membre voit qu'il existe des retenues — leur
+        // nombre, et le fait qu'elles ne sont pas des impayés — pas la somme.
+        totalCents: request.membershipRole === "owner" ? Number(retainedCents ?? 0n) : null,
         // La date de libération est CONTRACTUELLE : elle n'est nulle part
         // dans un FEC. On ne l'invente pas — la saisir est un ticket à part.
         releaseDateKnown: false,

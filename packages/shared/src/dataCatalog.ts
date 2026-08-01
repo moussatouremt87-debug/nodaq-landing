@@ -80,10 +80,18 @@ export const DATASETS: readonly Dataset[] = [
         // US-8 : sans cette mesure, « combien me doit-on ? » tairait la
         // retenue — le reste dû n'en tient plus compte, et le montant du
         // marché ne dit pas ce qui est encore retenu.
-        name: "retenue_garantie",
+        //
+        // Le libellé porte sa limite : c'est la retenue CONSTATÉE sur la
+        // pièce. Une libération comptabilisée séparément n'y est pas déduite
+        // (elle n'est rattachable à aucune facture) — le solde en cours se lit
+        // sur l'écran Connecteurs. Dire la limite dans le catalogue, c'est la
+        // dire au modèle : il la relaie au lieu d'affirmer un montant net.
+        name: "retenue_constatee_sur_la_facture",
         column: "retainedCents",
         kind: "number",
-        description: "Retenue de garantie (due, pas encore exigible)",
+        description:
+          "Retenue de garantie constatée sur la facture (due, pas encore exigible) — " +
+          "une libération comptabilisée sous une autre pièce n'en est pas déduite",
       },
     ],
   },

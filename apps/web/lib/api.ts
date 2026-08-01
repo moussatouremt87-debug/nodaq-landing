@@ -228,10 +228,13 @@ export const FecStatus = z.object({
     .nullable(),
   /** Retenues de garantie du dernier import (US-8) — affichées À PART des
    * impayés. Sans ce champ ici, Zod le supprimait et l'écran n'en parlait
-   * jamais : la garantie annoncée ne se voyait nulle part. */
+   * jamais : la garantie annoncée ne se voyait nulle part.
+   *
+   * `totalCents` est `null` hors rôle owner : une créance en euros se lit avec
+   * le même droit ici que dans la marge ou le rapport mensuel. */
   retention: z.object({
     count: z.number(),
-    totalCents: z.number(),
+    totalCents: z.number().nullable(),
     releaseDateKnown: z.boolean(),
   }),
 });

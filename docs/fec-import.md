@@ -148,11 +148,29 @@ crédit 4117`) : elle n'est rattachable à aucune facture. Additionner les
 retenues portées par les factures continuerait donc d'annoncer « X € de retenue
 en cours » sur des sommes **déjà encaissées**.
 
-Le total affiché est le **solde du compte 4117**, planché à zéro par tiers (un
-compte sur-libéré ne masque pas la retenue d'un autre client). Un solde n'a
-rien à rattacher : il est juste par construction, quelle que soit la pièce sous
-laquelle la libération a été passée. La colonne par facture reste, elle, ce
-qu'elle dit : la retenue portée par **cette** pièce.
+Le total affiché est le **solde du compte 4117**, planché à zéro par seau de
+solde. Un solde n'a rien à rattacher : il est juste par construction, quelle
+que soit la pièce sous laquelle la libération a été passée. Seules les lignes
+que la dérivation a **reconnues** comme retenue y entrent — une ligne `4117`
+laissée en créance ordinaire est déjà comptée dans les impayés, l'ajouter ici
+l'annoncerait une seconde fois.
+
+Le seau est le **compte auxiliaire** quand la comptabilité en tient un : un
+client sur-libéré ne masque alors pas la retenue d'un autre. **Sans
+auxiliaire**, toutes les retenues vivent sur le même compte, le seau est unique
+et une libération excessive peut y compenser la retenue d'un autre client :
+c'est une limite du plan comptable, et elle est **dite** (avertissement dédié)
+plutôt que promise résolue.
+
+La colonne par facture reste, elle, ce qu'elle dit : la retenue **constatée sur
+cette pièce**. Une libération comptabilisée séparément n'y est pas déduite —
+c'est pourquoi la mesure du cockpit s'appelle `retenue_constatee_sur_la_facture`
+et porte cette limite dans son libellé.
+
+Une libération non encaissée rend la somme **exigible** : la pièce de levée des
+réserves a un montant facturé nul (ce n'est pas une vente, elle n'entre donc
+pas au CA) mais un solde restant dû, et elle est **réclamable** — l'écarter
+ferait disparaître une créance réelle de tous les compteurs.
 
 ### Ce que le produit ne prétend pas savoir
 
@@ -181,11 +199,22 @@ présence d'une ligne 411 : quand l'OD de transfert porte sa **propre**
 référence de pièce (convention fréquente), le groupe ne contient que la
 contrepartie au crédit — il n'y a là aucune facture à alléger.
 
-Quand la pièce ne porte **aucune** ligne `411` ordinaire, c'est très
-probablement un plan « 411 + code client » où le client a un compte en
-`4117xxxx` : l'avertissement le dit ainsi, et non comme une retenue non
-rattachée — un avertissement faux, répété à chaque pièce, use la confiance
-aussi sûrement qu'un chiffre faux.
+Quand la pièce ne porte **aucune** ligne `411` ordinaire, deux situations sont
+**indiscernables** : un plan « 411 + code client » (le client n° 70003 porte le
+compte `41170003`, il n'y a aucune retenue) ou une vraie retenue orpheline.
+L'avertissement dit donc le **fait** et sa **conséquence** — la ligne est
+traitée comme une créance ordinaire, rien n'est déduit des impayés — sans
+trancher la cause. Un diagnostic inventé, répété à chaque pièce, use la
+confiance aussi sûrement qu'un chiffre faux.
+
+Le rattachement par pièce ne suffit d'ailleurs pas à lui seul : il exige aussi
+que **chaque débit `4117` ait, dans son écriture, une contrepartie client au
+crédit du même montant** — la signature d'un transfert. Sans cette seconde
+condition, une pièce partagée par deux clients (un lot de facturation) où l'un
+porte le compte `41170003` voyait **sa** créance ré-étiquetée « retenue » et
+rattachée à la facture de **l'autre** : un vrai dû sortait des impayés et
+changeait de client au passage. Une facture a pour contrepartie une vente
+(`7xx`), jamais un crédit client.
 
 Sans **compte auxiliaire**, la facture vit au `411000` et sa retenue au
 `411700` : deux « clients » pour notre clé de regroupement (client, pièce), une

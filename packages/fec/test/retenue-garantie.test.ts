@@ -281,6 +281,61 @@ describe("retenue de garantie — jamais un impayé", () => {
     expect(invoice?.residualCents).toBe(940_000);
   });
 
+  it("BLOQUANT : un lot de facturation partagé ne fait pas changer de client à une créance", () => {
+    // Pièce unique `LOT-1` pour deux clients, plan « 411 + code » : le client
+    // n° 70003 porte le compte 41170003. Rattacher sa créance à la facture de
+    // l'AUTRE client la sortirait des impayés, la ré-étiquetterait « retenue »
+    // et l'attribuerait au mauvais nom — dans son CA (2.11) comme dans ses
+    // signaux (3.4). Un vrai dû disparaît : pire que la relance abusive.
+    //
+    // Une facture a pour contrepartie une VENTE (7xx) ; un transfert de
+    // retenue a pour contrepartie un crédit client du même montant. C'est ce
+    // qui les sépare.
+    const rows = [
+      row({ num: "1", date: "20260105", compte: "411000123", aux: "CDEUX", piece: "LOT-1", pieceDate: "20260105", lib: "Facture client A", debit: "1000,00" }),
+      row({ num: "1", date: "20260105", compte: "706000", compteLib: "Prestations", piece: "LOT-1", pieceDate: "20260105", lib: "Facture client A", credit: "1000,00" }),
+      row({ num: "2", date: "20260105", compte: "41170003", aux: "C70003", piece: "LOT-1", pieceDate: "20260105", lib: "Facture client B", debit: "3000,00" }),
+      row({ num: "2", date: "20260105", compte: "706000", compteLib: "Prestations", piece: "LOT-1", pieceDate: "20260105", lib: "Facture client B", credit: "3000,00" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    // DEUX créances, chacune chez son client, aucune retenue fabriquée.
+    expect(result.invoices).toHaveLength(2);
+    expect(result.overdueCount).toBe(2);
+    expect(result.overdueCents).toBe(400_000);
+    expect(result.retainedCents).toBe(0);
+    expect(result.invoices.map((i) => i.customerRef).sort()).toEqual(["C70003", "CDEUX"]);
+    // Et la ligne douteuse est signalée, pas avalée en silence.
+    expect(result.warnings.some((w) => w.includes("4117 au débit"))).toBe(true);
+  });
+
+  it("BLOQUANT : une retenue libérée mais non encaissée reste réclamable", () => {
+    // Levée des réserves sous SA propre pièce : le montant facturé de cette
+    // pièce est nul (ce n'est pas une vente), mais 500 € sont redevenus
+    // EXIGIBLES. Écarter la pièce les ferait disparaître de tous les
+    // compteurs — plus personne ne pourrait les réclamer.
+    const rows = [
+      row({ num: "1", date: "20260110", compte: "41100014", aux: "CLEV", piece: "F-3", pieceDate: "20260110", lib: "Facture F-3", debit: "10000,00", let: "AA" }),
+      row({ num: "1", date: "20260110", compte: "706000", compteLib: "Prestations", piece: "F-3", pieceDate: "20260110", lib: "Facture F-3", credit: "10000,00" }),
+      row({ num: "2", date: "20260110", compte: "41170014", aux: "CLEV", piece: "F-3", lib: "Retenue 5%", debit: "500,00" }),
+      row({ num: "2", date: "20260110", compte: "41100014", aux: "CLEV", piece: "F-3", lib: "Retenue 5%", credit: "500,00", let: "AA" }),
+      row({ journal: "BQ", num: "3", date: "20260214", compte: "512000", compteLib: "Banque", piece: "REG-3", lib: "Encaissement", debit: "9500,00" }),
+      row({ journal: "BQ", num: "3", date: "20260214", compte: "41100014", aux: "CLEV", piece: "F-3", lib: "Règlement", credit: "9500,00", let: "AA" }),
+      // Réserves levées, rien d'encaissé : les 500 € redeviennent dus.
+      row({ num: "4", date: "20260105", compte: "41100014", aux: "CLEV", piece: "LEV-3", pieceDate: "20260105", lib: "Levée des réserves", debit: "500,00" }),
+      row({ num: "4", date: "20260105", compte: "41170014", aux: "CLEV", piece: "LEV-3", lib: "Levée des réserves", credit: "500,00" }),
+    ];
+    const result = deriveReceivables(entriesOf(rows), { today: TODAY });
+    // Plus rien de retenu : le compte 4117 est soldé.
+    expect(result.retainedCents).toBe(0);
+    // Mais les 500 € sont dus, échus, et réclamables.
+    expect(result.overdueCount).toBe(1);
+    expect(result.overdueCents).toBe(50_000);
+    const releve = result.invoices.find((i) => i.number === "LEV-3");
+    // Ce n'est PAS une vente : montant facturé nul, donc hors CA (2.11/3.1).
+    expect(releve?.amountCents).toBe(0);
+    expect(releve?.residualCents).toBe(50_000);
+  });
+
   it("sans retenue, rien ne change (non-régression 2.14)", () => {
     const rows = [
       row({ num: "1", date: "20260105", compte: "41100002", aux: "CBETA", piece: "F-200", pieceDate: "20260105", lib: "Facture F-200", debit: "2500,00" }),
