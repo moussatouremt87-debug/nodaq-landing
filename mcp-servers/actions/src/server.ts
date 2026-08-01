@@ -1614,7 +1614,11 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       // (ce n'est pas une vente) mais un solde bien exigible. Refuser sur
       // « montant illisible » y serait un motif faux, et la somme ne serait
       // réclamable nulle part.
-      if (totalCents === null && residualCentsOf(invoice) === null) {
+      const knownResidual = residualCentsOf(invoice);
+      // Un montant illisible reste un montant illisible : si le solde connu
+      // est nul, le motif du refus doit dire l'illisibilité, pas « rien à
+      // réclamer » — ce sont deux problèmes différents pour l'utilisateur.
+      if (totalCents === null && (knownResidual === null || knownResidual === 0)) {
         throw new Error(`invoice "${invoiceId}" has no readable amount`);
       }
       // RETENUE DE GARANTIE (US-8) : on ne relance QUE la part exigible.

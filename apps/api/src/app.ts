@@ -839,7 +839,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         ? { ...lastImportPublic, warnings: FecWarnings.parse(warnings) }
         : null,
       retention: {
-        count: retention,
+        // Le compteur suit le SOLDE : une facture peut porter une retenue déjà
+        // libérée sous une autre pièce. Annoncer « 0 € en cours (2 factures
+        // concernées) » — ou, pour un membre qui ne voit pas le montant,
+        // « des retenues sont en cours » sur un compte soldé — serait faux.
+        count: (retainedCents ?? 0n) > 0n ? retention : 0,
         // Le MONTANT est une créance en euros : owner-only, comme
         // `overdueCents` (volontairement absent de cette route), la marge et
         // le rapport mensuel. Un membre voit qu'il existe des retenues — leur

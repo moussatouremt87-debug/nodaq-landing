@@ -173,16 +173,28 @@ cette pièce**. Une libération comptabilisée séparément n'y est pas déduite
 c'est pourquoi la mesure du cockpit s'appelle `retenue_constatee_sur_la_facture`
 et porte cette limite dans son libellé.
 
-Une libération non encaissée rend la somme **exigible**, et cette somme est
-recollée à **la facture qui porte la retenue** — quand il n'y en a qu'une pour
-ce client. Une seule candidate n'est pas une supposition ; plusieurs le
-seraient, et la pièce reste alors telle quelle avec un avertissement.
+Une libération non encaissée rend la somme **exigible**. Quand elle est
+comptabilisée sous sa propre pièce, cette pièce sort avec un **montant facturé
+nul** (ce n'est pas une vente, elle n'entre donc pas au CA) mais un solde
+restant dû, à **sa** date d'échéance.
 
-Ce recollage n'est pas cosmétique : laissée à part, la pièce de levée a un
-montant facturé nul (ce n'est pas une vente), et **aucune surface aval ne sait
-la réclamer** — la relance refuserait sur « montant illisible », et le rapport
-mensuel la rangerait parmi les exclusions du CA au lieu de l'encours. Une
-créance que personne ne sait réclamer est une créance perdue.
+La reverser dans la facture d'origine paraissait plus propre — sauf qu'une
+facture ne porte qu'**une** échéance : la somme libérée héritait de celle de la
+facture, et une levée de juillet ressortait « en retard de 146 jours » à
+l'instant même de son enregistrement. Relancer un bon client sur une somme
+exigible depuis quatre jours, c'est la faute du ticket un cran plus loin.
+
+La relance sait la réclamer parce qu'elle juge la lisibilité sur le **solde
+restant dû**, pas sur le montant facturé. En revanche le rapport mensuel
+(2.11) ne la compte pas dans son encours : il parle de **factures du mois**, et
+une pièce de levée n'en est pas une. Les deux écrans disent donc chacun ce
+qu'ils mesurent.
+
+Une libération saisie **sans auxiliaire** alors que la retenue en portait un
+tomberait dans un autre seau et ne compenserait jamais : quand le compte de
+retenue n'a qu'**un seul** tiers reconnu, la sortie lui revient (une seule
+candidate n'est pas une supposition). Sinon elle est écartée du solde, et c'est
+dit — le total peut alors être surévalué d'autant.
 
 ### Ce que le produit ne prétend pas savoir
 
@@ -240,13 +252,31 @@ signature du transfert aurait, elle, laissé la facture fantôme réapparaître 
 le **croisement** des deux conventions (sans auxiliaire *et* comptabilisée
 directement) — les deux conventions se croisent dans la vraie vie.
 
+### Sans comptabilité auxiliaire : la limite, plutôt que la devinette
+
 Sans **compte auxiliaire**, la facture vit au `411000` et sa retenue au
-`411700` : deux « clients » pour notre clé de regroupement (client, pièce), une
-seule facture pour l'artisan. Une pièce entièrement composée de lignes `4117`
-est donc reversée dans la facture de la **même pièce** quand il en existe une,
-et une seule — deux candidates, on ne devine pas. Sans ce rattachement, la
-retenue formait une facture **fantôme** de 500 €, comptée en impayé et donc
-relançable : le défaut du ticket, intact.
+`411700` : deux « clients » pour la clé de regroupement (client, pièce), une
+seule facture pour l'artisan. La retenue y forme donc une pièce à part, comptée
+en créance ordinaire.
+
+Trois versions successives ont tenté de reverser cette pièce dans la facture de
+la même référence. **Chacune a été prise en défaut sur un montage réel**, et
+toujours dans le même sens : une créance disparaissait, ou changeait de client.
+Sous un plan « 411 + code client », rien ne distingue structurellement le compte
+`41170003` du client n° 70003 d'un compte de retenue `411700` + code — ni le
+préfixe, ni la forme de l'écriture, ni la contrepartie.
+
+L'inférence elle-même est le défaut. Le coût des deux erreurs n'est **pas
+symétrique** :
+
+| Erreur | Conséquence |
+|---|---|
+| ne pas reconnaître une retenue | elle reste dans les impayés — le défaut d'origine, **visible et signalé** |
+| la reconnaître à tort | un dû réel disparaît et change de client — **muet**, et faux dans les comptes |
+
+Une retenue n'est donc reconnue que **dans** un regroupement (client, pièce), où
+l'identité du tiers est acquise par construction. Sans auxiliaire, la retenue
+reste une créance ordinaire — comme avant le ticket — et l'avertissement le dit.
 
 **Limite assumée, et dite.** Quand le transfert porte sa propre référence et
 qu'aucun rattachement par pièce n'est possible, la retenue n'est rattachable à

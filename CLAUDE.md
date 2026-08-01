@@ -86,21 +86,21 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > le 411 amputait le CA et faisait déduire la retenue une SECONDE fois en
 > aval). Discriminant = l'ÉCRITURE, pas la pièce : contrepartie de même
 > MONTANT (un escompte n'est pas un transfert) ; le reclassement de la
-> libération n'est pas une vente. Rattachement PAR PIÈCE même sans compte
-> auxiliaire (sinon la retenue du `411700` devenait une facture fantôme
-> relançable) — sous TROIS conditions : une seule facture candidate, pas
-> d'auxiliaire propre distinct (le vrai discriminant du plan « 411 + code
-> client » : un client est un TIERS, un compte de retenue n'en a pas), et
-> chaque débit 4117 jambe de la MÊME écriture qu'une créance de la cible ou
-> contrepartie d'un crédit client de MÊME montant. N'exiger que la signature
-> du transfert laissait la facture fantôme revenir sur le CROISEMENT des deux
-> conventions (sans auxiliaire ET directe) ; ne rien exiger faisait changer
-> une créance de client sous une pièce partagée ;
-> levée des réserves RECOLLÉE à la facture qui porte la retenue quand il n'y
-> en a qu'une (sinon la pièce de levée, montant facturé nul, n'était
-> réclamable NULLE PART : relance sur « montant illisible », hors encours
-> 2.11) ; total des retenues =
-> SOLDE du compte 4117 — lignes RECONNUES, plus les seules SORTIES du même
+> libération n'est pas une vente. AUCUN rattachement entre regroupements, même
+> sans compte AUXILIAIRE : une retenue n'est reconnue que DANS un regroupement (client,
+> pièce), où le tiers est acquis par construction. Trois versions de
+> rattachement inter-pièces ont été prises en défaut sur un montage réel,
+> TOUJOURS dans le même sens (une créance disparaît ou change de client) —
+> sous un plan « 411 + code client », RIEN ne distingue `41170003` (client
+> n° 70003) d'un compte de retenue : ni le préfixe, ni la forme de l'écriture,
+> ni la contrepartie. L'inférence EST le défaut, et le coût des deux erreurs
+> n'est pas symétrique : ne pas reconnaître laisse la retenue dans les impayés
+> (visible, SIGNALÉ) ; reconnaître à tort fait disparaître un dû (muet). Sans
+> auxiliaire on s'abstient donc, et on le DIT ; levée des réserves sous sa
+> propre pièce = pièce à montant facturé NUL (hors CA) mais solde exigible à
+> SA date — la recoller à la facture lui donnait l'échéance de la facture, donc
+> un « retard de 146 jours » le jour de son enregistrement ; total des retenues
+> = SOLDE du compte 4117 — lignes RECONNUES, plus les seules SORTIES du même
 > compte (un débit non reconnu est déjà dans les impayés : l'ajouter comptait
 > deux fois) — planché par seau (compte auxiliaire s'il existe, sinon le
 > compte — limite DITE quand le risque est réel)

@@ -125,83 +125,32 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
     warnings.push(`${unreferenced} écriture(s) 411 sans PieceRef ignorée(s) pour la facturation`);
   }
 
-  // RATTACHEMENT PAR PIÈCE, même sans compte auxiliaire.
+  // POURQUOI IL N'Y A PAS DE RATTACHEMENT ENTRE REGROUPEMENTS
   //
   // La clé de regroupement est (client, pièce), et le « client » vient du
-  // CompAuxNum — à défaut du numéro de compte. Dans un plan SANS auxiliaire,
-  // la facture vit au `411000` et sa retenue au `411700` : deux « clients »
-  // pour notre clé, une seule et même facture pour l'artisan. La retenue
-  // formait alors une facture fantôme de 500 €, comptée en impayé et donc
-  // relançable — le défaut exact du ticket, intact.
+  // CompAuxNum — à défaut du numéro de compte. Dans un plan SANS comptabilité
+  // auxiliaire, la facture vit au `411000` et sa retenue au `411700` : deux
+  // « clients » pour notre clé, une seule et même facture pour l'artisan. La
+  // retenue y forme donc une pièce à part, comptée en créance ordinaire.
   //
-  // Une pièce entièrement composée de lignes 4117 est donc reversée dans la
-  // facture de la MÊME pièce — sous TROIS conditions cumulatives, parce que ce
-  // rattachement peut faire disparaître une créance (et lui faire changer de
-  // client, ce qui est pire encore) :
+  // Trois versions successives ont tenté de reverser cette pièce dans la
+  // facture de la même référence. Chacune a été prise en défaut sur un
+  // montage réel, et TOUJOURS dans le même sens : une créance disparaissait,
+  // ou changeait de client. Sous un plan « 411 + code client », rien ne
+  // distingue structurellement le compte `41170003` du client n° 70003 d'un
+  // compte de retenue `411700` + code — ni le préfixe, ni la forme de
+  // l'écriture, ni la contrepartie.
   //
-  //   1. une seule facture candidate dans la pièce (deux, on ne devine pas) ;
-  //   2. les lignes 4117 n'ont PAS de compte auxiliaire propre, ou le même que
-  //      la facture cible. C'est le vrai discriminant du plan
-  //      « 411 + code client » : le client n° 70003 y est un TIERS, avec son
-  //      auxiliaire ; un compte de retenue n'en a pas ;
-  //   3. chaque débit 4117 est une jambe de la MÊME écriture qu'une créance de
-  //      la facture cible (comptabilisation directe), ou a pour contrepartie un
-  //      crédit client du même montant dans son écriture (transfert).
+  // L'inférence elle-même est le défaut. Le coût des deux erreurs n'est PAS
+  // symétrique : ne pas reconnaître une retenue la laisse dans les impayés
+  // (le défaut d'origine, visible, et signalé) ; la reconnaître à tort fait
+  // disparaître un dû réel et l'attribue à un autre client — invisible, et
+  // faux dans les comptes.
   //
-  // Sans 2 et 3, une pièce partagée par deux clients (un lot de facturation) où
-  // l'un porte le compte `41170003` voyait SA créance ré-étiquetée « retenue »
-  // et rattachée à la facture de l'AUTRE : un vrai dû sortait des impayés et
-  // changeait de client au passage — exactement ce que la garde de sûreté
-  // interdit.
-  const ordinaryCreditByEcriture = new Map<string, number>();
-  for (const entry of clientEntries) {
-    if (classifyReceivableAccount(entry.compteNum) !== "client" || entry.creditCents === 0) continue;
-    const k = ecritureKey(entry);
-    ordinaryCreditByEcriture.set(k, (ordinaryCreditByEcriture.get(k) ?? 0) + entry.creditCents);
-  }
-  const mergedRefs = new Set<string>();
-  const invoicePiece = new Map<string, string[]>();
-  for (const [key, group] of groups) {
-    const piece = key.slice(key.indexOf("␟") + 1);
-    if (group.some((e) => classifyReceivableAccount(e.compteNum) === "client" && e.debitCents > 0)) {
-      invoicePiece.set(piece, [...(invoicePiece.get(piece) ?? []), key]);
-    }
-  }
-  for (const [key, group] of [...groups]) {
-    if (group.every((e) => classifyReceivableAccount(e.compteNum) !== "retenue")) continue;
-    if (group.some((e) => classifyReceivableAccount(e.compteNum) === "client")) continue;
-    const piece = key.slice(key.indexOf("␟") + 1);
-    const candidates = invoicePiece.get(piece) ?? [];
-    const targetKey = candidates.length === 1 ? candidates[0]! : undefined;
-    const target = targetKey ? groups.get(targetKey) : undefined;
-    if (!target || !targetKey) continue;
-    const targetRef = targetKey.slice(0, targetKey.indexOf("␟"));
-    // Condition 2 : jamais par-dessus un tiers distinct.
-    if (group.some((e) => e.compAuxNum !== null && e.compAuxNum !== targetRef)) continue;
-    // Condition 3 : chaque débit 4117 tient à la facture cible.
-    const targetDebitEcritures = new Set(
-      target
-        .filter((e) => classifyReceivableAccount(e.compteNum) === "client" && e.debitCents > 0)
-        .map(ecritureKey),
-    );
-    const debits = group.filter((e) => e.debitCents > 0);
-    const attachable = debits.every(
-      (e) =>
-        targetDebitEcritures.has(ecritureKey(e)) ||
-        ordinaryCreditByEcriture.get(ecritureKey(e)) === e.debitCents,
-    );
-    if (!attachable) continue;
-    target.push(...group);
-    groups.delete(key);
-    mergedRefs.add(key.slice(0, key.indexOf("␟")));
-  }
-  // Un compte de retenue rattaché n'est pas un client : le laisser dans la
-  // liste ferait apparaître « Retenues de garantie » parmi les clients et
-  // gonflerait leur nombre. On ne retire que les références qui ne portent
-  // plus aucune pièce à elles.
-  for (const ref of mergedRefs) {
-    if (![...groups.keys()].some((key) => key.startsWith(`${ref}␟`))) customers.delete(ref);
-  }
+  // Une retenue n'est donc reconnue que DANS un regroupement (client, pièce),
+  // où l'identité du tiers est acquise par construction. Sans auxiliaire, la
+  // retenue reste une créance ordinaire — comme avant le ticket — et
+  // l'avertissement le dit.
 
   const invoices: FecDerivedInvoice[] = [];
   let openCount = 0;
@@ -211,14 +160,10 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   let unattachedRetentionCount = 0;
   let lookalikeAccountCount = 0;
   let negativeRetentionCount = 0;
-  let unattachedReleaseCount = 0;
   /** Lignes 4117 effectivement reconnues comme retenue (et les tiers
    * correspondants) : elles seules alimentent le solde des retenues. */
   const recognisedRetentionLines = new Set<FecEntry>();
   const recognisedRetentionRefs = new Set<string>();
-  /** Levées de réserves comptabilisées sous leur propre pièce, à recoller à
-   * la facture qui porte la retenue. */
-  const releases: { invoice: FecDerivedInvoice; customerRef: string; releasedCents: number }[] = [];
 
   for (const [key, group] of groups) {
     // Deux populations DISTINCTES : l'exigible (411) et la retenue (4117).
@@ -373,40 +318,23 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
       dueDate,
     };
     invoices.push(invoice);
-    // Pièce de LEVÉE DES RÉSERVES comptabilisée sous sa propre référence :
-    // aucun montant facturé (ce n'est pas une vente), mais un solde redevenu
-    // exigible. Elle est recollée à sa facture juste après — laissée telle
-    // quelle, elle serait une créance que rien en aval ne sait réclamer
-    // (montant illisible pour la relance, hors CA donc hors encours 2.11).
-    if (invoicedCents === 0 && invoice.residualCents > 0 && retainedCents === 0) {
-      const releasedCents = group
-        .filter((e) => classifyReceivableAccount(e.compteNum) === "retenue")
-        .reduce((sum, e) => sum + e.creditCents - e.debitCents, 0);
-      if (releasedCents > 0) releases.push({ invoice, customerRef: customerRef!, releasedCents });
-    }
   }
 
-  // Une libération se rattache à la facture qui PORTE la retenue — quand il
-  // n'y en a qu'une pour ce client. Une seule candidate n'est pas une
-  // supposition ; plusieurs le seraient, et on ne devine pas (la pièce reste
-  // alors telle quelle, et l'avertissement le dit).
-  for (const release of releases) {
-    const candidates = invoices.filter(
-      (i) => i !== release.invoice && i.customerRef === release.customerRef && i.retainedCents > 0,
-    );
-    const target = candidates.length === 1 ? candidates[0]! : undefined;
-    if (!target) {
-      unattachedReleaseCount += 1;
-      continue;
-    }
-    const applied = Math.min(release.releasedCents, target.retainedCents);
-    target.retainedCents -= applied;
-    // La somme libérée redevient exigible sur la facture d'origine : elle
-    // n'est plus retenue, elle est simplement due.
-    target.residualCents += applied;
-    target.settled = false;
-    invoices.splice(invoices.indexOf(release.invoice), 1);
-  }
+  // POURQUOI LA LEVÉE DES RÉSERVES N'EST PAS RECOLLÉE À SA FACTURE
+  //
+  // Quand la levée est comptabilisée sous sa PROPRE pièce, elle sort ici comme
+  // une pièce à montant facturé nul (ce n'est pas une vente) mais à solde
+  // exigible. La reverser dans la facture d'origine paraissait plus propre —
+  // sauf qu'une facture ne porte qu'UNE échéance : la somme libérée héritait
+  // de celle de la facture, et une levée de juillet ressortait « en retard de
+  // 146 jours » dès l'instant où elle est enregistrée. Relancer un bon client
+  // sur une somme exigible depuis quatre jours est exactement la faute que ce
+  // ticket corrige, un cran plus loin.
+  //
+  // La pièce de levée garde donc SA date, donc SA propre échéance. C'est elle
+  // qui porte le solde redevenu exigible, et l'aval sait le réclamer : la
+  // relance juge la lisibilité sur le solde restant dû, pas sur le montant
+  // facturé.
 
   for (const invoice of invoices) {
     if (invoice.retainedCents > 0) retentionCount++;
@@ -444,20 +372,39 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
   // l'annoncerait une seconde fois, en retenue cette fois.
   const retentionBalances = new Map<string, number>();
   const pooledRefs = new Map<string, { pieces: Set<string>; released: boolean }>();
+  // Une libération est souvent saisie SANS auxiliaire (`débit 512 / crédit
+  // 411700`) alors que la retenue, elle, en portait un. Les deux lignes
+  // tomberaient dans deux seaux différents et ne se compenseraient jamais :
+  // le solde annoncerait « en cours » une somme encaissée. Quand un compte de
+  // retenue n'a qu'UN seul tiers reconnu, la sortie sans auxiliaire lui
+  // revient — une seule candidate n'est pas une supposition.
+  const refsByAccount = new Map<string, Set<string>>();
+  for (const line of recognisedRetentionLines) {
+    const refs = refsByAccount.get(line.compteNum) ?? new Set<string>();
+    refs.add(line.compAuxNum ?? line.compteNum);
+    refsByAccount.set(line.compteNum, refs);
+  }
+  let unattachedReleaseCount = 0;
   for (const entry of clientEntries) {
     if (classifyReceivableAccount(entry.compteNum) !== "retenue") continue;
-    const ref = entry.compAuxNum ?? entry.compteNum;
+    let ref = entry.compAuxNum ?? entry.compteNum;
     // Une ligne non reconnue n'entre au solde que si c'est un mouvement de
     // SORTIE (une libération) sur un compte où une retenue a bien été
     // reconnue. Un DÉBIT non reconnu, lui, est déjà compté dans les impayés :
     // l'ajouter ici annoncerait la même somme deux fois, en créance et en
     // retenue.
     const isRelease = entry.creditCents > 0 && entry.debitCents === 0;
-    if (
-      !recognisedRetentionLines.has(entry) &&
-      !(isRelease && recognisedRetentionRefs.has(ref))
-    ) {
-      continue;
+    if (!recognisedRetentionLines.has(entry)) {
+      if (!isRelease) continue;
+      if (!recognisedRetentionRefs.has(ref)) {
+        const candidates = refsByAccount.get(entry.compteNum);
+        if (entry.compAuxNum === null && candidates?.size === 1) {
+          ref = [...candidates][0]!;
+        } else {
+          unattachedReleaseCount += 1;
+          continue;
+        }
+      }
     }
     retentionBalances.set(
       ref,
@@ -496,13 +443,6 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
         "déduite des impayés)",
     );
   }
-  if (unattachedReleaseCount > 0) {
-    warnings.push(
-      `${unattachedReleaseCount} levée(s) de réserves non rattachable(s) à une facture unique ` +
-        "de ce client : la somme redevenue exigible est portée par la pièce de levée, pas par " +
-        "la facture d'origine",
-    );
-  }
   if (lookalikeAccountCount > 0) {
     // Sans créance 411 dans la pièce, deux situations sont INDISCERNABLES :
     // un plan « 411 + code client » (le client 70003 porte le compte
@@ -513,6 +453,12 @@ export function deriveReceivables(entries: FecEntry[], options: DeriveOptions = 
       `${lookalikeAccountCount} écriture(s) 4117 au débit sans aucune créance 411 dans la même ` +
         "pièce : traitées comme des créances ordinaires (compte client en 4117xxxx ou retenue " +
         "non rattachable — rien n'est déduit des impayés)",
+    );
+  }
+  if (unattachedReleaseCount > 0) {
+    warnings.push(
+      `${unattachedReleaseCount} mouvement(s) de sortie sur un compte 4117 non rattachable(s) ` +
+        "à une retenue reconnue : le total des retenues en cours peut être surévalué d'autant",
     );
   }
   if (negativeRetentionCount > 0) {
