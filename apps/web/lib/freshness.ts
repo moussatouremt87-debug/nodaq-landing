@@ -116,11 +116,24 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   // Un import FEC remplace les créances dérivées : impayés, marge, cockpit —
   // ET remplit la file, puisqu'il propose jusqu'à 200 immobilisations à
   // valider (comptes 2x/28x). C'est le premier geste d'un nouveau client.
-  "fec.importe": ["cockpit", "connecteurs", "impayes", "marge", "tresorerie", "validation"],
+  // `rh` : sans facturier connecté, la performance horaire (€/h) tire son CA
+  // du FEC (repli `FecPennylaneClient`). Un import change donc un chiffre
+  // affiché sur un écran qui ne parle pourtant jamais de comptabilité.
+  "fec.importe": [
+    "cockpit",
+    "connecteurs",
+    "impayes",
+    "marge",
+    "tresorerie",
+    "validation",
+    "rh",
+  ],
   // La purge efface ces mêmes dérivées, mais PAS la file : les propositions
   // déjà déposées survivent à l'effacement des écritures dont elles viennent.
   // D'où deux listes différentes — la nuance est le sujet, pas un détail.
-  "fec.purge": ["cockpit", "connecteurs", "impayes", "marge", "tresorerie"],
+  // `rh` y figure aussi : après purge, le €/h passe à « CA indisponible », et
+  // laisser l'ancien chiffre à l'écran serait le pire des deux cas.
+  "fec.purge": ["cockpit", "connecteurs", "impayes", "marge", "tresorerie", "rh"],
   "connecteur.modifie": ["cockpit", "connecteurs", "tresorerie", "impayes"],
   // Éteindre un module retire des pages de la NAV et des cartes du cockpit :
   // les deux doivent suivre sans rechargement (pivot ADR-007).
@@ -128,7 +141,11 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   "prospect.modifie": ["prospects", "cockpit"],
   // Le cockpit affiche les alertes de stock (quand le module est actif).
   "stock.modifie": ["stocks", "cockpit"],
-  // Salariés, absences, synchro paie : la marge en dépend par le coût horaire.
+  // Salariés, absences, synchro paie. `marge` est de la sur-invalidation
+  // ASSUMÉE : `analyze_margin` ne lit ni les salariés ni les immobilisations,
+  // il lit les charges saisies et les factures — le lien passe par les comptes
+  // 64x/68x du FEC, il est indirect. On recharge pour rien plutôt que de
+  // risquer un écran faux, mais que personne ne s'appuie sur un lien direct.
   "rh.modifie": ["rh", "marge"],
   "immobilisation.modifiee": ["immobilisations", "marge"],
   "cout.modifie": ["marge"],
@@ -263,7 +280,11 @@ export function subscribeView(view: ViewKey, listener: Listener): () => void {
   listeners.set(view, set);
   return () => {
     set.delete(listener);
-    if (set.size === 0) listeners.delete(view);
+    // `listeners.get(view) === set` : un désabonnement rejoué après qu'un
+    // nouvel abonné a installé un ensemble neuf effacerait des abonnés VIVANTS.
+    // Non atteignable aujourd'hui, mais deux composants écoutent déjà la même
+    // vue — une garde à un test coûte moins cher qu'un écran muet.
+    if (set.size === 0 && listeners.get(view) === set) listeners.delete(view);
   };
 }
 

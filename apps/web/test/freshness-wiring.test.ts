@@ -107,13 +107,19 @@ describe("branchement de l'invalidation", () => {
       const source = readFileSync(file, "utf-8");
       for (const call of shared) {
         for (const match of source.matchAll(new RegExp(`\\b${call}\\s*\\(`, "g"))) {
-          // Fenêtre = du site d'appel jusqu'à la fin de son gestionnaire
-          // (prochaine déclaration de fonction au même niveau), à défaut 2000
-          // caractères. Statique et approximatif : ne prouve pas le MOMENT de
-          // l'émission, prouve qu'il y en a une sur ce chemin-là.
+          // Fenêtre = du site d'appel jusqu'à la fin de son gestionnaire, à
+          // défaut 2000 caractères. Statique et approximatif : ne prouve pas
+          // le MOMENT de l'émission, prouve qu'il y en a une sur ce chemin-là.
+          //
+          // Les bornes incluent les gestionnaires JSX en ligne (`onClick=`) :
+          // sans elles, la fenêtre d'un `onClick` débordait sur le handler
+          // suivant, dont l'émission servait d'ALIBI à un appel muet. C'est le
+          // seul mutant survivant sur trente lors du test de mutation.
           const from = match.index;
           const rest = source.slice(from + 1);
-          const nextFn = rest.search(/\n {0,2}(async )?function |\n {2}const \w+ = useCallback/);
+          const nextFn = rest.search(
+            /\n {0,2}(async )?function |\n {2}const \w+ = (useCallback|\(|async)|\n\s*(onClick|onSubmit|onChange)=/,
+          );
           const window = rest.slice(0, nextFn === -1 ? 2000 : nextFn);
           if (!window.includes("emitDomainEvent(")) {
             const line = source.slice(0, from).split("\n").length;
@@ -129,6 +135,13 @@ describe("branchement de l'invalidation", () => {
     // Une vue sans abonné, c'est une ligne d'`EVENT_VIEWS` qui rassure sans
     // réveiller personne : l'événement part, et aucun écran n'écoute. Douze des
     // quinze vues étaient dans ce cas au premier jet.
+    //
+    // CE QUE CETTE GARDE NE FAIT PAS : elle agrège les abonnements de tous les
+    // fichiers et vérifie que l'union couvre les vues. Elle dit donc « cette
+    // vue est écoutée quelque part », JAMAIS « l'écran qui l'affiche l'écoute ».
+    // Elle n'aurait pas attrapé le cockpit affichant la trésorerie sans s'y
+    // abonner, ni la performance horaire dérivée du FEC. Ces deux-là se
+    // trouvent en lisant ce qu'un écran affiche — pas en lançant la CI.
     const sources = pageFiles(APP)
       .concat([join(APP, "shell.tsx")])
       .map((file) => readFileSync(file, "utf-8"))

@@ -291,8 +291,8 @@ export default function CockpitPage() {
                 // NUANCE : `/cockpit/ask` ne rend que les outils APPELÉS, pas
                 // leur issue (le chat, lui, filtre sur `ok`). Un outil qui
                 // échoue provoquera donc un rafraîchissement inutile. Écart
-                // assumé dans ce sens-là seulement : sur-inviter coûte une
-                // requête, sous-inviter laisse un écran faux.
+                // assumé dans ce sens-là seulement : sur-invalider coûte une
+                // requête, sous-invalider laisse un écran faux.
                 for (const event of new Set(
                   result.tools.map(eventForTool).filter((e): e is DomainEvent => e !== null),
                 )) {

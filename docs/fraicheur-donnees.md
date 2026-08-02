@@ -101,7 +101,16 @@ Dans `apps/web/test/freshness-wiring.test.ts` et `freshness.test.ts` :
 - la nav est abonnée à `validation` et `nav`.
 
 Ces gardes sont **statiques** : elles prouvent qu'un appel n'a pas disparu, pas
-qu'il part au bon moment. C'est dit, et c'est la limite du dispositif.
+qu'il part au bon moment. Et la garde « toute vue a un abonné » raisonne sur
+l'**union** de tous les écrans : elle dit « cette vue est écoutée quelque part »,
+jamais « l'écran qui l'affiche l'écoute ». Les deux défauts trouvés en revue —
+le cockpit affichant la trésorerie sans s'y abonner, la performance horaire
+dérivée du FEC sur `/rh` — se trouvent en lisant **ce qu'un écran affiche**, pas
+en lançant la CI. C'est la limite du dispositif, et elle est dite.
+
+> **Ajouter un écran, c'est se demander d'où vient CHAQUE chiffre affiché.** Une
+> page RH qui montre un €/h dérivé du facturier dépend d'un import comptable :
+> le lien ne se voit pas dans son code, seulement dans la chaîne de dérivation.
 
 ## Écart connu
 
