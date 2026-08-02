@@ -19,6 +19,14 @@ const CustomerInvoice = z.object({
   id: z.union([z.string(), z.number()]).transform(String),
   invoice_number: z.string().nullish(),
   amount: z.union([z.string(), z.number()]).nullish(),
+  /** Part NON EXIGIBLE du montant — retenue de garantie (compte 4117, US-8).
+   * Absente de l'API Pennylane : seul le connecteur fichier FEC la renseigne,
+   * et l'absence vaut 0 (aucun changement pour les autres facturiers). */
+  retained_amount: z.union([z.string(), z.number()]).nullish(),
+  /** Solde restant dû, quand le facturier le connaît (le connecteur FEC le
+   * dérive du lettrage). Absent = inconnu : l'aval retombe sur le montant
+   * facturé, jamais sur un solde supposé. */
+  residual_amount: z.union([z.string(), z.number()]).nullish(),
   currency: z.string().nullish(),
   date: z.string().nullish(),
   deadline: z.string().nullish(),

@@ -29,6 +29,9 @@ const MODEL_ANSWER = JSON.stringify({
 let ocrShouldFail = false;
 let modelAnswer = MODEL_ANSWER;
 const modelCalls: { model: string }[] = [];
+/** Prompts envoyés au tier souverain — sert à vérifier ce que le modèle a le
+ * droit de savoir (et ce qu'on lui interdit de réclamer). */
+const modelPrompts: string[] = [];
 
 const fakeOcr = createServer((req, res) => {
   if (ocrShouldFail) {
@@ -43,12 +46,21 @@ const fakeLiteLlm = createServer((req, res) => {
   let raw = "";
   req.on("data", (chunk: Buffer) => (raw += chunk.toString()));
   req.on("end", () => {
-    const body = JSON.parse(raw) as { model: string };
+    const body = JSON.parse(raw) as {
+      model: string;
+      messages?: { content?: unknown }[];
+    };
     modelCalls.push({ model: body.model });
+    for (const message of body.messages ?? []) {
+      if (typeof message.content === "string") modelPrompts.push(message.content);
+    }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ choices: [{ message: { content: modelAnswer } }] }));
   });
 });
+
+/** Ajoute les chantiers à retenue de garantie au facturier factice (US-8). */
+let retentionFixtures = false;
 
 let admin: PrismaClient;
 let tenantId: string;
@@ -95,6 +107,51 @@ const fakeSaas = createServer((req, res) => {
             // attribuée » (.catch(null)), jamais un échec de page (3.4).
             customer: "ACME SARL",
           },
+          // Chantiers BTP (US-8) — servis À LA DEMANDE : les ajouter au jeu
+          // commun changerait les compteurs de tous les autres outils qui
+          // lisent la même liste, et un test vert deviendrait un test faux.
+          ...(retentionFixtures
+            ? [
+                // 5 % retenus jusqu'à la levée des réserves, rien d'encaissé.
+                {
+                  id: "inv-rg",
+                  invoice_number: "F-2026-100",
+                  amount: "1200.00",
+                  retained_amount: "60.00",
+                  residual_amount: "1140.00",
+                  currency: "EUR",
+                  date: "2026-05-01",
+                  deadline: "2026-06-01",
+                  status: "late",
+                },
+                // Chantier RÉGLÉ hors retenue mais resté « pending » faute de
+                // lettrage (cas fréquent en PME) : il ne reste que la retenue,
+                // donc rien à réclamer.
+                {
+                  id: "inv-rg-only",
+                  invoice_number: "F-2026-101",
+                  amount: "10000.00",
+                  retained_amount: "500.00",
+                  residual_amount: "0.00",
+                  currency: "EUR",
+                  date: "2026-05-01",
+                  deadline: "2026-06-01",
+                  status: "pending",
+                },
+                // Facture encaissée, sans aucune retenue : le refus doit dire
+                // CE motif-là, pas parler d'une retenue qui n'existe pas.
+                {
+                  id: "inv-paid-unlettered",
+                  invoice_number: "F-2026-102",
+                  amount: "800.00",
+                  residual_amount: "0.00",
+                  currency: "EUR",
+                  date: "2026-05-01",
+                  deadline: "2026-06-01",
+                  status: "pending",
+                },
+              ]
+            : []),
         ],
         next_cursor: null,
       }),
@@ -149,6 +206,8 @@ beforeEach(() => {
   ocrShouldFail = false;
   modelAnswer = MODEL_ANSWER;
   modelCalls.length = 0;
+  modelPrompts.length = 0;
+  retentionFixtures = false;
 });
 
 function connectedClient(extraContext: { onPendingAction?: () => void } = {}) {
@@ -284,6 +343,70 @@ describe("ocr_and_book_invoice — human-in-the-loop", () => {
     expect(payload.invoice).toMatchObject({ number: "F-2026-042", amountCents: 120_000 });
     expect(payload.draft).toContain("Sauf erreur de notre part");
     expect(modelCalls.every((c) => c.model !== "frontier")).toBe(true);
+  });
+
+  it("BLOQUANT (US-8) : la relance ne réclame QUE l'exigible, jamais la retenue", async () => {
+    // Chantier de 1 200 € dont 60 € (5 %) retenus jusqu'à la levée des
+    // réserves. Réclamer 1 200 €, c'est réclamer une somme que le client a le
+    // droit de garder — la faute qui décrédibilise l'outil devant un artisan.
+    modelAnswer = "Bonjour, sauf erreur la facture F-2026-100 reste impayée...";
+    retentionFixtures = true;
+    const client = await connectedClient();
+    const result = await client.callTool({
+      name: "draft_dunning",
+      arguments: { invoiceId: "inv-rg" },
+    });
+    const parsed = JSON.parse((result.content as { text: string }[])[0]!.text) as {
+      pendingActionId: string;
+    };
+    const rows = await withTenant(tenantId, (tx) =>
+      tx.pendingAction.findMany({ where: { id: parsed.pendingActionId } }),
+    );
+    const payload = rows[0]!.payload as {
+      invoice: { amountCents: number; totalCents: number; retainedCents: number };
+    };
+    // Réclamé : 1 140 €. Facturé : 1 200 €. Retenu : 60 €. Les trois sont
+    // dits — un écart muet passerait pour une erreur de calcul.
+    expect(payload.invoice.amountCents).toBe(114_000);
+    expect(payload.invoice.totalCents).toBe(120_000);
+    expect(payload.invoice.retainedCents).toBe(6_000);
+    // Le modèle rédige à partir de l'exigible et sait que la retenue est hors
+    // relance : rien à inventer, rien à additionner.
+    const prompt = modelPrompts.join("\n");
+    expect(prompt).toContain("montant exigible 1140");
+    expect(prompt).toContain("n'est PAS réclamée");
+  });
+
+  it("BLOQUANT (US-8) : chantier réglé hors retenue => refus MOTIVÉ, aucune relance", async () => {
+    // Le vrai cas du terrain : 10 000 € facturés, 9 500 € encaissés, lignes
+    // NON lettrées — le facturier laisse la facture « pending ». Sans le
+    // solde restant dû, la relance repartait du montant facturé et réclamait
+    // 9 500 € déjà perçus. Un montant nul silencieux, lui, ferait naître une
+    // relance à 0 € dans la file — que l'humain validerait sans comprendre.
+    retentionFixtures = true;
+    const client = await connectedClient();
+    const before = await withTenant(tenantId, (tx) => tx.pendingAction.count());
+    const result = await client.callTool({
+      name: "draft_dunning",
+      arguments: { invoiceId: "inv-rg-only" },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("retainage");
+    const after = await withTenant(tenantId, (tx) => tx.pendingAction.count());
+    expect(after).toBe(before);
+  });
+
+  it("le refus dit le VRAI motif : sans retenue, on ne parle pas de retenue", async () => {
+    retentionFixtures = true;
+    const client = await connectedClient();
+    const result = await client.callTool({
+      name: "draft_dunning",
+      arguments: { invoiceId: "inv-paid-unlettered" },
+    });
+    expect(result.isError).toBe(true);
+    const text = JSON.stringify(result.content);
+    expect(text).toContain("no outstanding balance");
+    expect(text).not.toContain("retainage");
   });
 
   it("draft_dunning on an unknown invoice => error, no pending_action", async () => {

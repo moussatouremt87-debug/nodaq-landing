@@ -235,6 +235,128 @@ describe("invariants", () => {
     expect(withPending.overdueCents).toBe(0);
   });
 
+  it("retenue de garantie (US-8) : hors encours échu, mais TOUJOURS dans le CA", () => {
+    // 5 000 € facturés dont 500 € retenus au 4117 jusqu'à la levée des
+    // réserves. La retenue est due mais pas exigible : la compter en impayé
+    // ferait monter « les impayés » sans qu'un client soit en retard — et la
+    // règle `impayes_en_hausse` pousserait à relancer là-dessus.
+    const report = buildMonthlyReport(
+      [...HISTORY, invoice("2026-04-10", 5_000, { status: "late", retained_amount: 500 })],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(450_000);
+    expect(report.overdueCount).toBe(1);
+    // Le chantier vaut bien 5 000 € : sortir la retenue de l'encours échu ne
+    // réécrit pas le chiffre d'affaires.
+    expect(report.revenueCents).toBe(500_000);
+  });
+
+  it("retenue = TOUT le solde : aucun impayé compté, mais le retrait est DIT", () => {
+    const report = buildMonthlyReport(
+      [...HISTORY, invoice("2026-04-10", 5_000, { status: "late", retained_amount: 5_000 })],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(0);
+    expect(report.overdueCount).toBe(0);
+    // Sortir d'un compteur sans un mot, c'est une donnée qui disparaît.
+    expect(report.overdueNotClaimableCount).toBe(1);
+    expect(report.revenueCents).toBe(500_000);
+  });
+
+  it("solde restant dû connu : il fait foi, et la retenue n'est PAS redéduite", () => {
+    // Facture de 5 000 € dont 500 € retenus, 2 000 € déjà encaissés : il
+    // reste 2 500 € exigibles. Repartir du montant facturé en redéduisant la
+    // retenue donnerait 4 500 € — on réclamerait une somme déjà perçue ; et
+    // déduire la retenue d'un solde qui en est déjà net compterait les 5 %
+    // deux fois, effaçant une créance réelle.
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-04-10", 5_000, {
+          status: "late",
+          retained_amount: 500,
+          residual_amount: 2_500,
+        }),
+      ],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(250_000);
+    expect(report.overdueCount).toBe(1);
+    // Le CA reste le montant du marché.
+    expect(report.revenueCents).toBe(500_000);
+  });
+
+  it("solde restant dû nul : la facture échue sort de l'encours, et c'est DIT", () => {
+    // Facture encaissée mais restée « late » côté facturier (lettrage non
+    // fait, cas fréquent en PME). L'encours ne doit pas la compter — et son
+    // retrait ne doit pas être muet.
+    const report = buildMonthlyReport(
+      [...HISTORY, invoice("2026-04-10", 5_000, { status: "late", residual_amount: 0 })],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(0);
+    expect(report.overdueNotClaimableCount).toBe(1);
+  });
+
+  it("une levée de réserves n'est pas une vente, mais son solde est bien un impayé", () => {
+    // Pièce à montant facturé NUL (ce n'est pas une vente : elle n'entre pas
+    // au CA) et à solde exigible : 500 € redevenus dus après la levée. La
+    // laisser sortir avec les brouillons et les avoirs faisait dire deux
+    // chiffres d'impayés différents au rapport et au connecteur, pour la
+    // même donnée.
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-04-10", 5_000),
+        { date: "2026-04-12", amount: 0, currency: "EUR", status: "late", residual_amount: 500 },
+      ],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(50_000);
+    expect(report.overdueCount).toBe(1);
+    // Le CA, lui, ne bouge pas : rien n'a été vendu ce jour-là.
+    expect(report.revenueCents).toBe(500_000);
+  });
+
+  it("la levée de réserves compte AUSSI dans le mois de référence", () => {
+    // L'encours du mois précédent sert de référence à `impayes_en_hausse`.
+    // Nourrir le mois courant sans nourrir la référence sous-évalue celle-ci
+    // et gonfle la hausse : la règle se déclencherait sur un artefact
+    // comptable, c'est-à-dire qu'elle pousserait à relancer — exactement ce
+    // que ce ticket ferme.
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        invoice("2026-04-10", 5_000),
+        { date: "2026-03-12", amount: 0, currency: "EUR", status: "late", residual_amount: 300 },
+        { date: "2026-04-12", amount: 0, currency: "EUR", status: "late", residual_amount: 500 },
+      ],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(50_000);
+    // La référence connaît les 300 € de mars : la hausse est MESURÉE contre
+    // eux, pas fabriquée par une asymétrie de comptage (une référence à zéro
+    // aurait rendu la règle non évaluable, ou la hausse infinie).
+    const anomaly = report.anomalies.find((a) => a.kind === "impayes_en_hausse");
+    expect(anomaly?.reference).toBe(30_000);
+    expect(anomaly?.observed).toBe(50_000);
+  });
+
+  it("un avoir ne devient pas un impayé parce qu'il porte un solde", () => {
+    // La branche « pas une vente mais exigible » vise le montant NUL (levée
+    // de réserves). Un montant négatif est un avoir : il ne se compte pas en
+    // impayé, quoi qu'annonce un `residual_amount`.
+    const report = buildMonthlyReport(
+      [
+        ...HISTORY,
+        { date: "2026-04-12", amount: -500, currency: "EUR", status: "unpaid", residual_amount: 500 },
+      ],
+      "2026-04",
+    );
+    expect(report.overdueCents).toBe(0);
+    expect(report.overdueCount).toBe(0);
+  });
+
   it("factures non attribuées : comptées au CA, jamais tues", () => {
     const report = buildMonthlyReport(
       [

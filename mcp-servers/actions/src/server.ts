@@ -53,8 +53,11 @@ import { simulateMaterialPrices } from "./materialScenario.js";
 import { analyzeHourlyPerformance } from "./hourlyPerformance.js";
 import {
   buildMonthlySeries,
+  claimableCents,
   fetchInvoiceWindow,
   forecastSales,
+  residualCentsOf,
+  retainedCentsOf,
   UNPAID_STATUSES,
 } from "./salesForecast.js";
 import type { MonthlyRevenuePoint } from "./salesForecast.js";
@@ -1604,9 +1607,37 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
           `invoice "${invoiceId}" is not eligible for dunning (status: ${invoice.status ?? "unknown"})`,
         );
       }
-      const amountCents = Math.round(Number.parseFloat(String(invoice.amount)) * 100);
-      if (!Number.isFinite(amountCents) || amountCents <= 0) {
+      const parsedTotal = Math.round(Number.parseFloat(String(invoice.amount)) * 100);
+      const totalCents = Number.isFinite(parsedTotal) ? parsedTotal : null;
+      // La lisibilité se juge sur ce qu'on peut RÉCLAMER, pas sur le montant
+      // facturé : une pièce de levée des réserves a un montant facturé nul
+      // (ce n'est pas une vente) mais un solde bien exigible. Refuser sur
+      // « montant illisible » y serait un motif faux, et la somme ne serait
+      // réclamable nulle part.
+      const knownResidual = residualCentsOf(invoice);
+      // Un montant illisible reste un montant illisible : si le solde connu
+      // est nul, le motif du refus doit dire l'illisibilité, pas « rien à
+      // réclamer » — ce sont deux problèmes différents pour l'utilisateur.
+      if (totalCents === null && (knownResidual === null || knownResidual === 0)) {
         throw new Error(`invoice "${invoiceId}" has no readable amount`);
+      }
+      // RETENUE DE GARANTIE (US-8) : on ne relance QUE la part exigible.
+      // Dans le bâtiment, 5 % restent au 4117 jusqu'à la levée des réserves —
+      // les réclamer, c'est réclamer une somme que le client a le droit de
+      // garder. Même décision partagée que l'encours échu (2.11).
+      const retainedCents = retainedCentsOf(invoice);
+      const amountCents = claimableCents(invoice, totalCents ?? 0);
+      if (amountCents <= 0) {
+        // Refus MOTIVÉ, pas un montant nul silencieux : le modèle reformule
+        // au lieu de préparer une relance sur une somme non exigible. Le
+        // motif est le vrai : un statut resté « pending » sur une facture
+        // encaissée n'a rien à voir avec une retenue de garantie.
+        throw new Error(
+          retainedCents > 0
+            ? `invoice "${invoiceId}" has nothing claimable today: the outstanding balance is a ` +
+              "retainage (compte 4117), not yet due — no dunning can be drafted"
+            : `invoice "${invoiceId}" has no outstanding balance today — no dunning can be drafted`,
+        );
       }
       const dueDate = invoice.deadline;
       if (!dueDate) {
@@ -1625,9 +1656,15 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
       // Sovereign draft via route() — confidentiel, audited (hash only).
       const requestId = `dunning-${randomUUID()}`;
       const facts =
-        `Facture ${invoice.invoice_number ?? invoice.id}, montant ${amountCents / 100} ` +
+        `Facture ${invoice.invoice_number ?? invoice.id}, montant exigible ${amountCents / 100} ` +
         `${invoice.currency ?? "EUR"}, échéance ${dueDate}, ` +
-        `retard ${risk.daysOverdue} jours.`;
+        `retard ${risk.daysOverdue} jours.` +
+        // Dit au modèle pour qu'il n'additionne pas les deux : la retenue est
+        // due, mais pas réclamable — la relance ne porte que sur l'exigible.
+        (retainedCents > 0
+          ? ` Une retenue de garantie de ${retainedCents / 100} ${invoice.currency ?? "EUR"} ` +
+            "est constatée sur cette facture : elle n'est PAS réclamée."
+          : "");
       const draft = await route({
         text: DUNNING_PROMPT + facts,
         category: "confidentiel",
@@ -1647,7 +1684,13 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
               invoice: {
                 id: invoice.id,
                 number: invoice.invoice_number ?? null,
+                /** Montant RÉCLAMÉ : la part exigible, retenue déduite. */
                 amountCents,
+                /** Montant facturé au marché — affiché pour que le validateur
+                 * comprenne l'écart au lieu de croire à une erreur. */
+                totalCents,
+                /** Part non exigible, jamais réclamée (0 hors bâtiment). */
+                retainedCents,
                 currency: invoice.currency ?? "EUR",
                 dueDate,
               },

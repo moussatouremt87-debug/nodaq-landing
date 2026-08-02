@@ -69,7 +69,15 @@ export function createConnectorsMcpServer(context: ConnectorsServerContext): Mcp
       description:
         "Liste les factures clients Pennylane du tenant (lecture seule). " +
         "Retourne id, numéro, montant, devise, date, échéance, statut et la " +
-        "référence client (id, nom — PII) quand elle est disponible.",
+        "référence client (id, nom — PII) quand elle est disponible. " +
+        // Sans ce contrat, un modèle qui voit `amount: \"0.00\"` (pièce de
+        // levée des réserves) ou un `retained_amount` peut les additionner et
+        // réclamer une somme qui n'est pas exigible (US-8).
+        "Le connecteur fichier FEC ajoute `retained_amount` (retenue de " +
+        "garantie constatée : DUE mais pas encore exigible, jamais à " +
+        "réclamer) et `residual_amount` (solde restant dû, DÉJÀ net de la " +
+        "retenue et des règlements). Ne JAMAIS additionner `amount` et " +
+        "`retained_amount` : ce qu'on peut réclamer est `residual_amount`.",
       inputSchema: {
         limit: z.number().int().min(1).max(100).optional().describe("Nombre max de factures"),
         cursor: z.string().optional().describe("Curseur de pagination"),

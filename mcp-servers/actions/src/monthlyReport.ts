@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { normalizeSaleInvoice, OVERDUE_STATUSES } from "./salesForecast.js";
+import {
+  claimableCents,
+  euroToCents,
+  normalizeSaleInvoice,
+  OVERDUE_STATUSES,
+} from "./salesForecast.js";
 
 /*
  * Rapport mensuel + anomalies (ticket 2.11).
@@ -48,6 +53,11 @@ export const ANOMALY_THRESHOLDS = {
 /** Facture — même forme que l'interface facturier (Pennylane/démo/FEC). */
 export const ReportInvoice = z.object({
   amount: z.union([z.string(), z.number()]).nullish(),
+  /** Part non exigible (retenue de garantie 4117, US-8) — 0 si absente. */
+  retained_amount: z.union([z.string(), z.number()]).nullish(),
+  /** Solde restant dû quand le facturier le connaît — sinon le montant
+   * facturé fait foi (jamais un solde supposé). */
+  residual_amount: z.union([z.string(), z.number()]).nullish(),
   currency: z.string().nullish(),
   date: z.string().nullish(),
   status: z.string().nullish(),
@@ -90,6 +100,11 @@ export interface MonthlyReport {
   /** Encours échu à la fin du mois (factures en retard). */
   overdueCents: number;
   overdueCount: number;
+  /** Factures ÉCHUES dont il ne reste rien à réclamer aujourd'hui : solde
+   * entièrement composé d'une retenue de garantie (4117, US-8), ou déjà
+   * encaissé. Elles sortent de l'encours échu — et ce retrait est DIT, sinon
+   * c'est une donnée qui disparaît. */
+  overdueNotClaimableCount: number;
   /** Moyenne des mois de référence, `null` sans historique suffisant. */
   referenceRevenueCents: number | null;
   referenceMonths: number;
@@ -157,6 +172,15 @@ function median(values: readonly number[]): number | null {
     : (sorted[middle] as number);
 }
 
+/** Mois "YYYY-MM" d'une date de facture, `null` si illisible. Sert aux lignes
+ * qui ne sont pas des ventes mais portent un solde exigible. */
+function monthOf(date: string | null | undefined): string | null {
+  if (!date) return null;
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return `${parsed.getUTCFullYear()}-${String(parsed.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
 const euros = (cents: number): string =>
   new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 })
     .format(cents / 100);
@@ -180,6 +204,7 @@ export function buildMonthlyReport(
   let excludedCount = 0;
   let overdueCents = 0;
   let overdueCount = 0;
+  let overdueNotClaimableCount = 0;
   let previousOverdueCents = 0;
   const previous = previousMonthKey(month);
 
@@ -189,13 +214,43 @@ export function buildMonthlyReport(
   const medianWindowStart = shiftMonthKey(month, -(MEDIAN_WINDOW_MONTHS - 1));
   const windowAmounts: number[] = [];
 
+  // L'ENCOURS ÉCHU se compte en UN SEUL endroit, pour le mois analysé comme
+  // pour sa référence. Deux chemins séparés — l'un pour les ventes, l'autre
+  // pour les écritures exigibles qui n'en sont pas — auraient nourri le mois
+  // courant sans nourrir le précédent : la référence sous-évaluée gonfle
+  // `growth`, et la règle `impayes_en_hausse` se déclenche sur un artefact
+  // comptable. C'est-à-dire qu'elle pousse à relancer, exactement ce que ce
+  // ticket ferme.
+  const countOverdue = (invoiceMonth: string | null, claimable: number): void => {
+    if (claimable <= 0) return;
+    if (invoiceMonth === month) {
+      overdueCents += claimable;
+      overdueCount += 1;
+    } else if (invoiceMonth === previous) {
+      previousOverdueCents += claimable;
+    }
+  };
+
   for (const invoice of invoices) {
+    const overdue = invoice.status ? OVERDUE_STATUSES.has(invoice.status) : false;
     // UNE seule séquence de décisions, partagée avec la prévision (3.1) :
     // brouillon/annulée, avoir, devise étrangère, montant ou date illisible.
     const normalized = normalizeSaleInvoice(invoice);
     if (!normalized.ok) {
       if (normalized.reason === "exclue" || normalized.reason === "non_positif") {
         excludedCount += 1;
+        // Une écriture peut n'être PAS une vente et porter quand même un
+        // solde exigible : c'est le cas d'une levée de réserves comptabilisée
+        // sous sa propre pièce (montant facturé NUL, 500 € redevenus dus).
+        // La laisser sortir ici la rangeait parmi les brouillons et avoirs,
+        // et l'encours du rapport contredisait celui du connecteur pour la
+        // même donnée. Elle n'entre pas au CA — mais elle est bien due.
+        //
+        // Montant NUL, et pas « non positif » : un avoir (montant négatif)
+        // ne devient pas un impayé parce qu'il porterait un solde.
+        const zeroAmount =
+          invoice.amount != null && euroToCents(String(invoice.amount)) === 0;
+        if (zeroAmount && overdue) countOverdue(monthOf(invoice.date), claimableCents(invoice, 0));
       } else {
         unusableCount += 1;
       }
@@ -211,19 +266,22 @@ export function buildMonthlyReport(
     // retenues), et sur une fenêtre bornée — pas sur tout ce qui a été lu.
     if (invoiceMonth <= month && invoiceMonth >= medianWindowStart) windowAmounts.push(cents);
 
-    const overdue = invoice.status ? OVERDUE_STATUSES.has(invoice.status) : false;
+    // La part exigible : une retenue de garantie (4117, US-8) est due mais pas
+    // encore réclamable — la compter ferait monter « les impayés » sans qu'un
+    // seul client soit en retard. Le CA, lui, garde le montant du marché.
+    const claimable = claimableCents(invoice, cents);
     if (invoiceMonth === month) {
       monthInvoices.push({
         cents,
         customerId: invoice.customer?.id ?? "",
         customerName: invoice.customer?.name ?? null,
       });
-      if (overdue) {
-        overdueCents += cents;
-        overdueCount += 1;
-      }
+      // Sortie d'un compteur SANS un mot, c'est une donnée qui disparaît :
+      // une facture échue dont il ne reste que la retenue n'est pas un
+      // impayé, mais elle n'est pas non plus « rien ».
+      if (overdue && claimable <= 0) overdueNotClaimableCount += 1;
     }
-    if (invoiceMonth === previous && overdue) previousOverdueCents += cents;
+    if (overdue) countOverdue(invoiceMonth, claimable);
   }
 
   const current = byMonth.get(month) ?? { cents: 0, count: 0 };
@@ -401,6 +459,7 @@ export function buildMonthlyReport(
     invoiceCount: current.count,
     overdueCents,
     overdueCount,
+    overdueNotClaimableCount,
     referenceRevenueCents,
     referenceMonths: history.length,
     topCustomer,

@@ -30,6 +30,7 @@
     "@nodaq/facturx": "workspace:*"
   },
   "devDependencies": {
+    "@nodaq/mcp-actions": "workspace:*",
     "@types/mailparser": "^3.4.6",
     "@types/web-push": "^3.6.4",
     "tsx": "^4.19.2",

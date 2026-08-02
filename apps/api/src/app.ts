@@ -793,20 +793,61 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
    */
 
   // Métadonnées du dernier import — visibles de tout membre (compteurs only).
+  // Les avertissements sont stockés en Json : une forme inattendue dégrade en
+  // liste vide, jamais en 500 sur l'écran Connecteurs.
+  const FecWarnings = z.array(z.string()).catch([]);
   app.get("/connectors/fec", { preHandler: businessRoute }, async (request) => {
-    const lastImport = await withTenant(request.tenantId, (tx) =>
-      tx.fecImport.findFirst({
+    // Métadonnées et retenues LUES ENSEMBLE, dans la MÊME transaction : deux
+    // lectures séparées peuvent encadrer un import concurrent et afficher les
+    // compteurs d'un import avec les retenues d'un autre.
+    const { lastImport } = await withTenant(request.tenantId, async (tx) => {
+      const last = await tx.fecImport.findFirst({
         orderBy: { importedAt: "desc" },
         select: {
+          id: true,
           importedAt: true,
           fileName: true,
           entryCount: true,
           invoiceCount: true,
           overdueCount: true,
+          // Les avertissements portent les LIMITES de la dérivation (retenue
+          // non rattachable, par exemple : elle reste comptée en impayé). Ne
+          // les rendre qu'au moment de l'import les ferait disparaître au
+          // premier rechargement, juste là où ils changent le chiffre lu.
+          // Compteurs uniquement — jamais une ligne du journal (2.14).
+          warnings: true,
+          // Retenues EN COURS (US-8) : le SOLDE du compte 4117, calculé à
+          // l'import. Ré-agréger les retenues par facture raterait les
+          // libérations comptabilisées sous leur propre pièce et annoncerait
+          // « en cours » des sommes déjà encaissées.
+          retainedCents: true,
         },
-      }),
-    );
-    return { imported: lastImport !== null, lastImport };
+      });
+      return { lastImport: last };
+    });
+    const { id: _importId, retainedCents, warnings, ...lastImportPublic } = lastImport ?? {};
+    return {
+      imported: lastImport !== null,
+      lastImport: lastImport
+        ? { ...lastImportPublic, warnings: FecWarnings.parse(warnings) }
+        : null,
+      retention: {
+        // PAS de nombre de factures : une libération comptabilisée sous une
+        // autre pièce n'est rattachable à aucune facture, donc « 1 000 € en
+        // cours (2 factures concernées) » peut compter une facture dont la
+        // retenue est déjà encaissée. Le solde du compte, lui, est juste — il
+        // reste la seule vérité affichée.
+        // Le MONTANT est une créance en euros : owner-only, comme
+        // `overdueCents` (volontairement absent de cette route), la marge et
+        // le rapport mensuel. Le FAIT, lui, est dit à tout membre — le taire
+        // le ramènerait au geste qu'on veut éviter : relancer ces lignes.
+        totalCents: request.membershipRole === "owner" ? Number(retainedCents ?? 0n) : null,
+        inProgress: (retainedCents ?? 0n) > 0n,
+        // La date de libération est CONTRACTUELLE : elle n'est nulle part
+        // dans un FEC. On ne l'invente pas — la saisir est un ticket à part.
+        releaseDateKnown: false,
+      },
+    };
   });
 
   // Le parser binaire est CANTONNÉ à cette route (plugin encapsulé) : le
@@ -901,6 +942,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
                   invoiceCount: derivation.invoices.length,
                   overdueCount: derivation.overdueCount,
                   overdueCents: BigInt(derivation.overdueCents),
+                  // Solde du compte 4117 (US-8) — jamais la somme des
+                  // retenues par facture : une libération sous sa propre
+                  // pièce n'est rattachable à aucune facture.
+                  retainedCents: BigInt(derivation.retainedCents),
                   warnings,
                 },
               });
@@ -917,6 +962,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
                     dueDate: new Date(`${invoice.dueDate}T00:00:00Z`),
                     amountCents: BigInt(invoice.amountCents),
                     residualCents: BigInt(invoice.residualCents),
+                    // Retenue de garantie (US-8) : conservée à part, jamais
+                    // fondue dans le solde exigible.
+                    retainedCents: BigInt(invoice.retainedCents),
                     settled: invoice.settled,
                   })),
                 });

@@ -70,6 +70,57 @@ données (France/UE), architecture agentique, multi-tenant strict. Voir
 > effacés, compteurs gardés) ; la file affiche provenance + lignes + non
 > reconnues avant validation ; corps jamais logué ni renvoyé
 > (`docs/devis-email.md`).
+> **Retenue de garantie (US-8 / 2.20)** : `4117` (« Clients — Retenues de
+> garantie ») est une SUBDIVISION de `411` — la dérivation des créances (2.14)
+> filtrait sur `411` et l'embarquait : montant facturé gonflé de 5 %, facture
+> laissée ouverte (retenue non lettrée par nature), et comptée en impayé donc
+> CANDIDATE À UNE RELANCE. Relancer un bon client sur sa retenue est la faute
+> qui coûte le plus cher devant un artisan. `classifyReceivableAccount`
+> (config versionnée datée sourcée PCG, `receivableAccounts.ts`, préfixe le
+> plus long gagnant) sépare `retenue`|`client`|`hors_clients` ; `settled` jugé
+> sur les seules lignes EXIGIBLES, `residualCents` hors retenue,
+> `retainedCents` conservé et AFFICHÉ à part. `amountCents` = le montant du
+> MARCHÉ sous les DEUX conventions : retenue transférée après coup (déjà
+> carvée du débit 411, l'additionner comptait 5 % deux fois) OU portée dès la
+> facture (débit 411 net + débit 4117 dans la MÊME écriture — ne sommer que
+> le 411 amputait le CA et faisait déduire la retenue une SECONDE fois en
+> aval). Discriminant = l'ÉCRITURE, pas la pièce : contrepartie de même
+> MONTANT (un escompte n'est pas un transfert) ; le reclassement de la
+> libération n'est pas une vente. AUCUN rattachement entre regroupements, même
+> sans compte AUXILIAIRE : une retenue n'est reconnue que DANS un regroupement (client,
+> pièce), où le tiers est acquis par construction. Trois versions de
+> rattachement inter-pièces ont été prises en défaut sur un montage réel,
+> TOUJOURS dans le même sens (une créance disparaît ou change de client) —
+> sous un plan « 411 + code client », RIEN ne distingue `41170003` (client
+> n° 70003) d'un compte de retenue : ni le préfixe, ni la forme de l'écriture,
+> ni la contrepartie. L'inférence EST le défaut, et le coût des deux erreurs
+> n'est pas symétrique : ne pas reconnaître laisse la retenue dans les impayés
+> (visible, SIGNALÉ) ; reconnaître à tort fait disparaître un dû (muet). Sans
+> auxiliaire on s'abstient donc, et on le DIT ; levée des réserves sous sa
+> propre pièce = pièce à montant facturé NUL (hors CA) mais solde exigible à
+> SA date — la recoller à la facture lui donnait l'échéance de la facture, donc
+> un « retard de 146 jours » le jour de son enregistrement ; total des retenues
+> = SOLDE du compte 4117 — lignes RECONNUES, plus les seules SORTIES du même
+> compte (un débit non reconnu est déjà dans les impayés : l'ajouter comptait
+> deux fois). Une sortie saisie sans auxiliaire revient au SEUL tiers reconnu
+> du compte — et seulement si ce compte ne porte AUCUNE autre retenue non
+> reconnue, sinon on ne compense pas et on le DIT (le seul rattachement
+> inter-regroupement qui subsiste, et il a son plancher de preuve) — planché
+> par seau (compte auxiliaire s'il existe, sinon le
+> compte — limite DITE quand le risque est réel)
+> (`fec_imports.retained_cents`), jamais la somme par facture — une
+> libération sous sa propre pièce annoncerait sinon « en cours » des sommes
+> encaissées ; cause NON devinée quand une ligne
+> 4117 n'a aucune créance 411 dans sa pièce (compte client en 4117xxxx ou
+> retenue orpheline : on dit le fait et sa conséquence) ; montant des retenues
+> OWNER-ONLY sur la route (créance en euros), le fait reste dit aux membres. La garde ne s'arrête pas au FEC : `retained_amount`
+> ET `residual_amount` à côté de `amount`, `claimableCents` = UNIQUE décision
+> de ce qu'on peut réclamer (le solde connu fait foi, la retenue n'y est pas
+> redéduite), `draft_dunning` refuse avec un motif VRAI, encours échu du
+> rapport mensuel sur l'exigible + `overdueNotClaimableCount` DIT. Date de
+> libération JAMAIS inventée (contractuelle, absente du FEC —
+> `releaseDateKnown: false`) ; test BLOQUANT bout en bout : facture soldée hors
+> retenue => statut `paid`, aucune relance (`docs/fec-import.md`).
 > **Marge (2.8)** : le ticket que 2.11 avait refusé de faire à moitié. Le
 > danger est ASYMÉTRIQUE — une charge oubliée fait TOUJOURS paraître la marge
 > meilleure. Règle centrale : une base de charges incomplète ne produit PAS un
