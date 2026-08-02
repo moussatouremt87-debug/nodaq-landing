@@ -1873,6 +1873,38 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return { movements };
   });
 
+  const readModuleState = async (tenantId: string) => {
+    const profile = await withTenant(tenantId, (tx) =>
+      tx.tenantProfile.findFirst({
+        select: { vertical: true, moduleOverrides: true },
+      }),
+    );
+    const vertical = (VERTICALS as readonly string[]).includes(profile?.vertical ?? "")
+      ? (profile?.vertical as (typeof VERTICALS)[number])
+      : "autre";
+    const overrides =
+      profile?.moduleOverrides !== null &&
+      typeof profile?.moduleOverrides === "object" &&
+      !Array.isArray(profile?.moduleOverrides)
+        ? (profile?.moduleOverrides as Record<string, unknown>)
+        : {};
+    return { vertical, overrides };
+  };
+
+  /**
+   * Un module du catalogue 3.11 est-il actif pour ce tenant ?
+   *
+   * Le toolset de l'agent filtre déjà les outils d'un module éteint, donc les
+   * KPI qui passent par lui dégradent tout seuls. Ce qui est calculé EN DIRECT
+   * (SQL, service) n'a pas ce filet : sans cette garde, une alerte de stock
+   * s'afficherait encore au cockpit d'un tenant qui a éteint le module.
+   * Fail-open comme le reste du 3.11 : sans profil, on lit les défauts.
+   */
+  const isModuleActive = async (tenantId: string, moduleId: string): Promise<boolean> => {
+    const { vertical, overrides } = await readModuleState(tenantId);
+    return resolveModules(vertical, overrides).find((m) => m.id === moduleId)?.active ?? false;
+  };
+
   /**
    * Cockpit v0 (ticket 1.7) — KPIs of the virtual employees' work. Counts are
    * metadata-only (visible to every member); the treasury forecast is the
@@ -1895,11 +1927,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     // Alertes stock (3.2) — métadonnée non financière, visible de tout membre.
     // Compté côté SQL (comparaison colonne à colonne, RLS scelle au tenant) :
     // jamais une troncature silencieuse du compteur.
-    const stockAlertRows = await withTenant(request.tenantId, (tx) =>
-      tx.$queryRaw<{ count: number }[]>`
+    // Module éteint (3.11) => aucune alerte affichée : ce compteur est calculé
+    // en SQL direct, il ne passe pas par le toolset qui filtre les outils.
+    const stocksOn = await isModuleActive(request.tenantId, "stocks");
+    const stockAlertRows = stocksOn
+      ? await withTenant(request.tenantId, (tx) =>
+          tx.$queryRaw<{ count: number }[]>`
         SELECT count(*)::int AS count FROM stock_items
         WHERE alert_threshold > 0 AND quantity <= alert_threshold`,
-    );
+        )
+      : [];
     const stockAlerts = stockAlertRows[0]?.count ?? 0;
 
     // Treasury via the SAME tenant-bound toolset as the agent (read-only,
@@ -4196,23 +4233,6 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // surface produit, PAS une frontière de sécurité : les autorisations des
   // routes restent inchangées, seuls nav et outils agent suivent.
 
-  const readModuleState = async (tenantId: string) => {
-    const profile = await withTenant(tenantId, (tx) =>
-      tx.tenantProfile.findFirst({
-        select: { vertical: true, moduleOverrides: true },
-      }),
-    );
-    const vertical = (VERTICALS as readonly string[]).includes(profile?.vertical ?? "")
-      ? (profile?.vertical as (typeof VERTICALS)[number])
-      : "autre";
-    const overrides =
-      profile?.moduleOverrides !== null &&
-      typeof profile?.moduleOverrides === "object" &&
-      !Array.isArray(profile?.moduleOverrides)
-        ? (profile?.moduleOverrides as Record<string, unknown>)
-        : {};
-    return { vertical, overrides };
-  };
 
   app.get("/modules", { preHandler: businessRoute }, async (request) => {
     const { vertical, overrides } = await readModuleState(request.tenantId);

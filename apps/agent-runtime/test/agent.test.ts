@@ -173,6 +173,30 @@ beforeEach(() => {
   script = [];
 });
 
+/**
+ * Active TOUS les modules du catalogue pour ce tenant.
+ *
+ * Depuis le pivot (ADR-007), une partie du catalogue est HORS SOCLE : éteinte
+ * par défaut. Les tests ci-dessous portent sur le gate de RÔLE et sur la
+ * dérive de nommage des outils — pas sur les défauts produit. Ils doivent donc
+ * dire explicitement dans quel état de modules ils se placent, sinon ils
+ * changeront de sens au prochain arbitrage produit.
+ */
+async function enableAllModules(): Promise<void> {
+  const overrides = Object.fromEntries(MODULES.map((module) => [module.id, true]));
+  await withTenant(tenantId, (tx) =>
+    tx.tenantProfile.upsert({
+      where: { tenantId },
+      create: { tenantId, moduleOverrides: overrides },
+      update: { moduleOverrides: overrides },
+    }),
+  );
+}
+
+async function clearModuleOverrides(): Promise<void> {
+  await withTenant(tenantId, (tx) => tx.tenantProfile.deleteMany({}));
+}
+
 describe("ComptaAgent — the full loop", () => {
   it("PROVENANCE + HITL + SOVEREIGNTY in one conversation", async () => {
     // The (adversarial) model injects a foreign tenantId into every tool call.
@@ -266,6 +290,9 @@ describe("ComptaAgent — the full loop", () => {
   });
 
   it("owner-only tools are filtered out of a non-owner toolset (fail-closed)", async () => {
+    // Modules TOUS actifs : ce test isole le gate de rôle.
+    await enableAllModules();
+    try {
     for (const [role, expected] of [
       ["owner", true],
       ["member", false],
@@ -288,18 +315,29 @@ describe("ComptaAgent — the full loop", () => {
       }
       await toolset.close();
     }
+    } finally {
+      await clearModuleOverrides();
+    }
   });
 
   it("catalogue 3.11 : chaque outil référencé par un module EXISTE côté MCP (pas de dérive)", async () => {
     // Un renommage d'outil MCP non répercuté au catalogue échouerait en
     // silence côté OUVERT (module « désactivé » mais outil toujours exposé) :
     // ce test échoue sur tout nom orphelin.
-    const toolset = await buildToolset({ tenantId, secretProvider: vault, role: "owner" });
-    const names = new Set(toolset.definitions.map((d) => d.name));
-    for (const tool of MODULES.flatMap((module) => module.tools)) {
-      expect(names.has(tool), `outil de catalogue inconnu côté MCP : ${tool}`).toBe(true);
+    // TOUS les modules actifs : un module éteint retirerait ses outils du
+    // toolset et le test ne prouverait plus rien sur eux — un renommage
+    // passerait alors inaperçu précisément là où le code dort.
+    await enableAllModules();
+    try {
+      const toolset = await buildToolset({ tenantId, secretProvider: vault, role: "owner" });
+      const names = new Set(toolset.definitions.map((d) => d.name));
+      for (const tool of MODULES.flatMap((module) => module.tools)) {
+        expect(names.has(tool), `outil de catalogue inconnu côté MCP : ${tool}`).toBe(true);
+      }
+      await toolset.close();
+    } finally {
+      await clearModuleOverrides();
     }
-    await toolset.close();
   });
 
   it("module désactivé (3.11) : ses outils sortent du toolset, fail-open sans profil", async () => {
@@ -315,12 +353,14 @@ describe("ComptaAgent — the full loop", () => {
     try {
       const toolset = await buildToolset({ tenantId, secretProvider: vault, role: "owner" });
       const names = toolset.definitions.map((d) => d.name);
-      for (const tool of ["plan_staffing", "silae_get_employees", "check_stock_alerts", "adjust_stock"]) {
+      // `silae_get_*` appartient désormais au module `silae` (hors socle) :
+      // l'inclure ici ferait passer le test pour une AUTRE raison que le gate
+      // testé. On ne garde que les outils réellement portés par rh et stocks.
+      for (const tool of ["plan_staffing", "analyze_hourly_performance", "check_stock_alerts", "adjust_stock"]) {
         expect(names.includes(tool)).toBe(false);
         await expect(toolset.execute(tool, {})).rejects.toThrow(/unknown tool/);
       }
-      // Les modules restés actifs et le cœur compta ne bougent pas.
-      expect(names).toContain("check_regulatory_watch");
+      // Le cœur compta, qui n'est pas un module, ne bouge pas.
       expect(names).toContain("compute_treasury_forecast");
       await toolset.close();
     } finally {

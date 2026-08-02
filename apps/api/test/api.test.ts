@@ -676,11 +676,45 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
       expect(kpis.treasury).toMatchObject({ account: "main", currentBalanceCents: 500_000 });
       expect(kpis.treasury?.points.map((p) => p.horizonDays)).toEqual([30, 60, 90]);
       expect(typeof kpis.treasury?.points[0]?.projectedBalanceCents).toBe("number");
-      // Prévision des ventes (3.1) : 12 mois d'historique démo => régression.
-      expect(kpis.sales).toMatchObject({ method: "regression-lineaire" });
-      expect(kpis.sales?.observedMonths).toBeGreaterThanOrEqual(12);
-      expect(kpis.sales?.points).toHaveLength(3);
-      expect(kpis.sales?.points.every((p) => p.revenueCents > 0)).toBe(true);
+      // Prévision des ventes (3.1) : HORS SOCLE depuis le pivot (ADR-007) —
+      // la carte ne s'affiche plus par défaut, et son absence passe par la
+      // dégradation normale (outil retiré du toolset), pas par une erreur.
+      expect(kpis.sales).toBeNull();
+
+      // …mais elle est intacte : l'owner rallume le module et la carte revient
+      // avec EXACTEMENT la forme que parse le cockpit web (apps/web/lib/api.ts
+      // CockpitKpis) — un renommage doit casser ce test.
+      await execApp.inject({
+        method: "PUT",
+        url: "/modules/prevision_ventes",
+        headers: { cookie: cookieA },
+        payload: { active: true },
+      });
+      const withSales = (
+        await execApp.inject({
+          method: "GET",
+          url: "/cockpit/kpis",
+          headers: { cookie: cookieA },
+        })
+      ).json() as {
+        sales: {
+          observedMonths: number;
+          method: string;
+          points: { month: string; revenueCents: number }[];
+        } | null;
+      };
+      expect(withSales.sales).toMatchObject({ method: "regression-lineaire" });
+      expect(withSales.sales?.observedMonths).toBeGreaterThanOrEqual(12);
+      expect(withSales.sales?.points).toHaveLength(3);
+      // Un renommage de `revenueCents` doit casser ce test : c'est ce que le
+      // cockpit web parse.
+      expect(withSales.sales?.points.every((p) => p.revenueCents > 0)).toBe(true);
+      await execApp.inject({
+        method: "PUT",
+        url: "/modules/prevision_ventes",
+        headers: { cookie: cookieA },
+        payload: { active: false },
+      });
 
       // A MEMBER of the same tenant sees the counts but NOT the treasury.
       const cookieM2 = await signup("cockpit-membre@example.com", "Cockpit Membre");

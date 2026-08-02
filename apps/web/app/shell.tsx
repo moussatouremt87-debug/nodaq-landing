@@ -156,7 +156,13 @@ export function Shell({ children }: { children: ReactNode }) {
     getModules()
       .then((state) =>
         setInactiveHrefs(
-          new Set(state.modules.filter((m) => !m.active).map((m) => m.href)),
+          // Un module sans page (outils d'agent ou carte cockpit seulement)
+          // n'a pas de href : rien à masquer dans la nav.
+          new Set(
+            state.modules
+              .filter((m) => !m.active && m.href !== undefined)
+              .map((m) => m.href as string),
+          ),
         ),
       )
       .catch(() => setInactiveHrefs(new Set()));

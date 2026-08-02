@@ -1282,7 +1282,9 @@ export const ModuleStates = z.object({
       id: z.string(),
       title: z.string(),
       description: z.string(),
-      href: z.string(),
+      /** Absent pour un module sans page à lui (outils d'agent ou carte
+       * cockpit seulement) — la nav n'a alors rien à masquer. */
+      href: z.string().optional(),
       active: z.boolean(),
       source: z.string().optional(),
     }),

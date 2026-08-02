@@ -133,6 +133,18 @@ beforeAll(async () => {
     payload: { organizationId: orgId },
   });
 
+  // PIVOT (ADR-007) : le module `stocks` est HORS SOCLE — éteint par défaut.
+  // Ces tests portent sur la doctrine du cockpit conversationnel (refus
+  // motivés, gating de champ), pas sur les défauts produit : ils disent donc
+  // explicitement dans quel état de modules ils se placent.
+  const moduleOn = await app.inject({
+    method: "PUT",
+    url: "/modules/stocks",
+    headers: { cookie: ownerCookie },
+    payload: { active: true },
+  });
+  expect(moduleOn.statusCode).toBe(200);
+
   // Données réelles du tenant : deux articles en stock.
   await admin.stockItem.createMany({
     data: [
@@ -290,5 +302,36 @@ describe("cockpit conversationnel", () => {
       payload: { question: "Bonjour" },
     });
     expect(res.headers["cache-control"]).toBe("private, no-store");
+  });
+
+  it("module éteint : le chat REFUSE le jeu de données, avec un motif", async () => {
+    // La page et les outils d'un module éteint disparaissent — le chat, lui,
+    // garde `query_business_data` (outil du cœur). Sans gating du catalogue,
+    // il resterait une porte ouverte sur un module désactivé.
+    const off = await app.inject({
+      method: "PUT",
+      url: "/modules/stocks",
+      headers: { cookie: ownerCookie },
+      payload: { active: false },
+    });
+    expect(off.statusCode).toBe(200);
+    try {
+      nextToolCall = {
+        name: "query_business_data",
+        args: { dataset: "stocks", aggregate: "count" },
+      };
+      await ask("Combien d'articles en stock au total ?", ownerCookie);
+      // Un REFUS motivé, jamais un zéro qui se lirait « vous n'avez pas de
+      // stock » alors que les articles sont bien là.
+      expect(sawToolResult).toContain("refused");
+      expect(sawToolResult).toContain("désactivé");
+    } finally {
+      await app.inject({
+        method: "PUT",
+        url: "/modules/stocks",
+        headers: { cookie: ownerCookie },
+        payload: { active: true },
+      });
+    }
   });
 });

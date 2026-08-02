@@ -74,6 +74,20 @@ beforeAll(async () => {
     headers: { cookie: memberCookie },
     payload: { organizationId: orgA },
   });
+
+  // PIVOT (ADR-007) : ce module est HORS SOCLE — éteint par défaut. Il n'est
+  // ni supprimé ni cassé, et ce test le prouve : l'owner le rallume en un
+  // appel, et la fonctionnalité répond exactement comme avant.
+  const moduleOn = await app.inject({
+    method: "PUT",
+    url: "/modules/stocks",
+    headers: { cookie: ownerCookie },
+    payload: { active: true },
+  });
+  // Asserté : un renommage de module ferait sinon un no-op silencieux, et
+  // l'échec ressortirait bien plus loin, illisible.
+  expect(moduleOn.statusCode).toBe(200);
+
 }, 60_000);
 
 afterAll(async () => {
@@ -359,5 +373,52 @@ describe("référentiel /stocks", () => {
     const untouched = await admin.stockItem.findUnique({ where: { id: foreign.id } });
     expect(untouched?.quantity).toBe(77);
     expect(await admin.stockMovement.count({ where: { itemId: foreign.id } })).toBe(0);
+  });
+
+  it("module éteint : le cockpit n'annonce plus d'alerte de stock", async () => {
+    // Ce compteur est calculé en SQL DIRECT : il ne passe pas par le toolset
+    // qui filtre les outils d'un module éteint. Sans garde explicite, une
+    // alerte s'afficherait encore au cockpit d'un tenant qui a désactivé le
+    // module — c'est le trou trouvé par le pivot (ADR-007).
+    const readAlerts = async (): Promise<number> =>
+      (
+        await app.inject({
+          method: "GET",
+          url: "/cockpit/kpis",
+          headers: { cookie: ownerCookie },
+        })
+      ).json().stockAlerts as number;
+
+    // Article sous son seuil, créé ici : ce test ne dépend pas de l'état
+    // laissé par ses voisins.
+    const item = await app.inject({
+      method: "POST",
+      url: "/stocks",
+      headers: { cookie: ownerCookie, "content-type": "application/json" },
+      payload: { name: `Alerte cockpit ${RUN}`, unit: "u", alertThreshold: 5 },
+    });
+    expect(item.statusCode).toBe(201);
+    const before = await readAlerts();
+    expect(before).toBeGreaterThan(0);
+
+    const off = await app.inject({
+      method: "PUT",
+      url: "/modules/stocks",
+      headers: { cookie: ownerCookie },
+      payload: { active: false },
+    });
+    expect(off.statusCode).toBe(200);
+    try {
+      expect(await readAlerts()).toBe(0);
+    } finally {
+      await app.inject({
+        method: "PUT",
+        url: "/modules/stocks",
+        headers: { cookie: ownerCookie },
+        payload: { active: true },
+      });
+    }
+    // Rallumé, le compteur retrouve sa valeur : aucune donnée n'a été perdue.
+    expect(await readAlerts()).toBe(before);
   });
 });

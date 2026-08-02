@@ -97,12 +97,18 @@ async function connectInMemory(server: McpServer): Promise<Client> {
 }
 
 /**
- * Tools carried by modules the tenant deactivated (3.11): resolved from the
- * versioned catalog (vertical default + owner overrides in tenant_profiles).
- * Fail-open: no profile row = pure vertical defaults for "autre" (everything
- * on) — a missing profile must never amputate the agent.
+ * Modules the tenant deactivated (3.11), and the tools they carry: resolved
+ * from the versioned catalog (defaults + owner overrides in tenant_profiles).
+ *
+ * Fail-open: no profile row = catalog defaults for "autre", so the CORE
+ * answers — a missing profile must never amputate the agent. It does NOT
+ * light up out-of-core modules (ADR-007): their deactivation is a product
+ * decision, not a configuration accident.
  */
-async function moduleFilteredTools(tenantId: string): Promise<Set<string>> {
+async function resolveTenantModules(tenantId: string): Promise<{
+  disabledTools: Set<string>;
+  inactiveModules: string[];
+}> {
   const profile = await withTenant(tenantId, (tx) =>
     tx.tenantProfile.findFirst({
       select: { vertical: true, moduleOverrides: true },
@@ -117,18 +123,28 @@ async function moduleFilteredTools(tenantId: string): Promise<Set<string>> {
     !Array.isArray(profile?.moduleOverrides)
       ? (profile?.moduleOverrides as Record<string, unknown>)
       : {};
-  return inactiveModuleTools(resolveModules(vertical, overrides));
+  const resolved = resolveModules(vertical, overrides);
+  return {
+    disabledTools: inactiveModuleTools(resolved),
+    // Les IDENTIFIANTS de modules éteints, pas seulement leurs outils : le
+    // cockpit conversationnel (2.5) en retire ses jeux de données, qui ne
+    // sont pas des outils et n'auraient donc rien vu passer.
+    inactiveModules: resolved.filter((module) => !module.active).map((module) => module.id),
+  };
 }
 
 export async function buildToolset(context: ToolsetContext): Promise<Toolset> {
   const tenantId = TenantId.parse(context.tenantId);
-  const serverContext = { ...context, tenantId };
+  // Résolu AVANT la construction des serveurs : le serveur d'actions a besoin
+  // des modules éteints à la construction (la description du catalogue 2.5
+  // est figée dans le schéma de l'outil).
+  const { disabledTools, inactiveModules } = await resolveTenantModules(tenantId);
+  const serverContext = { ...context, tenantId, inactiveModules };
 
   const connectorsClient = await connectInMemory(createConnectorsMcpServer(serverContext));
   const actionsClient = await connectInMemory(createActionsMcpServer(serverContext));
 
   const isOwner = context.role === "owner";
-  const disabledTools = await moduleFilteredTools(tenantId);
   const routing = new Map<string, Client>();
   const definitions: ToolDefinition[] = [];
   for (const [client, source] of [
