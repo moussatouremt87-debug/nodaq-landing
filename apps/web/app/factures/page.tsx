@@ -9,6 +9,7 @@ import {
   proposeEReporting,
 } from "../../lib/api";
 import type { EInvoiceSubmission, EReportingPreview } from "../../lib/api";
+import { emitDomainEvent } from "../../lib/freshness";
 
 /*
  * Factures électroniques (2.4) — owner only : numéros, montants et statuts de
@@ -111,6 +112,7 @@ export default function FacturesPage() {
       });
       setNotice("Transmission proposée — à valider dans la file de validation.");
       await refresh();
+      emitDomainEvent("action.preparee");
     } catch (err) {
       setNotice(
         err instanceof ApiError && err.status === 409

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, getModules, setModule } from "../../../lib/api";
+import { emitDomainEvent } from "../../../lib/freshness";
 import type { ModuleStates } from "../../../lib/api";
 
 /*
@@ -35,6 +36,9 @@ export default function ModulesPage() {
     try {
       await setModule(id, active);
       await refresh();
+      // La nav et le cockpit changent de forme : ils doivent suivre sans que
+      // l'utilisateur ait à recharger la page (pivot ADR-007).
+      emitDomainEvent("module.bascule");
     } catch (err) {
       setError(
         err instanceof ApiError && err.status === 403

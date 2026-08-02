@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, COST_CATEGORIES, getMargin, putCost } from "../../lib/api";
+import { emitDomainEvent } from "../../lib/freshness";
 import type { MarginReport } from "../../lib/api";
 
 /*
@@ -64,6 +65,7 @@ export default function MargePage() {
       await putCost({ month, category, amountCents: Math.round(amount * 100) });
       setAmounts((previous) => ({ ...previous, [category]: "" }));
       await load(month);
+      emitDomainEvent("cout.modifie");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "enregistrement impossible");
     }

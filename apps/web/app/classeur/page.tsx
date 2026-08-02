@@ -12,6 +12,7 @@ import {
   matchClasseurDocument,
   uploadClasseurDocument,
 } from "../../lib/api";
+import { emitDomainEvent } from "../../lib/freshness";
 import type {
   ClasseurCorrection,
   ClasseurDocument,
@@ -138,6 +139,9 @@ export default function ClasseurPage() {
       );
       refresh();
       select(outcome.document);
+      // Une pièce de plus au classeur : le cockpit la compte, cet écran n'est
+      // pas le seul concerné.
+      emitDomainEvent("document.ajoute");
     } catch (error) {
       if (error instanceof ApiError && error.status === 415) {
         setNotice("Format non pris en charge : photo JPEG, PNG ou WebP.");
@@ -168,6 +172,7 @@ export default function ClasseurPage() {
         return;
       }
       patchLocal(await correctClasseurDocument(selected.id, fields));
+      emitDomainEvent("document.modifie");
       setNotice("Corrections enregistrées — elles nourrissent l'apprentissage.");
     } catch {
       setNotice("Échec de l'enregistrement.");
@@ -181,6 +186,8 @@ export default function ClasseurPage() {
     setBusy(true);
     try {
       patchLocal(await matchClasseurDocument(selected.id, transactionId));
+      // Rapprocher (ou détacher) change ce que la trésorerie considère justifié.
+      emitDomainEvent("document.rattache");
       setNotice(transactionId ? "Document rapproché de la transaction." : "Rapprochement retiré.");
     } catch {
       setNotice("Échec du rapprochement.");
@@ -199,6 +206,8 @@ export default function ClasseurPage() {
       selectedRef.current = null;
       setForm(null);
       refresh();
+      // Supprimer une pièce RAPPROCHÉE défait aussi le rapprochement bancaire.
+      emitDomainEvent("document.modifie");
       setNotice("Document supprimé.");
     } catch (error) {
       setNotice(

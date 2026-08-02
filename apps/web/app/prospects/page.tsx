@@ -13,6 +13,7 @@ import {
   updateProspect,
 } from "../../lib/api";
 import type { Prospect, ProspectionPlan } from "../../lib/api";
+import { emitDomainEvent } from "../../lib/freshness";
 
 /*
  * Prospection (2.12). Deux choses sont visibles à l'écran parce qu'elles ne
@@ -100,6 +101,7 @@ export default function ProspectsPage() {
       setEmail("");
       setSource("");
       await refresh();
+      emitDomainEvent("prospect.modifie");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "enregistrement impossible");
     }
@@ -116,6 +118,7 @@ export default function ProspectsPage() {
     try {
       await opposeProspect(prospect.id);
       await refresh();
+      emitDomainEvent("prospect.modifie");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "opposition impossible");
     }
@@ -125,6 +128,7 @@ export default function ProspectsPage() {
     try {
       await logProspectInteraction(prospect.id, { kind, occurredAt: today() });
       await refresh();
+      emitDomainEvent("prospect.modifie");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "contact non consigné");
     }
@@ -134,6 +138,7 @@ export default function ProspectsPage() {
     try {
       await updateProspect(prospect.id, { stage });
       await refresh();
+      emitDomainEvent("prospect.modifie");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "étape non modifiée");
     }

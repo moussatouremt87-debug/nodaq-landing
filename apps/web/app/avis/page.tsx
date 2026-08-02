@@ -11,6 +11,7 @@ import {
   getReviews,
 } from "../../lib/api";
 import type { CustomerReview, ReputationReport } from "../../lib/api";
+import { emitDomainEvent } from "../../lib/freshness";
 
 /*
  * Avis clients / e-réputation (3.8). Lecture pour tous les membres ; saisie
@@ -76,6 +77,7 @@ export default function AvisPage() {
       });
       setForm({ authorName: "", rating: "5", text: "", reviewedAt: "" });
       await refresh();
+      emitDomainEvent("avis.modifie");
     } catch (err) {
       setError(
         err instanceof ApiError && err.status === 403
@@ -90,6 +92,7 @@ export default function AvisPage() {
     try {
       await deleteReview(reviewId);
       await refresh();
+      emitDomainEvent("avis.modifie");
     } catch (err) {
       setError(
         err instanceof ApiError && err.status === 403
@@ -104,6 +107,9 @@ export default function AvisPage() {
     setNotice(null);
     try {
       await draftReviewReply(reviewId);
+      // Rien n'est publié : un brouillon attend dans la file, et le badge de
+      // la nav doit le montrer tout de suite.
+      emitDomainEvent("action.preparee");
       setNotice("Brouillon déposé dans la file de validation — validez-le avant de le publier.");
     } catch {
       setError("brouillon indisponible — réessayez");

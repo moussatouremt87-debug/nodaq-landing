@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { ApiError, draftQuoteFromEmail } from "../../lib/api";
+import { emitDomainEvent } from "../../lib/freshness";
 import type { QuoteDraftResult } from "../../lib/api";
 
 /*
@@ -28,6 +29,8 @@ export default function DevisPage() {
     try {
       const outcome = await draftQuoteFromEmail(emailBody.trim(), from.trim() || undefined);
       setResult(outcome);
+      // Le devis part en file de validation, jamais au client directement.
+      emitDomainEvent("action.preparee");
       // Le contenu collé ne reste pas à l'écran une fois traité.
       setEmailBody("");
     } catch (error) {

@@ -11,6 +11,7 @@ import {
   updateFixedAsset,
 } from "../../lib/api";
 import type { FixedAsset, FixedAssetRegistry } from "../../lib/api";
+import { emitDomainEvent } from "../../lib/freshness";
 
 /*
  * Registre des immobilisations (2.19) — owner only (l'API répond 403 sinon).
@@ -74,6 +75,8 @@ export default function ImmobilisationsPage() {
       });
       setForm({ label: "", category: "materiel", inServiceDate: "", amountEur: "", durationYears: "5" });
       await refresh();
+      // La dotation aux amortissements entre dans la marge.
+      emitDomainEvent("immobilisation.modifiee");
     } catch {
       setError("création impossible");
     } finally {
@@ -83,8 +86,13 @@ export default function ImmobilisationsPage() {
 
   async function dispose(asset: FixedAsset): Promise<void> {
     const today = new Date().toISOString().slice(0, 10);
-    await updateFixedAsset(asset.id, { status: "CEDE", disposedAt: today }).catch(() => undefined);
+    const disposed = await updateFixedAsset(asset.id, { status: "CEDE", disposedAt: today })
+      .then(() => true)
+      .catch(() => false);
     await refresh();
+    // Uniquement si la cession a bien été enregistrée : périmer la marge sur
+    // un échec ferait recharger pour rien et donnerait à croire au changement.
+    if (disposed) emitDomainEvent("immobilisation.modifiee");
   }
 
   if (forbidden) {

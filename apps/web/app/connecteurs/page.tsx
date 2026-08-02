@@ -16,6 +16,7 @@ import {
   listWebhookEndpoints,
   listWebhookEvents,
 } from "../../lib/api";
+import { emitDomainEvent } from "../../lib/freshness";
 import type {
   ConnectorSummary,
   FecImportReport,
@@ -106,6 +107,7 @@ function ConnectorCard({
     try {
       await connectConnector(spec.type, values);
       setNotice("Connecté — identifiants vérifiés et stockés dans le coffre.");
+      emitDomainEvent("connecteur.modifie");
       onChanged();
     } catch (error) {
       if (error instanceof ApiError && error.status === 422) {
@@ -128,6 +130,7 @@ function ConnectorCard({
     try {
       await disconnectConnector(spec.type);
       setNotice("Déconnecté — identifiants supprimés du coffre.");
+      emitDomainEvent("connecteur.modifie");
       onChanged();
     } catch {
       setNotice("Échec de la déconnexion.");
@@ -219,6 +222,9 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
         retention: { totalCents: 0, releaseDateKnown: false, inProgress: false },
       });
       setNotice("Données importées supprimées.");
+      // Purge, pas import : même portée de vues, autre intention. Un nom
+      // d'événement qui ment finit par tromper celui qui lit la config.
+      emitDomainEvent("fec.purge");
       onChanged();
     } catch (error) {
       setNotice(
@@ -245,6 +251,7 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
           : null,
       );
       refresh();
+      emitDomainEvent("fec.importe");
       onChanged();
     } catch (error) {
       if (error instanceof FecInvalidError) {

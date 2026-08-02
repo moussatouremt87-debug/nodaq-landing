@@ -10,6 +10,7 @@ import {
   putTaxDeadline,
 } from "../../lib/api";
 import type { FiscalProfile, TaxDeadline, TaxSchedule } from "../../lib/api";
+import { emitDomainEvent } from "../../lib/freshness";
 
 /*
  * Échéancier fiscal & social (2.9) — owner only : le régime fiscal et les
@@ -85,6 +86,7 @@ function DeadlineRow({
         status,
         note: note.trim() === "" ? null : note.trim(),
       });
+      emitDomainEvent("echeance.modifiee");
       onSaved();
     } finally {
       setBusy(false);
@@ -177,6 +179,9 @@ export default function EcheancierPage() {
         payrollPeriodicity: next.payrollPeriodicity ?? profile.payrollPeriodicity,
       });
       await refresh();
+      // Le régime change les échéances calculées : le cockpit affiche la
+      // prochaine, il ne peut pas rester sur l'ancienne.
+      emitDomainEvent("echeance.modifiee");
     } catch {
       setError("enregistrement impossible");
     }

@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { ApiError, getMe, getModules, listPendingActions } from "../lib/api";
+import { subscribeView } from "../lib/freshness";
 import type { Me } from "../lib/api";
 
 /*
@@ -141,17 +142,26 @@ export function Shell({ children }: { children: ReactNode }) {
   }, [onLogin, pathname, router]);
 
   // Badge « N » sur la file de validation — métadonnées seulement (count).
-  useEffect(() => {
+  const loadPendingCount = useCallback(() => {
     if (onLogin || me === null) return;
     listPendingActions()
       .then((actions) => setPendingCount(actions.filter((a) => a.status === "pending").length))
       .catch(() => undefined);
-  }, [onLogin, me, pathname]);
+  }, [onLogin, me]);
+
+  useEffect(() => {
+    loadPendingCount();
+  }, [loadPendingCount, pathname]);
+
+  // Le compteur le plus visible du produit est dans la NAV, pas dans une page :
+  // sans cet abonnement, valider une action depuis le cockpit laisse le badge
+  // faux jusqu'à une navigation — le bug d'origine, déplacé d'un cran.
+  useEffect(() => subscribeView("validation", loadPendingCount), [loadPendingCount]);
 
   // Modules par vertical (3.11) : la nav suit l'état effectif. FAIL-OPEN en
   // erreur (tout visible) — la visibilité est du confort produit, la
   // sécurité reste sur les routes API.
-  useEffect(() => {
+  const loadModules = useCallback(() => {
     if (onLogin || me === null) return;
     getModules()
       .then((state) =>
@@ -166,7 +176,15 @@ export function Shell({ children }: { children: ReactNode }) {
         ),
       )
       .catch(() => setInactiveHrefs(new Set()));
-  }, [onLogin, me, pathname]);
+  }, [onLogin, me]);
+
+  useEffect(() => {
+    loadModules();
+  }, [loadModules, pathname]);
+
+  // Basculer un module doit retirer (ou rendre) sa page tout de suite : la nav
+  // est une VUE comme une autre.
+  useEffect(() => subscribeView("nav", loadModules), [loadModules]);
 
   const activeOrg = me?.memberships.find((m) => m.tenantId === me.activeOrganizationId);
   // Fail-closed for real: business pages only mount once the session is

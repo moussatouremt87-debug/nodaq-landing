@@ -12,6 +12,7 @@ import {
   updateStockItem,
 } from "../../lib/api";
 import type { StockItem, StockMovement } from "../../lib/api";
+import { emitDomainEvent } from "../../lib/freshness";
 
 /*
  * Suivi des stocks (ticket 3.2) : tout membre ajuste les quantités (l'employé
@@ -69,6 +70,8 @@ export default function StocksPage() {
     setNotice(null);
     try {
       patchLocal(await moveStock(item.id, delta));
+      // Le cockpit affiche les alertes de stock : elles changent ici.
+      emitDomainEvent("stock.modifie");
       if (selectedId === item.id) {
         listStockMovements(item.id)
           .then(setMovements)
@@ -100,6 +103,7 @@ export default function StocksPage() {
       setNewUnit("");
       setNewThreshold("");
       refresh();
+      emitDomainEvent("stock.modifie");
     } catch (error) {
       if (error instanceof ApiError && error.status === 403) {
         setIsOwner(false);
@@ -137,6 +141,7 @@ export default function StocksPage() {
           ...(cost !== undefined ? { unitCostCents: cost } : {}),
         }),
       );
+      emitDomainEvent("stock.modifie");
       setNotice("Réglages enregistrés.");
     } catch (error) {
       if (error instanceof ApiError && error.status === 403) setIsOwner(false);
@@ -158,6 +163,7 @@ export default function StocksPage() {
       await deleteStockItem(selected.id);
       setSelectedId(null);
       refresh();
+      emitDomainEvent("stock.modifie");
     } catch (error) {
       if (error instanceof ApiError && error.status === 403) setIsOwner(false);
       setNotice(
