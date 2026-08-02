@@ -25,3 +25,8 @@ __pycache__/
 *.tfvars
 *.tfvars.json
 infra/crash*.log
+
+# Rapports de tests produits par le CI (--reporter=junit + journal brut).
+# Générés par paquet, jamais commités.
+junit.xml
+vitest-output.log
