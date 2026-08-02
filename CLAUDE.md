@@ -68,6 +68,9 @@ micro-entrepreneurs, PME de 20+ déjà sous ERP.
   reconnaître laisse un problème visible ; reconnaître à tort le rend muet.
 - **Types qui rendent l'erreur impossible** : union discriminée plutôt qu'un optionnel
   qu'un écran pourrait afficher à tort (borne supérieure de marge).
+- **Un écran qui écrit périme les vues des AUTRES** : après un succès, `emitDomainEvent`
+  (`fraicheur-donnees.md`) — un affichage figé qui se dit « à jour » est un mensonge,
+  et il ne se voit qu'en démonstration.
 
 ## Stack
 
@@ -127,6 +130,7 @@ Le détail vit dans `docs/` — **lis le doc du domaine avant d'y toucher**.
 | Marge, rapport mensuel, cockpit conversationnel, devis e-mail, prospection | `mcp-servers/actions/src` | `marge.md`, `rapport-mensuel.md`, `cockpit-conversationnel.md`, `devis-email.md`, `prospection.md` |
 | Registre de modules (**frontière du produit**) | `packages/shared/src/moduleCatalog.ts` | `modules.md` |
 | Webhooks entrants, push, support e-mail | `apps/api/src` | `webhooks.md`, `notifications-push.md`, `support.md` |
+| Fraîcheur des écrans (bus d'invalidation, registre des mutations) | `apps/web/lib/freshness.ts` | `fraicheur-donnees.md` |
 | Connecteurs (Pennylane, Qonto, Bridge, Silae, PDP) | `mcp-servers/connectors` | `bridge.md`, `silae.md` |
 | **Modules hors socle** (éteints, jamais supprimés) | catalogue 3.11 | ADR-007 |
 
