@@ -94,21 +94,60 @@ describe("registre des mutations", () => {
 });
 
 describe("branchement de l'invalidation", () => {
-  it("tout écran qui MUTE une vue partagée émet un événement de domaine", () => {
+  it("CHAQUE appel qui mute une vue partagée émet, pas seulement le fichier", () => {
+    // Première version de cette garde : « le fichier contient au moins un
+    // emitDomainEvent ». Elle laissait passer trois écritures muettes dans des
+    // fichiers par ailleurs corrects (webhooks, brouillon d'action) — une garde
+    // qui se contente d'un alibi par fichier ne garde rien.
+    const shared = Object.entries(MUTATION_EFFECTS)
+      .filter(([, effect]) => effect !== null)
+      .map(([name]) => name);
     const offenders: string[] = [];
     for (const file of pageFiles(APP)) {
       const source = readFileSync(file, "utf-8");
-      const mutates = Object.entries(MUTATION_EFFECTS)
-        .filter(([, effect]) => effect !== null)
-        .map(([name]) => name)
-        .filter((call) => new RegExp(`\\b${call}\\s*\\(`).test(source));
-      if (mutates.length > 0 && !source.includes("emitDomainEvent(")) {
-        offenders.push(`${file.slice(APP.length + 1)} (mutations : ${mutates.join(", ")})`);
+      for (const call of shared) {
+        for (const match of source.matchAll(new RegExp(`\\b${call}\\s*\\(`, "g"))) {
+          // Fenêtre = du site d'appel jusqu'à la fin de son gestionnaire
+          // (prochaine déclaration de fonction au même niveau), à défaut 2000
+          // caractères. Statique et approximatif : ne prouve pas le MOMENT de
+          // l'émission, prouve qu'il y en a une sur ce chemin-là.
+          const from = match.index;
+          const rest = source.slice(from + 1);
+          const nextFn = rest.search(/\n {0,2}(async )?function |\n {2}const \w+ = useCallback/);
+          const window = rest.slice(0, nextFn === -1 ? 2000 : nextFn);
+          if (!window.includes("emitDomainEvent(")) {
+            const line = source.slice(0, from).split("\n").length;
+            offenders.push(`${file.slice(APP.length + 1)}:${line} — ${call}`);
+          }
+        }
       }
     }
-    expect(offenders, `écrans qui écrivent sans périmer les vues :\n${offenders.join("\n")}`).toEqual(
-      [],
-    );
+    expect(offenders, `écritures qui ne périment rien :\n${offenders.join("\n")}`).toEqual([]);
+  });
+
+  it("toute vue déclarée a au moins un abonné", () => {
+    // Une vue sans abonné, c'est une ligne d'`EVENT_VIEWS` qui rassure sans
+    // réveiller personne : l'événement part, et aucun écran n'écoute. Douze des
+    // quinze vues étaient dans ce cas au premier jet.
+    const sources = pageFiles(APP)
+      .concat([join(APP, "shell.tsx")])
+      .map((file) => readFileSync(file, "utf-8"))
+      .join("\n");
+    // On ne cherche PAS le nom de la vue dans le fichier — « marge » ou
+    // « stocks » s'y trouve en clair dans les libellés. Seuls comptent les
+    // abonnements réels.
+    const subscribed = new Set<string>();
+    for (const match of sources.matchAll(/(?:useViewRefresh|useFreshness)\(\[([^\]]*)\]/g)) {
+      for (const view of (match[1] ?? "").matchAll(/"(\w+)"/g)) subscribed.add(view[1] as string);
+    }
+    for (const match of sources.matchAll(/subscribeView\("(\w+)"/g)) {
+      subscribed.add(match[1] as string);
+    }
+    expect(subscribed.size).toBeGreaterThan(0);
+    const orphans = (Object.keys(EVENT_VIEWS) as DomainEvent[])
+      .flatMap((event) => EVENT_VIEWS[event])
+      .filter((view, index, all) => all.indexOf(view) === index && !subscribed.has(view));
+    expect(orphans, `vues déclarées que personne n'écoute :\n${orphans.join("\n")}`).toEqual([]);
   });
 
   it("le chat périme les vues quand l'AGENT écrit, pas seulement l'utilisateur", () => {

@@ -159,7 +159,10 @@ export default function CockpitPage() {
     setKpis(kpisResult);
   }, []);
 
-  const freshness = useFreshness(["cockpit"], load);
+  // Le cockpit AFFICHE la trésorerie et les impayés : s'abonner au seul
+  // « cockpit » laissait un rapprochement bancaire fait ailleurs sans effet
+  // sur les chiffres qu'il montre.
+  const freshness = useFreshness(["cockpit", "tresorerie", "impayes"], load);
   const refresh = freshness.refresh;
 
   // L'identité n'est pas une donnée fraîche : elle ne change pas sous nos pieds
@@ -284,6 +287,12 @@ export default function CockpitPage() {
                 // chat : une question peut avoir PRÉPARÉ une action. Sans ça,
                 // la file se remplit sous les yeux de l'utilisateur pendant
                 // que son compteur reste à l'ancien chiffre.
+                //
+                // NUANCE : `/cockpit/ask` ne rend que les outils APPELÉS, pas
+                // leur issue (le chat, lui, filtre sur `ok`). Un outil qui
+                // échoue provoquera donc un rafraîchissement inutile. Écart
+                // assumé dans ce sens-là seulement : sur-inviter coûte une
+                // requête, sous-inviter laisse un écran faux.
                 for (const event of new Set(
                   result.tools.map(eventForTool).filter((e): e is DomainEvent => e !== null),
                 )) {

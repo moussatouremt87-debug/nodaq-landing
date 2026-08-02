@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createLoadGuard,
   formatFreshness,
@@ -40,7 +40,11 @@ export const STALE_AFTER_MS = 5 * 60_000;
  * @param views  vues affichées par l'écran (celles qui le périment)
  * @param load   chargeur — DOIT rendre une promesse ; l'horodatage n'avance
  *               qu'en cas de succès (afficher « à jour à l'instant » sur un
- *               échec de refetch serait exactement le mensonge qu'on corrige)
+ *               échec de refetch serait exactement le mensonge qu'on corrige).
+ *               Il n'a PAS besoin d'être mémoïsé : le hook garde la dernière
+ *               version dans une ref. Le faire dépendre de `load` transformait
+ *               un chargeur non mémoïsé en boucle de refetch infinie — un
+ *               piège qu'il vaut mieux supprimer que documenter.
  */
 export function useFreshness(views: readonly ViewKey[], load: () => Promise<unknown>): Freshness {
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
@@ -59,11 +63,16 @@ export function useFreshness(views: readonly ViewKey[], load: () => Promise<unkn
   // « à jour à l'instant » — le cockpit qui ment, reconstitué ici même.
   const guard = useMemo(() => createLoadGuard(), []);
 
+  const loadRef = useRef(load);
+  useEffect(() => {
+    loadRef.current = load;
+  });
+
   const refresh = useCallback(() => {
-    void guard.run(load).then((outcome) => {
+    void guard.run(() => loadRef.current()).then((outcome) => {
       if (outcome === "a-jour") setUpdatedAt(Date.now());
     });
-  }, [guard, load]);
+  }, [guard]);
 
   useEffect(() => {
     refresh();
@@ -100,4 +109,34 @@ export function useFreshness(views: readonly ViewKey[], load: () => Promise<unkn
     label: formatFreshness(updatedAt, now),
     stale: isStale(updatedAt, now, STALE_AFTER_MS),
   };
+}
+
+/**
+ * Abonnement seul, pour les écrans secondaires.
+ *
+ * `useFreshness` impose un chargeur qui rend une promesse, pour pouvoir dire
+ * l'âge de la donnée. Un écran de saisie n'affiche pas cet âge mais doit quand
+ * même suivre les écritures des autres : sans ça, une vue déclarée dans la
+ * config n'a AUCUN abonné, et l'événement qui la périme ne réveille personne —
+ * une correspondance qui rassure sans rien garantir.
+ *
+ * `refresh` n'a pas besoin d'être mémoïsé (même ref que ci-dessus).
+ */
+export function useViewRefresh(views: readonly ViewKey[], refresh: () => void): void {
+  const viewsKey = views.join(",");
+  const refreshRef = useRef(refresh);
+  useEffect(() => {
+    refreshRef.current = refresh;
+  });
+
+  useEffect(() => {
+    const wake = (): void => refreshRef.current();
+    const unsubscribes = viewsKey
+      .split(",")
+      .filter(Boolean)
+      .map((view) => subscribeView(view as ViewKey, wake));
+    return () => {
+      for (const unsubscribe of unsubscribes) unsubscribe();
+    };
+  }, [viewsKey]);
 }

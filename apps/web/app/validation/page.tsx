@@ -362,6 +362,9 @@ export default function ValidationPage() {
       setSavedDraft(updated.draft);
       setDraft(updated.draft);
       setEditing(false);
+      // Le texte qui partira a changé : un autre écran ouvert sur la même
+      // action ne doit pas garder l'ancien sous les yeux.
+      emitDomainEvent("action.preparee");
       setDetailNotice("Brouillon enregistré — c'est ce texte qui partira à la validation.");
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {

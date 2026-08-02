@@ -12,6 +12,7 @@ import {
   updateStockItem,
 } from "../../lib/api";
 import type { StockItem, StockMovement } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
 import { emitDomainEvent } from "../../lib/freshness";
 
 /*
@@ -47,6 +48,8 @@ export default function StocksPage() {
   }, []);
 
   useEffect(refresh, [refresh]);
+  // Une sortie de stock validée depuis la file doit se voir ici.
+  useViewRefresh(["stocks"], refresh);
 
   function select(item: StockItem): void {
     setSelectedId(item.id);

@@ -11,6 +11,7 @@ import {
   getReviews,
 } from "../../lib/api";
 import type { CustomerReview, ReputationReport } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
 import { emitDomainEvent } from "../../lib/freshness";
 
 /*
@@ -58,6 +59,7 @@ export default function AvisPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  useViewRefresh(["avis"], () => void refresh());
 
   async function addReview(event: FormEvent): Promise<void> {
     event.preventDefault();

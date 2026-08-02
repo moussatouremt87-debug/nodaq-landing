@@ -198,6 +198,10 @@ export function Shell({ children }: { children: ReactNode }) {
       headers: { "content-type": "application/json" },
       body: "{}",
     });
+    // Refermer la garde : sans ça, `me` reste non nul et un événement du bus
+    // pourrait relancer un chargement après la déconnexion (401 avalé, mais
+    // une requête qui n'a plus lieu d'être).
+    setMe(null);
     router.replace("/login");
   }
 

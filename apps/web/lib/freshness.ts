@@ -102,17 +102,24 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
     "factures",
   ],
   "action.rejetee": ["nav", "cockpit", "validation"],
-  "document.ajoute": ["cockpit", "classeur"],
+  // `validation` : au-delà du seuil de capitalisation, la pièce photographiée
+  // fait naître une proposition d'immobilisation à valider (app.ts, classeur).
+  // L'oublier laissait le badge de la nav faux après une photo de facture
+  // d'équipement — le bug d'origine, sur le parcours le plus filmé du produit.
+  "document.ajoute": ["cockpit", "classeur", "validation"],
   "document.rattache": ["classeur", "tresorerie"],
   // Correction de champs ou suppression d'une pièce. La trésorerie y figure
   // parce que supprimer une pièce RAPPROCHÉE défait le rapprochement : une
   // correction seule périmera la trésorerie pour rien, ce qui coûte une
   // requête — l'oublier coûterait un écran faux.
   "document.modifie": ["cockpit", "classeur", "tresorerie"],
-  // Un import FEC remplace les créances dérivées : impayés, marge, cockpit.
-  "fec.importe": ["cockpit", "connecteurs", "impayes", "marge", "tresorerie"],
-  // La purge efface ces mêmes dérivées : même portée, autre intention — un
-  // nom d'événement qui ment dans une config versionnée finit par tromper.
+  // Un import FEC remplace les créances dérivées : impayés, marge, cockpit —
+  // ET remplit la file, puisqu'il propose jusqu'à 200 immobilisations à
+  // valider (comptes 2x/28x). C'est le premier geste d'un nouveau client.
+  "fec.importe": ["cockpit", "connecteurs", "impayes", "marge", "tresorerie", "validation"],
+  // La purge efface ces mêmes dérivées, mais PAS la file : les propositions
+  // déjà déposées survivent à l'effacement des écritures dont elles viennent.
+  // D'où deux listes différentes — la nuance est le sujet, pas un détail.
   "fec.purge": ["cockpit", "connecteurs", "impayes", "marge", "tresorerie"],
   "connecteur.modifie": ["cockpit", "connecteurs", "tresorerie", "impayes"],
   // Éteindre un module retire des pages de la NAV et des cartes du cockpit :

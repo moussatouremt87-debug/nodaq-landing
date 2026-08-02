@@ -11,6 +11,7 @@ import {
   updateFixedAsset,
 } from "../../lib/api";
 import type { FixedAsset, FixedAssetRegistry } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
 import { emitDomainEvent } from "../../lib/freshness";
 
 /*
@@ -49,6 +50,7 @@ export default function ImmobilisationsPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  useViewRefresh(["immobilisations"], () => void refresh());
 
   async function openPlan(asset: FixedAsset): Promise<void> {
     const lines = await getFixedAssetPlan(asset.id).catch(() => []);

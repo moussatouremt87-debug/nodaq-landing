@@ -9,6 +9,7 @@ import {
   proposeEReporting,
 } from "../../lib/api";
 import type { EInvoiceSubmission, EReportingPreview } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
 import { emitDomainEvent } from "../../lib/freshness";
 
 /*
@@ -78,6 +79,7 @@ export default function FacturesPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  useViewRefresh(["factures"], () => void refresh());
 
   async function loadPreview(): Promise<void> {
     setNotice(null);

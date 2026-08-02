@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError, COST_CATEGORIES, getMargin, putCost } from "../../lib/api";
 import { emitDomainEvent } from "../../lib/freshness";
 import type { MarginReport } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
 
 /*
  * Marge (2.8).
@@ -53,6 +54,7 @@ export default function MargePage() {
   useEffect(() => {
     void load(lastCompleteMonth());
   }, [load]);
+  useViewRefresh(["marge"], () => void load(month));
 
   async function saveCost(category: string): Promise<void> {
     const raw = (amounts[category] ?? "").trim().replace(",", ".");

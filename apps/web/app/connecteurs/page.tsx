@@ -24,6 +24,7 @@ import type {
   WebhookEndpoint,
   WebhookEvent,
 } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
 
 /*
  * Connector onboarding (ticket 1.8). The credentials travel ONE way: entered
@@ -205,6 +206,7 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
   }, []);
 
   useEffect(refresh, [refresh]);
+  useViewRefresh(["connecteurs"], refresh);
 
   async function purge(): Promise<void> {
     if (!window.confirm("Supprimer toutes les données dérivées du FEC importé ?")) return;
@@ -385,6 +387,7 @@ export default function ConnecteursPage() {
   }, []);
 
   useEffect(refresh, [refresh]);
+  useViewRefresh(["connecteurs"], refresh);
 
   return (
     <>
@@ -443,6 +446,7 @@ function WebhooksCard() {
       const endpoint = await createWebhookEndpoint(provider);
       setCreated({ url: endpoint.url, secret: endpoint.secret });
       refresh();
+      emitDomainEvent("connecteur.modifie");
     } catch {
       setNotice("Création impossible.");
     }
@@ -455,6 +459,7 @@ function WebhooksCard() {
       await deleteWebhookEndpoint(target);
       setCreated(null);
       refresh();
+      emitDomainEvent("connecteur.modifie");
     } catch {
       setNotice("Révocation impossible.");
     }

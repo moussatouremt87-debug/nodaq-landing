@@ -38,6 +38,11 @@ const freshness = useFreshness(["cockpit"], load);
 Il se recharge alors quand un événement périme l'une de ses vues, quand l'onglet
 reprend le focus, et quand le réseau revient — sans jamais « penser » à le faire.
 
+Un écran secondaire, qui n'affiche pas l'âge de ses données, utilise
+`useViewRefresh(["stocks"], refresh)` : abonnement seul, même exigence. **Une vue
+sans abonné ne réveille personne** — c'est une ligne de config qui rassure sans
+rien garantir, et la CI la refuse (voir plus bas).
+
 **Un écran qui écrit émet un événement**, après le succès :
 
 ```ts
@@ -85,7 +90,11 @@ Dans `apps/web/test/freshness-wiring.test.ts` et `freshness.test.ts` :
 - toute écriture de `lib/api.ts` est **classée** dans `MUTATION_EFFECTS` (la
   liste est **dérivée** du fichier, jamais recopiée) ;
 - le registre ne décrit pas d'écriture disparue ;
-- tout écran qui appelle une mutation non-`null` émet un événement ;
+- **chaque site d'appel** d'une mutation non-`null` émet — pas seulement le
+  fichier. La première version se contentait d'un `emitDomainEvent` quelque part
+  dans le fichier : trois écritures muettes passaient sous ce parapluie ;
+- toute vue déclarée a au moins un abonné réel (`useFreshness`, `useViewRefresh`
+  ou `subscribeView` — le nom de la vue dans un libellé ne compte pas) ;
 - tout événement déclaré est réellement émis quelque part ;
 - tout outil d'agent `requiresValidation: true` (`TOOL_POLICIES`) porte un
   événement — sinon on recrée le bug pour ce seul outil, silencieusement ;
@@ -93,6 +102,13 @@ Dans `apps/web/test/freshness-wiring.test.ts` et `freshness.test.ts` :
 
 Ces gardes sont **statiques** : elles prouvent qu'un appel n'a pas disparu, pas
 qu'il part au bon moment. C'est dit, et c'est la limite du dispositif.
+
+## Écart connu
+
+`/cockpit/ask` ne renvoie que les outils **appelés**, jamais leur issue — le chat,
+lui, filtre sur `ok`. Une question dont l'outil échoue provoque donc un
+rafraîchissement inutile. L'écart est assumé dans ce sens-là **seulement** :
+sur-invalider coûte une requête, sous-invalider laisse un écran faux.
 
 ## Non livré (et pourquoi)
 

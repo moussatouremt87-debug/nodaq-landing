@@ -19,6 +19,7 @@ import type {
   ClasseurMemory,
   MatchCandidate,
 } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
 
 /*
  * Classeur documentaire photo (ticket 2.16) : on photographie un reçu ou une
@@ -100,6 +101,8 @@ export default function ClasseurPage() {
   }, []);
 
   useEffect(refresh, [refresh]);
+  // Le classeur suit aussi ce que les AUTRES écrans écrivent.
+  useViewRefresh(["classeur"], refresh);
 
   function select(document: ClasseurDocument): void {
     setSelectedId(document.id);

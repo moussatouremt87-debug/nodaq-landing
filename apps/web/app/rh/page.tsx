@@ -15,6 +15,7 @@ import {
   updateStaff,
 } from "../../lib/api";
 import type { HourlyPerformance, StaffAbsence, StaffMember, StaffingPlan } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
 import { emitDomainEvent } from "../../lib/freshness";
 
 /*
@@ -62,6 +63,7 @@ export default function RhPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  useViewRefresh(["rh"], () => void refresh());
 
   async function runSilaeSync(): Promise<void> {
     setSyncing(true);

@@ -10,6 +10,7 @@ import {
   putTaxDeadline,
 } from "../../lib/api";
 import type { FiscalProfile, TaxDeadline, TaxSchedule } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
 import { emitDomainEvent } from "../../lib/freshness";
 
 /*
@@ -167,6 +168,7 @@ export default function EcheancierPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  useViewRefresh(["echeancier"], () => void refresh());
 
   async function saveProfile(next: Partial<FiscalProfile>): Promise<void> {
     if (!profile) return;

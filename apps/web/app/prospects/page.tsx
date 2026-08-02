@@ -13,6 +13,7 @@ import {
   updateProspect,
 } from "../../lib/api";
 import type { Prospect, ProspectionPlan } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
 import { emitDomainEvent } from "../../lib/freshness";
 
 /*
@@ -76,6 +77,7 @@ export default function ProspectsPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  useViewRefresh(["prospects"], () => void refresh());
 
   async function add(): Promise<void> {
     setError(null);
