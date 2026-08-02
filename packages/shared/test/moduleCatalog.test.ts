@@ -29,29 +29,75 @@ describe("catalogue de modules", () => {
   });
 });
 
-describe("resolveModules", () => {
-  it("défauts par vertical : stocks actif en BTP, inactif en services", () => {
-    const btp = resolveModules("industrie_btp", {});
-    expect(btp.find((m) => m.id === "stocks")).toMatchObject({
-      active: true,
-      source: "defaut_vertical",
-    });
-    const services = resolveModules("services", {});
-    expect(services.find((m) => m.id === "stocks")).toMatchObject({
-      active: false,
-      source: "defaut_vertical",
-    });
-    // Les modules transverses restent actifs partout par défaut.
-    expect(services.find((m) => m.id === "rgpd")?.active).toBe(true);
+describe("frontière du produit (pivot ADR-007)", () => {
+  it("la liste des modules hors socle est EXPLICITE, jamais un effet de bord", () => {
+    // Ce test est le compte rendu de la décision produit : éteindre ou
+    // rallumer un module doit se voir ici, dans un diff, avec une intention.
+    // Sans lui, un module sortirait du produit par inadvertance.
+    const outOfCore = MODULES.filter((m) => m.defaultOn === "aucun").map((m) => m.id).sort();
+    expect(outOfCore).toEqual(
+      [
+        "avis",
+        "facturation_electronique",
+        "immobilisations",
+        "prevision_ventes",
+        "reglementaire",
+        "rgpd",
+        "signaux_clients",
+        "silae",
+        "stocks",
+      ].sort(),
+    );
+    // Le socle de l'assistant opérationnel, lui, est actif partout.
+    const core = MODULES.filter((m) => m.defaultOn === "tous").map((m) => m.id).sort();
+    expect(core).toEqual(["classeur", "rh"]);
   });
 
-  it("surcharge explicite : le choix de l'owner l'emporte sur le défaut, source « choix »", () => {
-    const resolved = resolveModules("services", { stocks: true, avis: false });
+  it("éteint n'est pas supprimé : chaque module hors socle garde son identité", () => {
+    // Un module vidé de son titre ou de sa description serait une suppression
+    // déguisée : l'écran Réglages ne pourrait plus proposer de le rallumer.
+    for (const module of MODULES.filter((m) => m.defaultOn === "aucun")) {
+      expect(module.title.length).toBeGreaterThan(3);
+      expect(module.description.length).toBeGreaterThan(10);
+    }
+  });
+});
+
+describe("resolveModules", () => {
+  it("hors socle (pivot ADR-007) : éteint partout, et la source le DIT", () => {
+    // « défaut du vertical » serait faux : ces modules sont éteints pour tous
+    // les verticaux. Un module qui disparaît doit porter la vraie raison —
+    // c'est elle qui dit à l'utilisateur comment le rallumer.
+    for (const vertical of ["industrie_btp", "services", "retail", "autre"] as const) {
+      const resolved = resolveModules(vertical, {});
+      expect(resolved.find((m) => m.id === "stocks")).toMatchObject({
+        active: false,
+        source: "hors_socle",
+      });
+      expect(resolved.find((m) => m.id === "rgpd")?.active).toBe(false);
+      // Le socle, lui, reste actif partout — y compris sans profil.
+      expect(resolved.find((m) => m.id === "classeur")?.active).toBe(true);
+      expect(resolved.find((m) => m.id === "rh")?.active).toBe(true);
+    }
+  });
+
+  it("éteint n'est pas supprimé : un clic de l'owner rallume, et la source suit", () => {
+    // C'est la garantie qui rend le pivot réversible : le code est intact,
+    // seule une surcharge sépare l'utilisateur de la fonctionnalité.
+    const resolved = resolveModules("services", { stocks: true, rgpd: true });
     expect(resolved.find((m) => m.id === "stocks")).toMatchObject({
       active: true,
       source: "choix",
     });
-    expect(resolved.find((m) => m.id === "avis")).toMatchObject({
+    expect(resolved.find((m) => m.id === "rgpd")).toMatchObject({
+      active: true,
+      source: "choix",
+    });
+  });
+
+  it("surcharge explicite : le choix de l'owner l'emporte sur le défaut, source « choix »", () => {
+    const resolved = resolveModules("services", { classeur: false });
+    expect(resolved.find((m) => m.id === "classeur")).toMatchObject({
       active: false,
       source: "choix",
     });
@@ -60,17 +106,22 @@ describe("resolveModules", () => {
   it("surcharges inconnues ou non booléennes : ignorées, jamais une exception", () => {
     const resolved = resolveModules("retail", {
       inconnu: true,
-      stocks: "oui" as never,
+      classeur: "oui" as never,
     });
-    expect(resolved.find((m) => m.id === "stocks")).toMatchObject({
+    expect(resolved.find((m) => m.id === "classeur")).toMatchObject({
       active: true,
       source: "defaut_vertical",
     });
     expect(resolved.some((m) => (m.id as string) === "inconnu")).toBe(false);
   });
 
-  it("vertical « autre » : tout est actif par défaut (découverte, fail-open)", () => {
+  it("fail-open du SOCLE : sans profil ni surcharge, le cœur du produit répond", () => {
+    // Le fail-open protège l'agent d'un profil manquant. Il ne rallume PAS
+    // les modules hors socle : leur extinction est une décision produit, pas
+    // un accident de configuration.
     const resolved = resolveModules("autre", {});
-    expect(resolved.every((m) => m.active)).toBe(true);
+    const core = resolved.filter((m) => m.source === "defaut_vertical");
+    expect(core.length).toBeGreaterThan(0);
+    expect(core.every((m) => m.active)).toBe(true);
   });
 });

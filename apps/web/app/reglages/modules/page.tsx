@@ -69,7 +69,16 @@ export default function ModulesPage() {
                     <span className="muted">
                       {module.active ? "activé" : "désactivé"}
                       {module.source &&
-                        ` (${module.source === "choix" ? "votre choix" : "défaut du vertical"})`}
+                        ` (${
+                          module.source === "choix"
+                            ? "votre choix"
+                            : module.source === "hors_socle"
+                              ? // Dire « défaut du vertical » serait faux : ce
+                                // module est éteint pour tout le monde, et la
+                                // seule chose qui le rallume est ce bouton.
+                                "hors du socle — activable ici"
+                              : "défaut du vertical"
+                        })`}
                     </span>
                     <br />
                     <span className="muted">{module.description}</span>

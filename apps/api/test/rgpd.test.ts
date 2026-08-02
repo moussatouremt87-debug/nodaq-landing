@@ -63,6 +63,20 @@ beforeAll(async () => {
     headers: { cookie: memberCookie },
     payload: { organizationId: orgA },
   });
+
+  // PIVOT (ADR-007) : ce module est HORS SOCLE — éteint par défaut. Il n'est
+  // ni supprimé ni cassé, et ce test le prouve : l'owner le rallume en un
+  // appel, et la fonctionnalité répond exactement comme avant.
+  const moduleOn = await app.inject({
+    method: "PUT",
+    url: "/modules/rgpd",
+    headers: { cookie: ownerCookie },
+    payload: { active: true },
+  });
+  // Asserté : un renommage de module ferait sinon un no-op silencieux, et
+  // l'échec ressortirait bien plus loin, illisible.
+  expect(moduleOn.statusCode).toBe(200);
+
 }, 60_000);
 
 afterAll(async () => {

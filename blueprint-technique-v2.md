@@ -1,5 +1,17 @@
 # Blueprint technique — Assistant IA souverain pour PME françaises (V2 complète)
 
+> ⚠️ **La direction produit de ce document est dépassée depuis le 2026-08-02.**
+> Voir **[ADR-007 — Pivot : assistant opérationnel des TPE à l'affaire](docs/adr/ADR-007-pivot-assistant-operationnel.md)**.
+>
+> Ce blueprint reste en place **volontairement**, comme trace de l'ancienne cible
+> (co-pilote financier PME) : il documente pourquoi le socle est ce qu'il est, et
+> l'historique d'une trentaine de tickets livrés. **L'architecture qu'il décrit reste
+> valide et en vigueur** — souveraineté, isolation multi-tenant, human-in-the-loop,
+> agent-runtime, registre de modules. Seule la **cible produit** a changé.
+>
+> En cas de contradiction sur le produit : l'ADR-007 prime. En cas de contradiction sur
+> une règle technique : `CLAUDE.md` prime.
+
 > Document d'architecture et plan de construction de bout en bout.
 > Stack : **hybride TypeScript + Python**, **100 % cloud souverain (France/UE), sans box**.
 > Destiné à être déroulé avec **Claude Code** + le **Claude Agent SDK**.

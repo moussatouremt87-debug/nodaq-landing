@@ -84,7 +84,12 @@ describe("modules par vertical", () => {
     expect(body.version).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(body.vertical).toBeUndefined();
     expect(body.modules.length).toBeGreaterThanOrEqual(6);
-    expect(body.modules.every((m) => m.active)).toBe(true);
+    // Depuis le pivot (ADR-007), le catalogue mêle socle actif et modules
+    // hors socle éteints : ce qui compte pour la nav du membre, c'est que
+    // chaque module porte un état — pas qu'ils soient tous allumés.
+    expect(body.modules.every((m) => typeof m.active === "boolean")).toBe(true);
+    expect(body.modules.some((m) => m.active)).toBe(true);
+    expect(body.modules.some((m) => !m.active)).toBe(true);
     expect(body.modules.every((m) => m.source === undefined)).toBe(true);
     // La liste d'outils internes ne traverse pas la frontière HTTP.
     expect(JSON.stringify(body)).not.toContain("check_stock_alerts");
@@ -126,8 +131,9 @@ describe("modules par vertical", () => {
     expect(bad.statusCode).toBe(400);
   });
 
-  it("défauts du vertical services (stocks off) puis choix explicite de l'owner", async () => {
-    // Le profil 3.7 pilote les défauts.
+  it("module hors socle : éteint par défaut, rallumé par l'owner, choix PERSISTANT", async () => {
+    // Le profil 3.7 pilote les défauts par vertical ; `stocks` est désormais
+    // hors socle, donc éteint quel que soit le vertical (pivot ADR-007).
     const profile = await app.inject({
       method: "PUT",
       url: "/reglementaire/profil",
@@ -144,7 +150,7 @@ describe("modules par vertical", () => {
     const stocks = (defaults.json() as { modules: { id: string; active: boolean; source: string }[] }).modules.find(
       (m) => m.id === "stocks",
     );
-    expect(stocks).toMatchObject({ active: false, source: "defaut_vertical" });
+    expect(stocks).toMatchObject({ active: false, source: "hors_socle" });
 
     // L'owner réactive : le choix l'emporte et il est PERSISTANT.
     const enable = await app.inject({

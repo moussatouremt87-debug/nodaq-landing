@@ -90,6 +90,14 @@ export interface ActionsServerContext extends OcrClientOptions, RegistryOptions 
    */
   role?: string;
   /**
+   * Modules du registre 3.11 ÉTEINTS pour ce tenant, résolus par le runtime
+   * (jamais d'un input d'outil). Le cockpit conversationnel (2.5) en retire
+   * les jeux de données correspondants — sinon le chat resterait une porte
+   * ouverte sur un module désactivé, alors que sa page et ses outils, eux,
+   * ont disparu. Absent = aucun module éteint (fail-open, comme le 3.11).
+   */
+  inactiveModules?: readonly string[];
+  /**
    * Fire-and-forget doorbell rung each time a tool PREPARES a pending_action
    * (push notifications 2.17). Carries NO data by design — the recipient
    * learns "something awaits validation", nothing else.
@@ -174,6 +182,7 @@ const DUNNING_PROMPT =
 
 export function createActionsMcpServer(context: ActionsServerContext): McpServer {
   const tenantId = TenantId.parse(context.tenantId);
+  const inactiveModules = new Set(context.inactiveModules ?? []);
   const server = new McpServer({ name: "nodaq-actions", version: "0.1.0" });
 
   const annotations: NodaqToolAnnotations = {
@@ -894,7 +903,7 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
         "Interroge les données de l'entreprise (lecture seule, ticket 2.5) : compte, " +
         "somme ou moyenne sur un jeu de données du catalogue, avec regroupement, " +
         "filtres et période. Jeux de données et champs disponibles pour cet " +
-        `utilisateur :\n${describeCatalog(context.role ?? "member")}\n` +
+        `utilisateur :\n${describeCatalog(context.role ?? "member", inactiveModules)}\n` +
         "N'invente JAMAIS un nom de champ : un champ hors catalogue est refusé. Si " +
         "le refus explique ce qui existe, reformule avec les champs proposés.",
       inputSchema: {
@@ -921,7 +930,7 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
     },
     async (input) => {
       // Le RÔLE vient du runtime (session), jamais d'un input d'outil.
-      const compiled = compileDataQuery(input, context.role ?? "member");
+      const compiled = compileDataQuery(input, context.role ?? "member", inactiveModules);
       if (!compiled.ok) {
         // Un refus est une RÉPONSE : le modèle doit pouvoir reformuler, pas
         // recevoir une exception opaque qui le pousserait à inventer.

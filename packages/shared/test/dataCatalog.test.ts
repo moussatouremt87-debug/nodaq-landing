@@ -267,3 +267,30 @@ describe("compilation — ce qui est REFUSÉ", () => {
     expect(compileDataQuery(spec, OWNER)).toEqual(compileDataQuery(spec, OWNER));
   });
 });
+
+describe("gating par module (3.11 / pivot ADR-007)", () => {
+  it("module éteint : le dataset sort du catalogue ET la requête est REFUSÉE", () => {
+    // Deux niveaux, comme pour le rôle. Un dataset encore décrit au modèle
+    // alors qu'il sera refusé à l'exécution, c'est un refus incompréhensible
+    // pour l'utilisateur ; un dataset refusé à la description mais accepté à
+    // l'exécution, c'est la porte laissée ouverte que le pivot vient fermer.
+    const off = new Set(["stocks"]);
+    expect(describeCatalog(OWNER)).toContain("stocks");
+    expect(describeCatalog(OWNER, off)).not.toContain("mouvements_stock");
+
+    const refused = compileDataQuery(
+      { dataset: "stocks", aggregate: "count" },
+      OWNER,
+      off,
+    );
+    expect(refused.ok).toBe(false);
+    // Un refus est une RÉPONSE motivée : le modèle doit pouvoir l'expliquer,
+    // pas rendre un zéro qui se lirait « vous n'avez pas de stock ».
+    if (!refused.ok) expect(refused.reason).toContain("désactivé");
+  });
+
+  it("aucun module éteint : rien ne change (comportement 2.5 inchangé)", () => {
+    const plan = compileDataQuery({ dataset: "stocks", aggregate: "count" }, OWNER);
+    expect(plan.ok).toBe(true);
+  });
+});

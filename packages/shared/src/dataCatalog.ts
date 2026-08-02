@@ -20,7 +20,7 @@
  */
 
 /** Version du catalogue — à bumper à chaque ajout de dataset ou de champ. */
-export const DATA_CATALOG_VERSION = "2026-07-31";
+export const DATA_CATALOG_VERSION = "2026-08-02";
 
 export type FieldKind = "text" | "number" | "boolean" | "date";
 
@@ -42,6 +42,10 @@ export interface Dataset {
   model: string;
   /** Dataset entier réservé au dirigeant (CA, immobilisations…). */
   ownerOnly: boolean;
+  /** Module du registre 3.11 qui porte ce jeu de données. Éteint, le dataset
+   * sort du catalogue exposé au modèle ET est refusé à la compilation —
+   * sinon le chat resterait une porte ouverte sur un module désactivé. */
+  module?: string;
   /** Champ de date utilisé par un filtre de période. */
   dateField?: string;
   dimensions: CatalogField[];
@@ -113,6 +117,7 @@ export const DATASETS: readonly Dataset[] = [
     label: "Articles en stock",
     model: "stockItem",
     ownerOnly: false,
+    module: "stocks",
     dimensions: [
       { name: "article", column: "name", kind: "text", description: "Nom de l'article" },
       { name: "unite", column: "unit", kind: "text", description: "Unité" },
@@ -141,6 +146,7 @@ export const DATASETS: readonly Dataset[] = [
     label: "Mouvements de stock",
     model: "stockMovement",
     ownerOnly: false,
+    module: "stocks",
     dateField: "date",
     dimensions: [
       { name: "motif", column: "reason", kind: "text", description: "Motif du mouvement" },
@@ -155,6 +161,7 @@ export const DATASETS: readonly Dataset[] = [
     label: "Immobilisations",
     model: "fixedAsset",
     ownerOnly: true,
+    module: "immobilisations",
     dateField: "date_mise_en_service",
     dimensions: [
       { name: "categorie", column: "category", kind: "text", description: "Catégorie fiscale" },
@@ -234,9 +241,22 @@ export const MAX_QUERY_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
-/** Datasets lisibles par un rôle — sert aussi à guider le modèle. */
-export function visibleDatasets(role: string): Dataset[] {
-  return DATASETS.filter((dataset) => !dataset.ownerOnly || role === "owner");
+/**
+ * Datasets lisibles par un rôle, modules éteints exclus — sert aussi à guider
+ * le modèle. Le gating est à DEUX niveaux, comme le reste du 2.5 : le rôle et
+ * le module. Un dataset qu'on refuserait à l'exécution n'a rien à faire dans
+ * la description : le modèle le proposerait, et l'utilisateur ne comprendrait
+ * pas le refus.
+ */
+export function visibleDatasets(
+  role: string,
+  inactiveModules: ReadonlySet<string> = new Set(),
+): Dataset[] {
+  return DATASETS.filter(
+    (dataset) =>
+      (!dataset.ownerOnly || role === "owner") &&
+      (dataset.module === undefined || !inactiveModules.has(dataset.module)),
+  );
 }
 
 function findField(dataset: Dataset, name: string): CatalogField | undefined {
@@ -250,7 +270,11 @@ function findField(dataset: Dataset, name: string): CatalogField | undefined {
  * lisible — le refus est une réponse valide, et il est renvoyé au modèle pour
  * qu'il reformule plutôt que d'inventer un chiffre.
  */
-export function compileDataQuery(spec: DataQuerySpec, role: string): CompileResult {
+export function compileDataQuery(
+  spec: DataQuerySpec,
+  role: string,
+  inactiveModules: ReadonlySet<string> = new Set(),
+): CompileResult {
   // Ce compilateur est LE point de validation (il est exporté et peut être
   // appelé sans la couche Zod du serveur MCP) : il ne suppose donc rien de
   // ses entrées, pas même que l'agrégat fasse partie des agrégats.
@@ -259,13 +283,21 @@ export function compileDataQuery(spec: DataQuerySpec, role: string): CompileResu
   }
   const dataset = DATASETS.find((entry) => entry.id === spec.dataset);
   if (!dataset) {
-    const available = visibleDatasets(role)
+    const available = visibleDatasets(role, inactiveModules)
       .map((entry) => entry.id)
       .join(", ");
     return { ok: false, reason: `jeu de données inconnu — disponibles : ${available}` };
   }
   if (dataset.ownerOnly && role !== "owner") {
     return { ok: false, reason: `« ${dataset.label} » est réservé au dirigeant` };
+  }
+  // Module éteint (3.11) : refus MOTIVÉ, pas un jeu vide qui se lirait comme
+  // « vous n'avez pas de stock ».
+  if (dataset.module !== undefined && inactiveModules.has(dataset.module)) {
+    return {
+      ok: false,
+      reason: `« ${dataset.label} » dépend du module « ${dataset.module} », désactivé pour cette entreprise`,
+    };
   }
 
   let measureColumn: string | null = null;
@@ -387,8 +419,11 @@ export function compileDataQuery(spec: DataQuerySpec, role: string): CompileResu
 }
 
 /** Description du catalogue destinée au modèle (pas de valeurs, que la forme). */
-export function describeCatalog(role: string): string {
-  return visibleDatasets(role)
+export function describeCatalog(
+  role: string,
+  inactiveModules: ReadonlySet<string> = new Set(),
+): string {
+  return visibleDatasets(role, inactiveModules)
     .map((dataset) => {
       const dimensions = dataset.dimensions
         .filter((field) => !field.ownerOnly || role === "owner")
