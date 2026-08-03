@@ -43,6 +43,7 @@ export const VIEW_KEYS = [
   "factures",
   "echeancier",
   "affaires",
+  "brief",
   "nav",
 ] as const;
 export type ViewKey = (typeof VIEW_KEYS)[number];
@@ -84,7 +85,7 @@ export type DomainEvent =
 export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   // Une action préparée n'a encore rien écrit au métier : elle change la file
   // et le compteur du cockpit, rien d'autre.
-  "action.preparee": ["cockpit", "validation"],
+  "action.preparee": ["cockpit", "validation", "brief"],
   // Une action VALIDÉE s'exécute. La liste suit ce que les exécuteurs écrivent
   // RÉELLEMENT (`apps/api/src/executors.ts`) : immobilisation, mouvement de
   // stock, avis client, contact prospect, dépôt de facture électronique — et
@@ -94,6 +95,7 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   "action.validee": [
     "nav",
     "cockpit",
+    "brief",
     "validation",
     "tresorerie",
     "impayes",
@@ -104,18 +106,18 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
     "avis",
     "factures",
   ],
-  "action.rejetee": ["nav", "cockpit", "validation"],
+  "action.rejetee": ["nav", "cockpit", "validation", "brief"],
   // `validation` : au-delà du seuil de capitalisation, la pièce photographiée
   // fait naître une proposition d'immobilisation à valider (app.ts, classeur).
   // L'oublier laissait le badge de la nav faux après une photo de facture
   // d'équipement — le bug d'origine, sur le parcours le plus filmé du produit.
-  "document.ajoute": ["cockpit", "classeur", "validation"],
+  "document.ajoute": ["cockpit", "classeur", "validation", "brief"],
   "document.rattache": ["classeur", "tresorerie"],
   // Correction de champs ou suppression d'une pièce. La trésorerie y figure
   // parce que supprimer une pièce RAPPROCHÉE défait le rapprochement : une
   // correction seule périmera la trésorerie pour rien, ce qui coûte une
   // requête — l'oublier coûterait un écran faux.
-  "document.modifie": ["cockpit", "classeur", "tresorerie"],
+  "document.modifie": ["cockpit", "classeur", "tresorerie", "brief"],
   // Un import FEC remplace les créances dérivées : impayés, marge, cockpit —
   // ET remplit la file, puisqu'il propose jusqu'à 200 immobilisations à
   // valider (comptes 2x/28x). C'est le premier geste d'un nouveau client.
@@ -124,6 +126,7 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   // affiché sur un écran qui ne parle pourtant jamais de comptabilité.
   "fec.importe": [
     "cockpit",
+    "brief",
     "connecteurs",
     "impayes",
     "marge",
@@ -136,33 +139,36 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   // D'où deux listes différentes — la nuance est le sujet, pas un détail.
   // `rh` y figure aussi : après purge, le €/h passe à « CA indisponible », et
   // laisser l'ancien chiffre à l'écran serait le pire des deux cas.
-  "fec.purge": ["cockpit", "connecteurs", "impayes", "marge", "tresorerie", "rh"],
+  "fec.purge": ["cockpit", "connecteurs", "impayes", "marge", "tresorerie", "rh", "brief"],
   "connecteur.modifie": ["cockpit", "connecteurs", "tresorerie", "impayes"],
   // Éteindre un module retire des pages de la NAV et des cartes du cockpit :
   // les deux doivent suivre sans rechargement (pivot ADR-007).
-  "module.bascule": ["nav", "cockpit", "connecteurs"],
+  "module.bascule": ["nav", "cockpit", "connecteurs", "brief"],
   "prospect.modifie": ["prospects", "cockpit"],
   // Le cockpit affiche les alertes de stock (quand le module est actif).
-  "stock.modifie": ["stocks", "cockpit"],
+  "stock.modifie": ["stocks", "cockpit", "brief"],
   // Salariés, absences, synchro paie. `marge` est de la sur-invalidation
   // ASSUMÉE : `analyze_margin` ne lit ni les salariés ni les immobilisations,
   // il lit les charges saisies et les factures — le lien passe par les comptes
   // 64x/68x du FEC, il est indirect. On recharge pour rien plutôt que de
   // risquer un écran faux, mais que personne ne s'appuie sur un lien direct.
-  "rh.modifie": ["rh", "marge"],
+  // `brief` en fait partie : l'effectif actif alimente le profil fiscal, et il
+  // fait basculer la date de dépôt DSN du 15 au 5 (DSN_EARLY_FILING_HEADCOUNT).
+  // Embaucher change donc l'échéance affichée le lendemain matin.
+  "rh.modifie": ["rh", "marge", "brief"],
   "immobilisation.modifiee": ["immobilisations", "marge"],
   "cout.modifie": ["marge"],
   "avis.modifie": ["avis"],
   // Le cockpit affiche la prochaine échéance fiscale (owner).
-  "echeance.modifiee": ["echeancier", "cockpit"],
+  "echeance.modifiee": ["echeancier", "cockpit", "brief"],
   // Création, modification, archivage d'une affaire (4.1). `cockpit` depuis F4 :
   // il affiche désormais la marge de chaque chantier.
-  "affaire.modifiee": ["affaires", "cockpit"],
+  "affaire.modifiee": ["affaires", "cockpit", "brief"],
   // Rattacher une pièce touche AUSSI le classeur (le document y affiche son
   // affaire) ET le cockpit depuis F4 : une dépense de plus change la marge du
   // chantier. La ligne annoncée par le commentaire d'origine a bougé, et rien
   // d'autre n'a eu à bouger — c'était le pari de cette config.
-  "affaire.imputee": ["affaires", "classeur", "cockpit"],
+  "affaire.imputee": ["affaires", "classeur", "cockpit", "brief"],
 };
 
 export function viewsFor(event: DomainEvent): readonly ViewKey[] {

@@ -13,15 +13,27 @@ import {
   withTenant,
 } from "@nodaq/db";
 import {
+  BRIEF_LATE_LOOKBACK_DAYS,
+  BRIEF_RULES_VERSION,
+  composeMorningBrief,
+  earliestDeadline,
+  ECHEANCE_HORIZON_DAYS,
+  lateDaysOf,
+  splitDeadlines,
+} from "./briefMatin.js";
+import type { BriefEcheance, BriefWorstMargin } from "./briefMatin.js";
+import {
   AFFAIRE_SUGGESTION_RULES_VERSION,
   buildSupplierHistory,
   suggestAffaires,
 } from "./affaireSuggestion.js";
 import {
   AFFAIRE_STATUSES,
+  AFFAIRES_MARGIN_SCAN_LIMIT,
   AffaireCreateInput,
   AffaireImputeInput,
   AffaireUpdateInput,
+  comparableMargin,
   imputationAmountIsCoherent,
   loadAffaireMargin,
   loadAffairesMargins,
@@ -59,9 +71,12 @@ import type { BankClient } from "@nodaq/mcp-connectors";
 import { defaultWritableProvider } from "@nodaq/secrets";
 import type { WritableSecretProvider } from "@nodaq/secrets";
 import {
+  applyTaxOverrides,
   ASSET_CATEGORIES,
+  buildTaxSchedule,
   CAPITALIZATION_THRESHOLD_CENTS,
   CreateNoteInput,
+  resolveTaxProfile,
   estimateIsImpact,
   buildDepreciationPlan,
   DATA_CATEGORIES,
@@ -79,7 +94,7 @@ import {
   VAT_REGIMES,
   VERTICALS,
 } from "@nodaq/shared";
-import type { RegistryAsset } from "@nodaq/shared";
+import type { RegistryAsset, TaxDeadlineOverride } from "@nodaq/shared";
 import {
   COST_CATEGORY_IDS,
   INTERACTION_KINDS,
@@ -3264,6 +3279,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     }
   });
 
+  /** Statuts d'une échéance — écriture ET relecture passent par ce schéma. */
+  const DeadlineStatus = z.enum(["prevu", "paye", "non_applicable"]);
+
   const DeadlineBody = z
     .object({
       obligationId: z.enum(Object.keys(TAX_OBLIGATIONS) as [string, ...string[]]),
@@ -3273,7 +3291,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       dueDate: IsoDay,
       // Montant DÉCLARÉ par le dirigeant : le produit n'en dérive jamais un.
       amountCents: z.number().int().min(0).max(100_000_000_00).nullable(),
-      status: z.enum(["prevu", "paye", "non_applicable"]),
+      status: DeadlineStatus,
       note: z.string().max(500).nullable(),
     })
     .strict();
@@ -5047,6 +5065,312 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     } finally {
       await toolset?.close().catch(() => undefined);
     }
+  });
+
+  /*
+   * F5 — le brief du matin.
+   *
+   * Premier écran lu de la journée, sur un téléphone, avant le café. Tout est
+   * assemblé à partir de moteurs déterministes déjà testés — aucun LLM, aucun
+   * chiffre calculé ici.
+   *
+   * Ce qui n'a pas pu être regardé est RENDU (`blindSpots`) : un brief qui omet
+   * silencieusement les impayés parce qu'aucun facturier n'est connecté laisse
+   * croire qu'il n'y en a pas.
+   */
+  app.get("/brief", { preHandler: businessRoute }, async (request, reply) => {
+    void reply.header("cache-control", "private, no-store");
+    const isOwner = request.membershipRole === "owner";
+    const blindSpots: { area: string; why: string }[] = [];
+
+    const [affairesOn, stocksOn, classeurOn] = await Promise.all([
+      isModuleActive(request.tenantId, "affaires"),
+      isModuleActive(request.tenantId, "stocks"),
+      isModuleActive(request.tenantId, "classeur"),
+    ]);
+
+    // Fenêtre d'échéancier : de quoi voir ce qui vient ET ce qui traîne. Le
+    // regard en arrière est borné parce qu'une échéance oubliée depuis un an
+    // n'est plus l'information du matin ; ce que cette borne laisse dehors se
+    // lit sur l'écran Échéancier, qui, lui, n'est pas borné.
+    const dayMs = 86_400_000;
+    const today = new Date();
+    // Date CIVILE française, pas UTC : l'échéancier raisonne en jours du
+    // calendrier français, et entre minuit et 2 h à Paris `toISOString()` rend
+    // la veille — un brief ouvert tôt daterait ses échéances d'un jour de trop.
+    const isoDaysFromNow = (days: number): string =>
+      new Intl.DateTimeFormat("fr-CA", { timeZone: "Europe/Paris" }).format(
+        new Date(today.getTime() + days * dayMs),
+      );
+    const todayIso = isoDaysFromNow(0);
+    const windowFrom = isoDaysFromNow(-BRIEF_LATE_LOOKBACK_DAYS);
+    const windowTo = isoDaysFromNow(ECHEANCE_HORIZON_DAYS);
+
+    const stockSql = async (tx: Parameters<Parameters<typeof withTenant>[1]>[0]) =>
+      stocksOn
+        ? await tx.$queryRaw<{ count: number }[]>`
+            SELECT count(*)::int AS count FROM stock_items
+            WHERE alert_threshold > 0 AND quantity <= alert_threshold`
+        : null;
+
+    const data = await withTenant(request.tenantId, async (tx) => {
+      const pendingActions = await tx.pendingAction.count({ where: { status: "pending" } });
+      const documentsAVerifier = classeurOn
+        ? await tx.classeurDocument.count({ where: { status: "a_verifier" } })
+        : null;
+
+      // Les montants sont owner-only, comme partout ailleurs (4.1, cockpit).
+      if (!isOwner) {
+        return {
+          pendingActions,
+          documentsAVerifier,
+          affaires: null,
+          hourlyCostKnown: null,
+          schedule: null,
+          annotated: new Set<string>(),
+          impayes: null,
+          fecWarnings: null,
+          stock: await stockSql(tx),
+        };
+      }
+
+      const stored = await tx.tenantProfile.findUnique({ where: { tenantId: request.tenantId } });
+      const margins = affairesOn
+        ? await loadAffairesMargins(tx, stored?.hourlyCostCents ?? null)
+        : null;
+
+      // Impayés EXIGIBLES : la retenue de garantie est due mais pas exigible,
+      // et relancer dessus est la faute qui coûte un client (US-8). Le filtre
+      // `residualCents > 0` est celui du moteur de dérivation — sans lui, une
+      // facture soldée par une pièce distincte ressort en retard.
+      //
+      // AGRÉGAT, pas `findMany` : cet écran s'ouvre tous les matins, et il n'a
+      // besoin que d'un compte et d'une somme.
+      const lastImport = await tx.fecImport.findFirst({
+        orderBy: { importedAt: "desc" },
+        select: { warnings: true },
+      });
+      const overdue =
+        lastImport === null
+          ? null
+          : await tx.fecInvoice.aggregate({
+              where: { settled: false, residualCents: { gt: 0 }, dueDate: { lt: today } },
+              _count: { _all: true },
+              _sum: { residualCents: true },
+            });
+
+      // Le calendrier est RECALCULÉ (2.9), il n'est pas stocké : la table ne
+      // porte que les décisions humaines. Lire la table seule laissait le brief
+      // muet sur une CA3 due dans deux jours dès lors que personne ne l'avait
+      // annotée — c'est-à-dire dans le cas nominal.
+      const activeStaff = await tx.staffMember.count({ where: { active: true } });
+      const overrides = await tx.taxDeadline.findMany({
+        where: {
+          dueDate: {
+            gte: new Date(`${windowFrom}T00:00:00Z`),
+            lte: new Date(`${windowTo}T00:00:00Z`),
+          },
+        },
+        select: { obligationId: true, dueDate: true, amountCents: true, status: true, note: true },
+      });
+      const schedule = applyTaxOverrides(
+        buildTaxSchedule(resolveTaxProfile(stored, activeStaff), windowFrom, windowTo),
+        overrides.map(
+          (row): TaxDeadlineOverride => ({
+            obligationId: row.obligationId,
+            dueDate: row.dueDate.toISOString().slice(0, 10),
+            amountCents: row.amountCents,
+            // Frontière typée, même sur une lecture : un statut inattendu
+            // sortirait l'occurrence de `stillDue`, donc du brief, en silence.
+            // `prevu` est le défaut du calendrier — on n'invente rien en y
+            // retombant, on refuse juste de disparaître.
+            status: DeadlineStatus.catch("prevu").parse(row.status),
+            note: row.note,
+          }),
+        ),
+      );
+
+      return {
+        pendingActions,
+        documentsAVerifier,
+        affaires: margins,
+        hourlyCostKnown: stored?.hourlyCostCents != null,
+        schedule,
+        // Occurrences que l'humain a EXPLICITEMENT pointées. `prevu` est le
+        // défaut d'`applyTaxOverrides` : sans cette clé, « non annotée » et
+        // « déclarée impayée » seraient indiscernables (voir plus bas).
+        annotated: new Set(
+          overrides.map((row) => `${row.obligationId}|${row.dueDate.toISOString().slice(0, 10)}`),
+        ),
+        impayes: overdue,
+        fecWarnings: FecWarnings.parse(lastImport?.warnings ?? []),
+        stock: await stockSql(tx),
+      };
+    });
+
+    if (!affairesOn) blindSpots.push({ area: "affaires", why: "module désactivé" });
+    if (!stocksOn) blindSpots.push({ area: "stocks", why: "module désactivé" });
+    if (!classeurOn) blindSpots.push({ area: "classeur", why: "module désactivé" });
+    if (!isOwner) {
+      blindSpots.push({ area: "montants et échéances", why: "réservés au dirigeant" });
+    } else if (data.impayes === null) {
+      blindSpots.push({ area: "impayés", why: "aucun import comptable" });
+    }
+    // Les limites de la dérivation FEC changent le chiffre lu (une retenue non
+    // rattachable reste comptée en impayé) : les taire ici ferait relancer un
+    // bon client sur une somme qui n'est pas exigible.
+    for (const warning of data.fecWarnings ?? []) {
+      blindSpots.push({ area: "impayés", why: warning });
+    }
+    // Ce que l'échéancier n'a pas pu proposer (régime non renseigné, par
+    // exemple) : sans ça, « aucune échéance » se lit « rien à payer ».
+    for (const gap of data.schedule?.gaps ?? []) {
+      blindSpots.push({ area: "échéancier", why: gap });
+    }
+    // Trois angles morts que F4 nomme déjà sur sa carte et que le brief perdait
+    // en route : une affaire non chiffrable n'est pas une affaire saine.
+    if (data.affaires !== null) {
+      if (data.affaires.ignorees > 0) {
+        blindSpots.push({
+          area: "affaires",
+          why: `${data.affaires.ignorees} affaire(s) ouverte(s) au-delà des ${AFFAIRES_MARGIN_SCAN_LIMIT} les plus récentes`,
+        });
+      }
+      if (data.affaires.nonChiffrables.length > 0) {
+        blindSpots.push({
+          area: "affaires",
+          why: `${data.affaires.nonChiffrables.length} affaire(s) sans marge calculable (devis ou coûts manquants)`,
+        });
+      }
+      if (data.hourlyCostKnown === false) {
+        blindSpots.push({
+          area: "marges",
+          why: "coût horaire non renseigné : la main-d'œuvre n'entre dans aucune marge",
+        });
+      }
+    }
+
+    // Affaires en perte : marge EXACTE négative, ou plafond négatif (« même au
+    // mieux, ce chantier perd »). Un plafond POSITIF ne dit rien et n'entre pas.
+    // Règle empruntée à F4, jamais réécrite ici.
+    const losing = (data.affaires?.aSurveiller ?? []).filter(
+      (row) => (comparableMargin(row.margin) ?? 0) < 0,
+    );
+    // La PIRE, pas un total — et sur sa propre base : un plafond aplati en
+    // marge exacte serait un chiffre faux rendu sans le moindre signe.
+    const worst = losing.reduce<BriefWorstMargin | null>((current, row) => {
+      const cents = comparableMargin(row.margin);
+      if (cents === null || (current !== null && cents >= current.cents)) return current;
+      return { cents, basis: row.margin.kind === "marge" ? "exact" : "au_mieux" };
+    }, null);
+    const overBudget = (data.affaires?.aSurveiller ?? []).filter(
+      (row) =>
+        (row.margin.kind === "marge" || row.margin.kind === "marge_borne_superieure") &&
+        (row.margin.budgetGap?.deltaCents ?? 0) > 0,
+    ).length;
+
+    const stillDue = (data.schedule?.deadlines ?? []).filter((line) => line.status === "prevu");
+    const toEcheance = (
+      line: (typeof stillDue)[number],
+      days: number,
+      windowOpen = false,
+    ): BriefEcheance => ({
+      days,
+      amountCents: line.amountCents,
+      dateIsApproximate: line.dateIsApproximate,
+      windowOpen,
+    });
+    /*
+     * TROIS ÉTATS, PAS DEUX — et le troisième n'était pas une subtilité.
+     *
+     * Filtrer sur « passée » d'un côté et « à venir » de l'autre laissait
+     * tomber tout ce qui est entre les deux : une CA3 datée du 15, dont la
+     * fenêtre légale court jusqu'au 24, n'était NI en retard (la marge
+     * d'approximation n'était pas écoulée) NI à venir (sa date basse était
+     * passée). L'obligation la plus récurrente du produit disparaissait du
+     * brief neuf jours par mois, sans un mot, sur l'écran dont tout l'argument
+     * est de ne rien taire.
+     *
+     * « EN RETARD » EXIGE UNE ANNOTATION HUMAINE — et ce n'est pas un détail
+     * non plus. `applyTaxOverrides` rend `prevu` par DÉFAUT : une occurrence
+     * que personne n'a pointée est indiscernable d'une occurrence déclarée
+     * impayée. Sans cette garde, la CA3 payée en juin mais jamais annotée — le
+     * cas nominal, puisque l'écran d'annotation est facultatif — criait « en
+     * retard de 55 jours » tous les matins. Un brief qui hurle au loup chaque
+     * matin, on cesse de l'ouvrir en trois jours.
+     *
+     * La fenêtre ouverte, elle, n'a pas besoin d'annotation : l'échéance est
+     * réellement due, personne ne peut affirmer le contraire.
+     *
+     * Le silence n'est pas une omission : le compte des occurrences passées non
+     * pointées part en angle mort, avec de quoi agir.
+     */
+    const split = splitDeadlines(stillDue, todayIso);
+    const key = (line: (typeof stillDue)[number]): string => `${line.obligationId}|${line.dueDate}`;
+    const late = split.late.filter((line) => data.annotated.has(key(line)));
+    const unpointed = split.late.length - late.length;
+    if (unpointed > 0) {
+      blindSpots.push({
+        area: "échéancier",
+        why: `${unpointed} échéance(s) passée(s) non pointée(s) : impossible de dire si elles sont payées`,
+      });
+    }
+    const oldestLate = earliestDeadline(late);
+    // Une fenêtre déjà ouverte passe devant une échéance encore à venir : elle
+    // se referme la première.
+    const openNow = earliestDeadline(split.windowOpen);
+    const nextUp = openNow ?? earliestDeadline(split.upcoming);
+
+    const brief = composeMorningBrief({
+      pendingActions: data.pendingActions,
+      documentsAVerifier: data.documentsAVerifier ?? 0,
+      // « Regardé et vide » n'est PAS « pas regardé » : module allumé et aucune
+      // affaire en perte reste un examen, avec un résultat.
+      affairesEnPerte: data.affaires === null ? null : { count: losing.length, worst },
+      budgetsDepasses: data.affaires === null ? null : overBudget,
+      echeances:
+        data.schedule === null
+          ? null
+          : {
+              enRetard:
+                oldestLate === null
+                  ? null
+                  : toEcheance(oldestLate, lateDaysOf(oldestLate, todayIso)),
+              prochaine:
+                nextUp === null
+                  ? null
+                  : nextUp === openNow
+                    ? toEcheance(nextUp, 0, true)
+                    : toEcheance(
+                        nextUp,
+                        Math.round(
+                          (Date.parse(`${nextUp.dueDate}T00:00:00Z`) -
+                            Date.parse(`${todayIso}T00:00:00Z`)) /
+                            dayMs,
+                        ),
+                      ),
+            },
+      impayes:
+        data.impayes === null
+          ? null
+          : {
+              count: data.impayes._count._all,
+              totalCents: Number(data.impayes._sum.residualCents ?? 0),
+              // Un avertissement de rattachement veut dire qu'une retenue a pu
+              // rester comptée en impayé : le qualificatif du montant doit
+              // cesser d'affirmer le contraire. Filtre LARGE à dessein — tous
+              // les avertissements de retenue ne portent pas sur les impayés,
+              // mais nuancer à tort coûte infiniment moins cher qu'affirmer
+              // « retenue exclue » sur un total qui en contient une.
+              retentionDeducted: !(data.fecWarnings ?? []).some((warning) =>
+                warning.includes("retenue"),
+              ),
+            },
+      stockSousSeuil: data.stock === null ? null : (data.stock[0]?.count ?? 0),
+      blindSpots,
+    });
+
+    return { ...brief, version: BRIEF_RULES_VERSION };
   });
 
   /*

@@ -30,16 +30,45 @@ function runSeed(env: Record<string, string> = {}): void {
 }
 
 /**
- * État métier normalisé du tenant démo — sans ids ni timestamps générés.
+ * Sérialisation canonique RÉCURSIVE : clés triées à tous les niveaux.
  *
- * L'ordre est rendu TOTAL côté JS, et c'est le sujet : `orderBy: [{ type }]`
- * ne départage pas trois `send_dunning`, donc Postgres pouvait rendre les
- * mêmes lignes dans un ordre différent d'un seed à l'autre et faire échouer
- * `toEqual` au hasard (issue #64). Un tri partiel dans un test de rejouabilité
- * ne teste pas la rejouabilité : il teste la chance.
+ * Le tri doit être TOTAL, et c'est tout le sujet (issue #64) : `orderBy:
+ * [{ type }]` ne départage pas trois `send_dunning`, donc Postgres rend les
+ * mêmes lignes dans un ordre variable d'un seed à l'autre et `toEqual` échoue
+ * au hasard. Un tri partiel dans un test de rejouabilité ne teste pas la
+ * rejouabilité : il teste la chance.
+ *
+ * La version précédente passait `Object.keys(row).sort()` en second argument de
+ * `JSON.stringify`. Ce n'est pas un ordre de clés : c'est une LISTE BLANCHE,
+ * appliquée à tous les niveaux. Seuls `type`, `status`, `employee` et `payload`
+ * survivaient — et comme aucune clé INTERNE au payload n'y figurait, tout
+ * payload se réduisait à `{}`. Les trois relances devenaient trois chaînes
+ * identiques, et le tri censé les départager les laissait exactement dans
+ * l'ordre de Postgres. La garde ne gardait rien, sans jamais le dire.
+ *
+ * On n'écrit donc pas `JSON.stringify(x, keys)` : on descend l'arbre.
  */
-function canonical(row: Record<string, unknown>): string {
-  return JSON.stringify(row, Object.keys(row).sort());
+function canonical(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  return `{${Object.entries(value)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, nested]) => `${JSON.stringify(key)}:${canonical(nested)}`)
+    .join(",")}}`;
+}
+
+/**
+ * Comparateur DÉTERMINISTE — pas `localeCompare`.
+ *
+ * La collation dépend de la locale du runner : deux machines peuvent ordonner
+ * les mêmes chaînes différemment. Dans un test qui compare deux snapshots
+ * produits sur la MÊME machine ce serait sans effet, mais un tri stable qui
+ * dépend de l'environnement est exactement le genre de détail qui refait
+ * surface un an plus tard.
+ */
+function byCanonical(a: unknown, b: unknown): number {
+  const [left, right] = [canonical(a), canonical(b)];
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 async function snapshot() {
@@ -54,10 +83,11 @@ async function snapshot() {
   });
   return {
     name: tenant.name,
-    // Tri sur le CONTENU entier : deux lignes identiques sont interchangeables,
-    // deux lignes différentes sont toujours ordonnées de la même façon.
-    pendingActions: [...pendingActions].sort((a, b) => canonical(a).localeCompare(canonical(b))),
-    connectors: [...connectors].sort((a, b) => canonical(a).localeCompare(canonical(b))),
+    // Tri sur le CONTENU entier, payload compris : deux lignes identiques sont
+    // interchangeables, deux lignes différentes sont toujours ordonnées de la
+    // même façon.
+    pendingActions: [...pendingActions].sort(byCanonical),
+    connectors: [...connectors].sort(byCanonical),
   };
 }
 
@@ -79,6 +109,24 @@ beforeAll(async () => {
 afterAll(async () => {
   await admin.$disconnect();
   await prisma.$disconnect();
+});
+
+describe("le tri du snapshot", () => {
+  it("distingue deux relances qui ne diffèrent QUE par leur payload", () => {
+    // Le bug d'issue #64, deuxième round : les trois `send_dunning` ne diffèrent
+    // que par leur payload. Un « tri » aveugle au payload les laisse dans
+    // l'ordre de Postgres, et le test de rejouabilité échoue une fois sur deux
+    // sans que rien ne signale que la garde ne gardait rien.
+    const base = { type: "send_dunning", status: "pending", employee: "compta" };
+    const un = { ...base, payload: { invoice: { number: "2026-124" } } };
+    const deux = { ...base, payload: { invoice: { number: "2026-125" } } };
+    expect(canonical(un)).not.toBe(canonical(deux));
+    expect(byCanonical(un, deux)).toBeLessThan(0);
+  });
+
+  it("ordonne indépendamment de l'ordre des clés — c'est ce qu'on lui demande", () => {
+    expect(canonical({ b: 1, a: { d: 2, c: 3 } })).toBe(canonical({ a: { c: 3, d: 2 }, b: 1 }));
+  });
 });
 
 describe("pnpm seed:demo", () => {

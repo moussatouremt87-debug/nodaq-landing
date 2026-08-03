@@ -25,8 +25,15 @@ import type { Vertical } from "./regulatoryWatch.js";
  * « désactivé par défaut du vertical » serait faux quand il l'est partout.
  */
 
-/** Catalog snapshot date — bump on every module/defaults change. */
-export const MODULE_CATALOG_VERSION = "2026-08-03";
+/**
+ * Catalog snapshot date — bump on every module/defaults change.
+ *
+ * A `.N` suffix disambiguates two changes landing on the SAME day (4.1 added
+ * `affaires`, F5 added `brief`, both on 2026-08-03). Reusing the date would
+ * hide the second change; dating it tomorrow would claim a snapshot that does
+ * not exist yet. The suffix keeps the value sortable and honest.
+ */
+export const MODULE_CATALOG_VERSION = "2026-08-03.2";
 
 export interface ModuleDefinition {
   id: string;
@@ -49,6 +56,18 @@ export interface ModuleDefinition {
 
 export const MODULES: readonly ModuleDefinition[] = [
   // ── SOCLE — l'assistant opérationnel quotidien ──────────────────────────
+  {
+    id: "brief",
+    title: "Brief du matin",
+    description:
+      "Ce qui a changé et ce qui vous attend, en trois lignes — assemblé à partir des " +
+      "écrans existants, sans rien recalculer.",
+    href: "/brief",
+    tools: [],
+    // Socle : c'est le premier écran de la journée. Il n'affiche que ce que
+    // les autres modules produisent, donc l'allumer n'impose rien.
+    defaultOn: "tous",
+  },
   {
     id: "affaires",
     title: "Affaires",

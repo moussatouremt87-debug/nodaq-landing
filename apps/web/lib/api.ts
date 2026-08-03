@@ -1724,6 +1724,47 @@ export const removeImputation = (
   );
 
 /*
+ * F5 — le brief du matin.
+ *
+ * Union discriminée : une matinée CALME n'est pas une liste vide qu'un écran
+ * pourrait rendre comme un brief raté. Et `blindSpots` porte ce que le produit
+ * n'a pas pu regarder — sans quoi « rien d'urgent » voudrait dire « rien vu ».
+ */
+const BriefItem = z.object({
+  kind: z.string(),
+  severity: z.enum(["urgent", "attention", "info"]),
+  label: z.string(),
+  count: z.number().nullable(),
+  amountCents: z.number().nullable(),
+  /**
+   * Ce que le montant EST (« la pire », « au mieux », « total exigible »).
+   *
+   * Vient de l'API et n'est jamais reconstruit ici : un plafond rendu nu se lit
+   * comme une marge exacte, et cet écran-là est lu à 7 h sans recul.
+   */
+  amountNote: z.string().nullable(),
+  href: z.string(),
+});
+const BlindSpot = z.object({ area: z.string(), why: z.string() });
+
+export const MorningBrief = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("calme"),
+    blindSpots: z.array(BlindSpot),
+    version: z.string(),
+  }),
+  z.object({
+    kind: z.literal("brief"),
+    items: z.array(BriefItem),
+    blindSpots: z.array(BlindSpot),
+    version: z.string(),
+  }),
+]);
+export type MorningBrief = z.infer<typeof MorningBrief>;
+
+export const getMorningBrief = (): Promise<MorningBrief> => call(MorningBrief, "/brief");
+
+/*
  * F4 — la marge de chaque chantier, pour le cockpit.
  *
  * Trois groupes SÉPARÉS, jamais un classement unique : mélanger une marge
