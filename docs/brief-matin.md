@@ -24,11 +24,26 @@ raté. Meubler une matinée calme apprend au patron à survoler — ce qui tue l
 feature plus sûrement qu'une journée vide.
 
 **2. Ce qu'on n'a pas pu regarder est dit.** `blindSpots` porte chaque domaine
-non examiné et sa raison : module éteint, aucun import comptable, montants
-réservés au dirigeant. Un brief qui omet silencieusement les impayés faute de
+non examiné et sa raison. Un brief qui omet silencieusement les impayés faute de
 facturier connecté laisse croire qu'il n'y en a pas — **le pire mensonge
 possible sur cet écran-là**. Les angles morts sont rendus même quand le brief
 est `calme`, sinon « rien d'urgent » voudrait dire « rien vu ».
+
+Ce qui y remonte aujourd'hui :
+
+| Angle mort | Source |
+|---|---|
+| module éteint (affaires, stocks, classeur) | registre 3.11 |
+| montants et échéances réservés au dirigeant | rôle `member` |
+| aucun import comptable | absence de `fec_imports` |
+| limites de la dérivation FEC (retenue non rattachable…) | `warnings` du dernier import |
+| régime fiscal non renseigné | `gaps` de l'échéancier (2.9) |
+| échéances passées non pointées | occurrences sans annotation humaine |
+| affaires au-delà de la borne de lecture, affaires sans marge calculable, coût horaire inconnu | F4 |
+
+Les trois derniers viennent de moteurs qui les nomment déjà sur leur propre
+écran : les perdre en route ferait dire au brief « tout va bien » sur des
+chantiers dont il ne sait rien.
 
 **3. Chaque ligne mène quelque part.** Une alerte sans action est une source
 d'anxiété, pas une information. Toutes les lignes portent un `href`.
@@ -37,7 +52,7 @@ d'anxiété, pas une information. Toutes les lignes portent un `href`.
 
 | Sévérité | Contenu | Pourquoi |
 |---|---|---|
-| `urgent` | affaire en perte, impayés, échéance ≤ 3 j | de l'argent part ou ne rentre pas, et on peut encore agir aujourd'hui |
+| `urgent` | affaire en perte, impayés, échéance en retard, échéance ≤ 3 j | de l'argent part ou ne rentre pas, et on peut encore agir aujourd'hui |
 | `attention` | budget matière dépassé, actions à valider, stock sous seuil, échéance ≤ 7 j | ça dérive, il est encore temps |
 | `info` | pièces à vérifier | à savoir, pas à faire |
 
@@ -61,7 +76,45 @@ pas un écran qui ment.
 
 Seules comptent une marge **exacte** négative ou un **plafond** négatif (« même
 au mieux, ce chantier perd »). Un plafond **positif** ne dit rien de la réalité
-et n'entre pas — même règle que la carte du cockpit (F4), pour la même raison.
+et n'entre pas — même règle que la carte du cockpit (F4), et littéralement la
+même fonction (`comparableMargin`) : réécrite ici, elle finirait un jour par
+contredire le cockpit sur le même chantier.
+
+Le montant affiché est **la pire** des affaires concernées, pas un total, et il
+porte sa base (`amountNote`). « −1 500 € » sous « 3 affaires perdent de
+l'argent » se lit comme une somme ; un plafond rendu nu se lit comme une marge
+constatée. Le qualificatif voyage **avec** le chiffre, depuis l'API — un écran
+qui l'oublierait rendrait un chiffre faux sans jamais planter.
+
+## L'échéancier : deux créneaux, et une annotation qui fait foi
+
+Le calendrier fiscal n'est **pas stocké** : il est recalculé à chaque lecture
+depuis le régime du tenant (2.9). La table `tax_deadlines` ne porte que les
+décisions humaines. Lire cette table seule — le premier réflexe — laissait le
+brief **muet sur une CA3 due dans deux jours** tant que personne ne l'avait
+annotée, c'est-à-dire dans le cas nominal.
+
+**Deux créneaux séparés**, jamais un seul : « en retard » et « à venir » sont
+deux problèmes distincts, et n'en garder qu'un laissait une pénalité vieille de
+deux mois occuper la place de la déclaration due après-demain.
+
+**« En retard » exige une annotation humaine.** Une occurrence que personne n'a
+pointée est `prevu` par défaut : impossible de la distinguer d'une échéance
+déclarée impayée. Sans cette garde, la CA3 payée en juin mais jamais annotée
+criait « en retard de 55 jours » tous les matins — et un brief qui hurle au loup
+chaque matin, on cesse de l'ouvrir en trois jours. Le silence n'est pas une
+omission : les occurrences passées non pointées partent en **angle mort**, avec
+de quoi agir.
+
+**Une date approximative reste approximative.** La date d'une CA3 dépend du
+SIREN ; le calendrier rend la borne **basse** de la fenêtre légale. Elle n'est
+donc jamais annoncée « en retard » avant la largeur de cette fenêtre
+(`APPROXIMATE_DUE_DATE_SLACK_DAYS`), et la phrase renvoie à l'espace
+professionnel plutôt que d'affirmer « dans 2 jours ».
+
+Le regard en arrière est borné à `BRIEF_LATE_LOOKBACK_DAYS` (deux mois) : au-delà,
+ce n'est plus l'information du matin, et ça reste visible sur l'écran Échéancier,
+qui n'est pas borné.
 
 ## Ce que F5 ne livre pas
 

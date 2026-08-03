@@ -287,8 +287,14 @@ export interface AffairesMarginsView {
   readonly ignorees: number;
 }
 
-/** Marge « au pire connu » d'une affaire, ou `null` si rien n'est chiffrable. */
-function comparableMargin(margin: AffaireMargin): number | null {
+/**
+ * Marge « au pire connu » d'une affaire, ou `null` si rien n'est chiffrable.
+ *
+ * EXPORTÉE parce que le brief du matin (F5) doit décider « en perte » avec
+ * EXACTEMENT cette règle : la réécrire ailleurs, c'est garantir qu'un jour la
+ * carte du cockpit et le brief se contrediront sur le même chantier.
+ */
+export function comparableMargin(margin: AffaireMargin): number | null {
   if (margin.kind === "marge") return margin.marginCents;
   // Un PLAFOND négatif est une information forte : même au mieux, ce chantier
   // perd de l'argent. Un plafond positif, lui, ne dit rien de la réalité.

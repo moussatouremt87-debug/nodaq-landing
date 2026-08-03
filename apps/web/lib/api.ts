@@ -1736,6 +1736,13 @@ const BriefItem = z.object({
   label: z.string(),
   count: z.number().nullable(),
   amountCents: z.number().nullable(),
+  /**
+   * Ce que le montant EST (« la pire », « au mieux », « total exigible »).
+   *
+   * Vient de l'API et n'est jamais reconstruit ici : un plafond rendu nu se lit
+   * comme une marge exacte, et cet écran-là est lu à 7 h sans recul.
+   */
+  amountNote: z.string().nullable(),
   href: z.string(),
 });
 const BlindSpot = z.object({ area: z.string(), why: z.string() });

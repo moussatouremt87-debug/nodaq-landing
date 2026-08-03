@@ -16,12 +16,11 @@ import {
   describeCatalog,
   FILTER_OPERATORS,
   matchRegulatoryItems,
-  PAYROLL_PERIODICITIES,
+  resolveTaxProfile,
   TenantId,
-  VAT_REGIMES,
   VERTICALS,
 } from "@nodaq/shared";
-import type { PayrollPeriodicity, TaxDeadlineOverride, VatRegime, Vertical } from "@nodaq/shared";
+import type { TaxDeadlineOverride, Vertical } from "@nodaq/shared";
 import { scoreLatePayment } from "./dunning.js";
 import { extractInvoiceFields } from "./invoiceExtraction.js";
 import { analyzeReputation } from "./reputation.js";
@@ -840,29 +839,10 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
         }),
       }));
 
-      // Un régime non reconnu retombe sur `inconnu` : l'échéancier le DIT au
-      // lieu de proposer les échéances d'un régime supposé.
-      const vatRegime: VatRegime = (VAT_REGIMES as readonly string[]).includes(
-        stored?.vatRegime ?? "",
-      )
-        ? (stored?.vatRegime as VatRegime)
-        : "inconnu";
-      const payrollPeriodicity: PayrollPeriodicity = (
-        PAYROLL_PERIODICITIES as readonly string[]
-      ).includes(stored?.payrollPeriodicity ?? "")
-        ? (stored?.payrollPeriodicity as PayrollPeriodicity)
-        : "aucune";
-      // Même règle d'effectif qu'en 3.7 : déclaré, sinon dérivé de l'équipe,
-      // sinon INCONNU (jamais lu comme zéro).
-      const headcount = stored?.headcountOverride ?? (activeStaff > 0 ? activeStaff : null);
-
-      const profile = {
-        vatRegime,
-        corporateTaxLiable: stored?.corporateTaxLiable ?? true,
-        fiscalYearEndMonth: stored?.fiscalYearEndMonth ?? 12,
-        payrollPeriodicity,
-        headcount,
-      };
+      // Dérivation PARTAGÉE (packages/shared) : le brief du matin lit le même
+      // échéancier, et deux dérivations parallèles du profil, ce sont deux
+      // calendriers qui divergent sans que rien ne le signale.
+      const profile = resolveTaxProfile(stored, activeStaff);
       const planned = applyTaxOverrides(
         buildTaxSchedule(profile, from, to),
         overrides.map(

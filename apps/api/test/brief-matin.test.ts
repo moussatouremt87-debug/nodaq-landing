@@ -17,12 +17,19 @@ const RIEN: BriefInput = {
   pendingActions: 0,
   affairesEnPerte: null,
   budgetsDepasses: null,
-  prochaineEcheance: null,
+  echeances: null,
   impayes: null,
   stockSousSeuil: null,
   documentsAVerifier: 0,
   blindSpots: [],
 };
+
+/** Échéance à J+`days`, montant déclaré, date certaine sauf mention. */
+const echeance = (days: number, amountCents: number | null = null, approx = false) => ({
+  days,
+  amountCents,
+  dateIsApproximate: approx,
+});
 
 describe("config versionnée", () => {
   it("porte une version datée", () => {
@@ -58,12 +65,35 @@ describe("ce qui remonte en URGENT — de l'argent qui part ou ne rentre pas", (
       ...RIEN,
       pendingActions: 4,
       documentsAVerifier: 9,
-      affairesEnPerte: { count: 1, worstCents: -150_000 },
+      affairesEnPerte: { count: 1, worst: { cents: -150_000, basis: "exact" } },
     });
     if (brief.kind !== "brief") throw new Error("cas attendu");
     expect(brief.items[0]?.kind).toBe("affaire_en_perte");
     expect(brief.items[0]?.severity).toBe("urgent");
     expect(brief.items[0]?.amountCents).toBe(-150_000);
+    // Une seule affaire, marge exacte : rien à nuancer.
+    expect(brief.items[0]?.amountNote).toBeNull();
+  });
+
+  it("un montant issu d'un PLAFOND ne se rend jamais comme une marge exacte", () => {
+    // « au mieux −1 500 € » veut dire que la réalité est PIRE. Rendu nu, ce
+    // chiffre se lit comme la perte constatée — et rassure à tort.
+    const brief = composeMorningBrief({
+      ...RIEN,
+      affairesEnPerte: { count: 1, worst: { cents: -150_000, basis: "au_mieux" } },
+    });
+    if (brief.kind !== "brief") throw new Error("cas attendu");
+    expect(brief.items[0]?.amountNote).toContain("au mieux");
+    expect(brief.items[0]?.amountNote).toContain("pire");
+  });
+
+  it("sur PLUSIEURS affaires, le montant est dit « la pire », jamais un total", () => {
+    const brief = composeMorningBrief({
+      ...RIEN,
+      affairesEnPerte: { count: 3, worst: { cents: -150_000, basis: "exact" } },
+    });
+    if (brief.kind !== "brief") throw new Error("cas attendu");
+    expect(brief.items[0]?.amountNote).toContain("la pire");
   });
 
   it("des impayés remontent avec leur montant EXIGIBLE", () => {
@@ -80,14 +110,14 @@ describe("ce qui remonte en URGENT — de l'argent qui part ou ne rentre pas", (
   it("une échéance à trois jours est urgente, à sept elle est une attention", () => {
     const urgent = composeMorningBrief({
       ...RIEN,
-      prochaineEcheance: { days: 2, amountCents: 120_000 },
+      echeances: { enRetard: null, prochaine: echeance(2, 120_000) },
     });
     if (urgent.kind !== "brief") throw new Error("cas attendu");
     expect(urgent.items[0]?.severity).toBe("urgent");
 
     const attention = composeMorningBrief({
       ...RIEN,
-      prochaineEcheance: { days: 6, amountCents: 120_000 },
+      echeances: { enRetard: null, prochaine: echeance(6, 120_000) },
     });
     if (attention.kind !== "brief") throw new Error("cas attendu");
     expect(attention.items[0]?.severity).toBe("attention");
@@ -96,9 +126,47 @@ describe("ce qui remonte en URGENT — de l'argent qui part ou ne rentre pas", (
   it("une échéance lointaine ne remonte PAS : ce n'est pas l'affaire du matin", () => {
     const brief = composeMorningBrief({
       ...RIEN,
-      prochaineEcheance: { days: 40, amountCents: 120_000 },
+      echeances: { enRetard: null, prochaine: echeance(40, 120_000) },
     });
     expect(brief.kind).toBe("calme");
+  });
+
+  it("une échéance DÉJÀ passée est dite « en retard », jamais « due aujourd'hui »", () => {
+    // Le retard n'est pas une échéance proche : la pénalité court déjà, et
+    // afficher « due aujourd'hui » ferait croire qu'il reste la journée.
+    const brief = composeMorningBrief({
+      ...RIEN,
+      echeances: { enRetard: echeance(12, 120_000), prochaine: null },
+    });
+    if (brief.kind !== "brief") throw new Error("cas attendu");
+    expect(brief.items[0]?.kind).toBe("echeance_en_retard");
+    expect(brief.items[0]?.severity).toBe("urgent");
+    expect(brief.items[0]?.label).toContain("retard de 12 jours");
+  });
+
+  it("un retard ne MASQUE pas la prochaine échéance : deux lignes, deux problèmes", () => {
+    // Le bug d'origine : une seule case, prise par la plus ancienne, laissait
+    // le brief muet sur la CA3 due après-demain.
+    const brief = composeMorningBrief({
+      ...RIEN,
+      echeances: { enRetard: echeance(55, null), prochaine: echeance(2, 90_000) },
+    });
+    if (brief.kind !== "brief") throw new Error("cas attendu");
+    expect(brief.items.map((item) => item.kind)).toEqual([
+      "echeance_en_retard",
+      "echeance_proche",
+    ]);
+  });
+
+  it("une date APPROXIMATIVE ne se rend jamais comme une date certaine", () => {
+    // La date d'une CA3 dépend du SIREN : le calendrier rend la borne basse de
+    // la fenêtre légale. « dans 2 jours » y serait une certitude inventée.
+    const brief = composeMorningBrief({
+      ...RIEN,
+      echeances: { enRetard: null, prochaine: echeance(2, null, true) },
+    });
+    if (brief.kind !== "brief") throw new Error("cas attendu");
+    expect(brief.items[0]?.label).toContain("espace professionnel");
   });
 });
 
@@ -137,11 +205,11 @@ describe("chaque ligne mène quelque part", () => {
       stockSousSeuil: 1,
       budgetsDepasses: 1,
       impayes: { count: 1, totalCents: 1 },
-      affairesEnPerte: { count: 1, worstCents: -1 },
-      prochaineEcheance: { days: 1, amountCents: 1 },
+      affairesEnPerte: { count: 1, worst: { cents: -1, basis: "exact" } },
+      echeances: { enRetard: echeance(4, 1), prochaine: echeance(1, 1) },
     });
     if (brief.kind !== "brief") throw new Error("cas attendu");
-    expect(brief.items).toHaveLength(7);
+    expect(brief.items).toHaveLength(8);
     for (const item of brief.items) {
       expect(item.href).toMatch(/^\//);
       expect(item.label.length).toBeGreaterThan(0);
@@ -162,9 +230,11 @@ describe("zéro n'est pas une nouvelle", () => {
     const brief = composeMorningBrief({
       ...RIEN,
       impayes: { count: 0, totalCents: 0 },
-      affairesEnPerte: { count: 0, worstCents: 0 },
+      affairesEnPerte: { count: 0, worst: { cents: 0, basis: "exact" } },
       budgetsDepasses: 0,
       stockSousSeuil: 0,
+      // Échéancier REGARDÉ et vide : ni ligne, ni angle mort.
+      echeances: { enRetard: null, prochaine: null },
     });
     // « 0 impayé » est du bruit : on ne le dit pas, on ne l'affiche pas.
     expect(brief.kind).toBe("calme");

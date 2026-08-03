@@ -69,6 +69,49 @@ export interface TaxProfile {
   headcount: number | null;
 }
 
+/** Profil tel qu'il est STOCKÉ : tout est optionnel, rien n'est garanti. */
+export interface StoredTaxProfile {
+  vatRegime?: string | null;
+  corporateTaxLiable?: boolean | null;
+  fiscalYearEndMonth?: number | null;
+  payrollPeriodicity?: string | null;
+  headcountOverride?: number | null;
+}
+
+/**
+ * Traduit le profil stocké en `TaxProfile` exploitable. PURE.
+ *
+ * Vit ici, avec le calendrier, parce que deux appelants (l'outil d'agent 2.9 et
+ * le brief du matin F5) doivent lire le MÊME échéancier : deux dérivations
+ * parallèles du profil, c'est deux calendriers qui divergent sans que rien ne
+ * le signale.
+ *
+ * Un régime non reconnu retombe sur `inconnu` — l'échéancier le DIT (`gaps`)
+ * au lieu de proposer les échéances d'un régime supposé. L'effectif suit la
+ * règle de 3.7 : déclaré, sinon dérivé de l'équipe active, sinon INCONNU —
+ * jamais lu comme zéro.
+ */
+export function resolveTaxProfile(
+  stored: StoredTaxProfile | null | undefined,
+  activeStaff: number,
+): TaxProfile {
+  const vatRegime: VatRegime = (VAT_REGIMES as readonly string[]).includes(stored?.vatRegime ?? "")
+    ? (stored?.vatRegime as VatRegime)
+    : "inconnu";
+  const payrollPeriodicity: PayrollPeriodicity = (
+    PAYROLL_PERIODICITIES as readonly string[]
+  ).includes(stored?.payrollPeriodicity ?? "")
+    ? (stored?.payrollPeriodicity as PayrollPeriodicity)
+    : "aucune";
+  return {
+    vatRegime,
+    corporateTaxLiable: stored?.corporateTaxLiable ?? true,
+    fiscalYearEndMonth: stored?.fiscalYearEndMonth ?? 12,
+    payrollPeriodicity,
+    headcount: stored?.headcountOverride ?? (activeStaff > 0 ? activeStaff : null),
+  };
+}
+
 export type TaxCategory = "tva" | "is" | "social" | "locale";
 
 export interface TaxObligation {
@@ -168,6 +211,16 @@ export const DSN_EARLY_FILING_HEADCOUNT = 50;
 
 /** Borne basse de la fenêtre de dépôt CA3 (la date exacte dépend du SIREN). */
 const CA3_WINDOW = { from: 15, to: 24 } as const;
+
+/**
+ * Largeur de l'incertitude, en jours, sur une date `dateIsApproximate`.
+ *
+ * La date rendue est la borne BASSE de la fenêtre légale ; la vraie date se
+ * situe quelque part dans les jours qui suivent. Un aval qui déclare « en
+ * retard » doit attendre cette marge : annoncer une pénalité qui n'existe pas
+ * coûte plus cher que de la signaler un jour trop tard.
+ */
+export const APPROXIMATE_DUE_DATE_SLACK_DAYS = CA3_WINDOW.to - CA3_WINDOW.from;
 
 export interface TaxOccurrence {
   obligationId: string;

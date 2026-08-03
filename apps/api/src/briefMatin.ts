@@ -39,6 +39,7 @@ export type BriefItemKind =
   | "actions_a_valider"
   | "affaire_en_perte"
   | "budget_depasse"
+  | "echeance_en_retard"
   | "echeance_proche"
   | "impayes"
   | "stock_sous_seuil"
@@ -52,6 +53,16 @@ export interface BriefItem {
   readonly count: number | null;
   /** Montant en centimes. `null` = pas de montant à ce niveau, jamais zéro par défaut. */
   readonly amountCents: number | null;
+  /**
+   * Ce que le montant EST, en français, quand il n'est pas évident.
+   *
+   * « −1 500 € » sous « 3 affaires perdent de l'argent » se lit comme un total
+   * alors que c'est la pire des trois ; et un plafond rendu nu se lit comme une
+   * marge exacte. Le qualificatif voyage AVEC le chiffre plutôt que d'être
+   * reconstruit par chaque écran — un écran qui oublierait la nuance rendrait
+   * un chiffre faux sans jamais planter.
+   */
+  readonly amountNote: string | null;
   /** Chaque ligne mène quelque part : une alerte sans action est une anxiété. */
   readonly href: string;
 }
@@ -77,15 +88,68 @@ export type MorningBrief =
 /** Une échéance fiscale devient « proche » à sept jours. */
 export const ECHEANCE_HORIZON_DAYS = 7;
 
+/** En deçà, une échéance n'attend plus : elle coûte déjà. */
+export const ECHEANCE_URGENT_DAYS = 3;
+
+/**
+ * Profondeur de recherche des échéances en retard.
+ *
+ * Deux mois : de quoi couvrir un cycle déclaratif complet sans transformer le
+ * brief en archive. Une échéance oubliée depuis un an n'est plus l'information
+ * du matin — elle reste visible sur l'écran Échéancier, qui n'est pas borné.
+ */
+export const BRIEF_LATE_LOOKBACK_DAYS = 60;
+
+/**
+ * La pire marge connue d'un lot d'affaires, et sur quelle base elle est connue.
+ *
+ * `au_mieux` = plafond (`marge_borne_superieure`) : la marge réelle est PIRE ou
+ * égale. Les deux ne se mélangent pas dans un `number` — un plafond aplati en
+ * marge exacte, c'est un chiffre faux rendu sans le moindre signe extérieur.
+ */
+export interface BriefWorstMargin {
+  readonly cents: number;
+  readonly basis: "exact" | "au_mieux";
+}
+
+/**
+ * Une échéance fiscale du calendrier (2.9), vue par le brief.
+ *
+ * `dateIsApproximate` remonte jusqu'ici parce qu'il change la PHRASE : la date
+ * rendue par le calendrier est alors la borne basse d'une fenêtre légale, et
+ * « dans 2 jours » y serait une certitude que nous n'avons pas.
+ */
+export interface BriefEcheance {
+  /** Jours restants (≥ 0) pour `prochaine`, jours de retard (> 0) pour `enRetard`. */
+  readonly days: number;
+  /** Montant DÉCLARÉ par le dirigeant. `null` = inconnu, jamais estimé. */
+  readonly amountCents: number | null;
+  readonly dateIsApproximate: boolean;
+}
+
 export interface BriefInput {
   /** Actions en attente de validation. */
   readonly pendingActions: number;
   /** Affaires dont la marge connue est négative (F4). `null` = non regardé. */
-  readonly affairesEnPerte: { readonly count: number; readonly worstCents: number } | null;
+  readonly affairesEnPerte: {
+    readonly count: number;
+    readonly worst: BriefWorstMargin;
+  } | null;
   /** Affaires dont le budget matière est dépassé (F4). `null` = non regardé. */
   readonly budgetsDepasses: number | null;
-  /** Prochaine échéance fiscale, en jours et en centimes. `null` = non regardé. */
-  readonly prochaineEcheance: { readonly days: number; readonly amountCents: number | null } | null;
+  /**
+   * Échéancier fiscal (2.9). `null` = non regardé (membre, ou module éteint).
+   *
+   * DEUX créneaux, jamais un seul : une échéance en retard et la prochaine à
+   * venir sont deux problèmes distincts, et n'en garder qu'un laissait une
+   * pénalité vieille de deux mois masquer la CA3 due après-demain.
+   */
+  readonly echeances: {
+    /** La PLUS ANCIENNE échéance encore due et déjà passée. */
+    readonly enRetard: BriefEcheance | null;
+    /** La prochaine à venir, dans l'horizon. */
+    readonly prochaine: BriefEcheance | null;
+  } | null;
   /** Impayés exigibles — retenue de garantie EXCLUE (US-8). `null` = non regardé. */
   readonly impayes: { readonly count: number; readonly totalCents: number } | null;
   /** Articles sous le seuil d'alerte. `null` = module éteint ou non regardé. */
@@ -111,15 +175,23 @@ export function composeMorningBrief(input: BriefInput): MorningBrief {
   // De l'argent qui part : une affaire en perte est le seul cas où le patron
   // peut encore changer quelque chose aujourd'hui.
   if (input.affairesEnPerte !== null && input.affairesEnPerte.count > 0) {
+    const { count, worst } = input.affairesEnPerte;
     items.push({
       kind: "affaire_en_perte",
       severity: "urgent",
-      label:
-        input.affairesEnPerte.count === 1
-          ? "1 affaire perd de l'argent"
-          : `${input.affairesEnPerte.count} affaires perdent de l'argent`,
-      count: input.affairesEnPerte.count,
-      amountCents: input.affairesEnPerte.worstCents,
+      label: count === 1 ? "1 affaire perd de l'argent" : `${count} affaires perdent de l'argent`,
+      count,
+      amountCents: worst.cents,
+      // Ni un total, ni forcément une marge exacte : les deux malentendus
+      // possibles sur ce chiffre-là sont écrits à côté de lui.
+      amountNote:
+        worst.basis === "au_mieux"
+          ? count === 1
+            ? "au mieux — la marge réelle est pire"
+            : "la pire, au mieux — la marge réelle est pire"
+          : count === 1
+            ? null
+            : "la pire des affaires concernées",
       href: "/affaires",
     });
   }
@@ -135,21 +207,47 @@ export function composeMorningBrief(input: BriefInput): MorningBrief {
           : `${input.impayes.count} factures en retard de paiement`,
       count: input.impayes.count,
       amountCents: input.impayes.totalCents,
+      amountNote: "total exigible, retenue de garantie exclue",
       href: "/",
     });
   }
 
+  // Une échéance DÉJÀ passée et toujours due : la pénalité court, et elle ne
+  // doit pas occuper la place de la suivante — c'est un problème distinct.
+  const enRetard = input.echeances?.enRetard ?? null;
+  if (enRetard !== null) {
+    items.push({
+      kind: "echeance_en_retard",
+      severity: "urgent",
+      label:
+        enRetard.days === 1
+          ? "Une échéance fiscale est en retard d'1 jour"
+          : `Une échéance fiscale est en retard de ${enRetard.days} jours`,
+      count: null,
+      amountCents: enRetard.amountCents,
+      amountNote: enRetard.amountCents === null ? null : "montant que vous avez déclaré",
+      href: "/echeancier",
+    });
+  }
+
   // Une échéance fiscale ratée coûte une pénalité : urgent à trois jours.
-  if (input.prochaineEcheance !== null && input.prochaineEcheance.days <= ECHEANCE_HORIZON_DAYS) {
+  const prochaine = input.echeances?.prochaine ?? null;
+  if (prochaine !== null && prochaine.days <= ECHEANCE_HORIZON_DAYS) {
     items.push({
       kind: "echeance_proche",
-      severity: input.prochaineEcheance.days <= 3 ? "urgent" : "attention",
-      label:
-        input.prochaineEcheance.days <= 0
+      severity: prochaine.days <= ECHEANCE_URGENT_DAYS ? "urgent" : "attention",
+      // Sur une date approximative, la borne rendue est celle du DÉBUT de la
+      // fenêtre légale : « dans 2 jours » y serait une certitude inventée.
+      label: prochaine.dateIsApproximate
+        ? prochaine.days === 0
+          ? "Une échéance fiscale s'ouvre aujourd'hui (date exacte selon votre espace professionnel)"
+          : `Échéance fiscale à préparer sous ${prochaine.days} jour${prochaine.days === 1 ? "" : "s"} (date exacte selon votre espace professionnel)`
+        : prochaine.days === 0
           ? "Une échéance fiscale est due aujourd'hui"
-          : `Échéance fiscale dans ${input.prochaineEcheance.days} jour(s)`,
+          : `Échéance fiscale dans ${prochaine.days} jour${prochaine.days === 1 ? "" : "s"}`,
       count: null,
-      amountCents: input.prochaineEcheance.amountCents,
+      amountCents: prochaine.amountCents,
+      amountNote: prochaine.amountCents === null ? null : "montant que vous avez déclaré",
       href: "/echeancier",
     });
   }
@@ -165,6 +263,7 @@ export function composeMorningBrief(input: BriefInput): MorningBrief {
           : `${input.budgetsDepasses} affaires dépassent leur budget matière`,
       count: input.budgetsDepasses,
       amountCents: null,
+      amountNote: null,
       href: "/affaires",
     });
   }
@@ -179,6 +278,7 @@ export function composeMorningBrief(input: BriefInput): MorningBrief {
           : `${input.pendingActions} actions attendent votre validation`,
       count: input.pendingActions,
       amountCents: null,
+      amountNote: null,
       href: "/validation",
     });
   }
@@ -193,6 +293,7 @@ export function composeMorningBrief(input: BriefInput): MorningBrief {
           : `${input.stockSousSeuil} articles sous le seuil d'alerte`,
       count: input.stockSousSeuil,
       amountCents: null,
+      amountNote: null,
       href: "/stocks",
     });
   }
@@ -208,6 +309,7 @@ export function composeMorningBrief(input: BriefInput): MorningBrief {
           : `${input.documentsAVerifier} pièces photographiées à vérifier`,
       count: input.documentsAVerifier,
       amountCents: null,
+      amountNote: null,
       href: "/classeur",
     });
   }

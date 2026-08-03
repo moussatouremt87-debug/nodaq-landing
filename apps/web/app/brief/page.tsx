@@ -71,6 +71,10 @@ export default function BriefPage() {
               {item.amountCents !== null && (
                 <span className="hint" style={{ fontVariantNumeric: "tabular-nums" }}>
                   {formatEuroCents(item.amountCents)}
+                  {/* Le qualificatif vient de l'API et voyage AVEC le chiffre :
+                      « −1 500 € » sous « 3 affaires perdent de l'argent » se
+                      lirait comme un total, et un plafond comme une marge. */}
+                  {item.amountNote !== null && ` — ${item.amountNote}`}
                 </span>
               )}
             </Link>

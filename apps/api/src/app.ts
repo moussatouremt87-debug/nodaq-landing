@@ -12,7 +12,13 @@ import {
   withOps,
   withTenant,
 } from "@nodaq/db";
-import { BRIEF_RULES_VERSION, composeMorningBrief } from "./briefMatin.js";
+import {
+  BRIEF_LATE_LOOKBACK_DAYS,
+  BRIEF_RULES_VERSION,
+  composeMorningBrief,
+  ECHEANCE_HORIZON_DAYS,
+} from "./briefMatin.js";
+import type { BriefEcheance, BriefWorstMargin } from "./briefMatin.js";
 import {
   AFFAIRE_SUGGESTION_RULES_VERSION,
   buildSupplierHistory,
@@ -20,9 +26,11 @@ import {
 } from "./affaireSuggestion.js";
 import {
   AFFAIRE_STATUSES,
+  AFFAIRES_MARGIN_SCAN_LIMIT,
   AffaireCreateInput,
   AffaireImputeInput,
   AffaireUpdateInput,
+  comparableMargin,
   imputationAmountIsCoherent,
   loadAffaireMargin,
   loadAffairesMargins,
@@ -60,9 +68,13 @@ import type { BankClient } from "@nodaq/mcp-connectors";
 import { defaultWritableProvider } from "@nodaq/secrets";
 import type { WritableSecretProvider } from "@nodaq/secrets";
 import {
+  APPROXIMATE_DUE_DATE_SLACK_DAYS,
+  applyTaxOverrides,
   ASSET_CATEGORIES,
+  buildTaxSchedule,
   CAPITALIZATION_THRESHOLD_CENTS,
   CreateNoteInput,
+  resolveTaxProfile,
   estimateIsImpact,
   buildDepreciationPlan,
   DATA_CATEGORIES,
@@ -80,7 +92,7 @@ import {
   VAT_REGIMES,
   VERTICALS,
 } from "@nodaq/shared";
-import type { RegistryAsset } from "@nodaq/shared";
+import type { RegistryAsset, TaxDeadlineOverride } from "@nodaq/shared";
 import {
   COST_CATEGORY_IDS,
   INTERACTION_KINDS,
@@ -5072,15 +5084,30 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       isModuleActive(request.tenantId, "classeur"),
     ]);
 
+    // Fenêtre d'échéancier : de quoi voir ce qui vient ET ce qui traîne. Le
+    // regard en arrière est borné parce qu'une échéance oubliée depuis un an
+    // n'est plus l'information du matin ; ce que cette borne laisse dehors se
+    // lit sur l'écran Échéancier, qui, lui, n'est pas borné.
+    const dayMs = 86_400_000;
+    const today = new Date();
+    const todayIso = today.toISOString().slice(0, 10);
+    const isoDaysFromNow = (days: number): string =>
+      new Date(today.getTime() + days * dayMs).toISOString().slice(0, 10);
+    const windowFrom = isoDaysFromNow(-BRIEF_LATE_LOOKBACK_DAYS);
+    const windowTo = isoDaysFromNow(ECHEANCE_HORIZON_DAYS);
+
+    const stockSql = async (tx: Parameters<Parameters<typeof withTenant>[1]>[0]) =>
+      stocksOn
+        ? await tx.$queryRaw<{ count: number }[]>`
+            SELECT count(*)::int AS count FROM stock_items
+            WHERE alert_threshold > 0 AND quantity <= alert_threshold`
+        : null;
+
     const data = await withTenant(request.tenantId, async (tx) => {
       const pendingActions = await tx.pendingAction.count({ where: { status: "pending" } });
       const documentsAVerifier = classeurOn
         ? await tx.classeurDocument.count({ where: { status: "a_verifier" } })
         : null;
-
-      const profile = await tx.tenantProfile.findUnique({
-        where: { tenantId: request.tenantId },
-      });
 
       // Les montants sont owner-only, comme partout ailleurs (4.1, cockpit).
       if (!isOwner) {
@@ -5088,49 +5115,82 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           pendingActions,
           documentsAVerifier,
           affaires: null,
-          echeance: null,
+          hourlyCostKnown: null,
+          schedule: null,
+          annotated: new Set<string>(),
           impayes: null,
-          stock: stocksOn
-            ? await tx.$queryRaw<{ count: number }[]>`
-                SELECT count(*)::int AS count FROM stock_items
-                WHERE alert_threshold > 0 AND quantity <= alert_threshold`
-            : null,
+          fecWarnings: null,
+          stock: await stockSql(tx),
         };
       }
 
+      const stored = await tx.tenantProfile.findUnique({ where: { tenantId: request.tenantId } });
       const margins = affairesOn
-        ? await loadAffairesMargins(tx, profile?.hourlyCostCents ?? null)
+        ? await loadAffairesMargins(tx, stored?.hourlyCostCents ?? null)
         : null;
 
       // Impayés EXIGIBLES : la retenue de garantie est due mais pas exigible,
-      // et relancer dessus est la faute qui coûte un client (US-8).
-      const imports = await tx.fecImport.count();
+      // et relancer dessus est la faute qui coûte un client (US-8). Le filtre
+      // `residualCents > 0` est celui du moteur de dérivation — sans lui, une
+      // facture soldée par une pièce distincte ressort en retard.
+      //
+      // AGRÉGAT, pas `findMany` : cet écran s'ouvre tous les matins, et il n'a
+      // besoin que d'un compte et d'une somme.
+      const lastImport = await tx.fecImport.findFirst({
+        orderBy: { importedAt: "desc" },
+        select: { warnings: true },
+      });
       const overdue =
-        imports === 0
+        lastImport === null
           ? null
-          : await tx.fecInvoice.findMany({
-              where: { settled: false, dueDate: { lt: new Date() } },
-              select: { residualCents: true },
+          : await tx.fecInvoice.aggregate({
+              where: { settled: false, residualCents: { gt: 0 }, dueDate: { lt: today } },
+              _count: { _all: true },
+              _sum: { residualCents: true },
             });
 
-      const deadlines = await tx.taxDeadline.findMany({
-        where: { status: "prevu" },
-        orderBy: [{ dueDate: "asc" }],
-        take: 1,
-        select: { dueDate: true, amountCents: true },
+      // Le calendrier est RECALCULÉ (2.9), il n'est pas stocké : la table ne
+      // porte que les décisions humaines. Lire la table seule laissait le brief
+      // muet sur une CA3 due dans deux jours dès lors que personne ne l'avait
+      // annotée — c'est-à-dire dans le cas nominal.
+      const activeStaff = await tx.staffMember.count({ where: { active: true } });
+      const overrides = await tx.taxDeadline.findMany({
+        where: {
+          dueDate: {
+            gte: new Date(`${windowFrom}T00:00:00Z`),
+            lte: new Date(`${windowTo}T00:00:00Z`),
+          },
+        },
+        select: { obligationId: true, dueDate: true, amountCents: true, status: true, note: true },
       });
+      const schedule = applyTaxOverrides(
+        buildTaxSchedule(resolveTaxProfile(stored, activeStaff), windowFrom, windowTo),
+        overrides.map(
+          (row): TaxDeadlineOverride => ({
+            obligationId: row.obligationId,
+            dueDate: row.dueDate.toISOString().slice(0, 10),
+            amountCents: row.amountCents,
+            status: row.status as TaxDeadlineOverride["status"],
+            note: row.note,
+          }),
+        ),
+      );
 
       return {
         pendingActions,
         documentsAVerifier,
         affaires: margins,
-        echeance: deadlines[0] ?? null,
+        hourlyCostKnown: stored?.hourlyCostCents != null,
+        schedule,
+        // Occurrences que l'humain a EXPLICITEMENT pointées. `prevu` est le
+        // défaut d'`applyTaxOverrides` : sans cette clé, « non annotée » et
+        // « déclarée impayée » seraient indiscernables (voir plus bas).
+        annotated: new Set(
+          overrides.map((row) => `${row.obligationId}|${row.dueDate.toISOString().slice(0, 10)}`),
+        ),
         impayes: overdue,
-        stock: stocksOn
-          ? await tx.$queryRaw<{ count: number }[]>`
-              SELECT count(*)::int AS count FROM stock_items
-              WHERE alert_threshold > 0 AND quantity <= alert_threshold`
-          : null,
+        fecWarnings: FecWarnings.parse(lastImport?.warnings ?? []),
+        stock: await stockSql(tx),
       };
     });
 
@@ -5138,63 +5198,137 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     if (!stocksOn) blindSpots.push({ area: "stocks", why: "module désactivé" });
     if (!classeurOn) blindSpots.push({ area: "classeur", why: "module désactivé" });
     if (!isOwner) {
-      blindSpots.push({ area: "montants", why: "réservés au dirigeant" });
+      blindSpots.push({ area: "montants et échéances", why: "réservés au dirigeant" });
     } else if (data.impayes === null) {
       blindSpots.push({ area: "impayés", why: "aucun import comptable" });
+    }
+    // Les limites de la dérivation FEC changent le chiffre lu (une retenue non
+    // rattachable reste comptée en impayé) : les taire ici ferait relancer un
+    // bon client sur une somme qui n'est pas exigible.
+    for (const warning of data.fecWarnings ?? []) {
+      blindSpots.push({ area: "impayés", why: warning });
+    }
+    // Ce que l'échéancier n'a pas pu proposer (régime non renseigné, par
+    // exemple) : sans ça, « aucune échéance » se lit « rien à payer ».
+    for (const gap of data.schedule?.gaps ?? []) {
+      blindSpots.push({ area: "échéancier", why: gap });
+    }
+    // Trois angles morts que F4 nomme déjà sur sa carte et que le brief perdait
+    // en route : une affaire non chiffrable n'est pas une affaire saine.
+    if (data.affaires !== null) {
+      if (data.affaires.ignorees > 0) {
+        blindSpots.push({
+          area: "affaires",
+          why: `${data.affaires.ignorees} affaire(s) ouverte(s) au-delà des ${AFFAIRES_MARGIN_SCAN_LIMIT} les plus récentes`,
+        });
+      }
+      if (data.affaires.nonChiffrables.length > 0) {
+        blindSpots.push({
+          area: "affaires",
+          why: `${data.affaires.nonChiffrables.length} affaire(s) sans marge calculable (devis ou coûts manquants)`,
+        });
+      }
+      if (data.hourlyCostKnown === false) {
+        blindSpots.push({
+          area: "marges",
+          why: "coût horaire non renseigné : la main-d'œuvre n'entre dans aucune marge",
+        });
+      }
     }
 
     // Affaires en perte : marge EXACTE négative, ou plafond négatif (« même au
     // mieux, ce chantier perd »). Un plafond POSITIF ne dit rien et n'entre pas.
-    const losing = (data.affaires?.aSurveiller ?? []).filter((row) => {
-      if (row.margin.kind === "marge") return row.margin.marginCents < 0;
-      if (row.margin.kind === "marge_borne_superieure") return row.margin.upperBoundCents < 0;
-      return false;
-    });
-    const worstCents = losing.reduce((worst, row) => {
-      const value =
-        row.margin.kind === "marge"
-          ? row.margin.marginCents
-          : row.margin.kind === "marge_borne_superieure"
-            ? row.margin.upperBoundCents
-            : 0;
-      return Math.min(worst, value);
-    }, 0);
+    // Règle empruntée à F4, jamais réécrite ici.
+    const losing = (data.affaires?.aSurveiller ?? []).filter(
+      (row) => (comparableMargin(row.margin) ?? 0) < 0,
+    );
+    // La PIRE, pas un total — et sur sa propre base : un plafond aplati en
+    // marge exacte serait un chiffre faux rendu sans le moindre signe.
+    const worst = losing.reduce<BriefWorstMargin | null>((current, row) => {
+      const cents = comparableMargin(row.margin);
+      if (cents === null || (current !== null && cents >= current.cents)) return current;
+      return { cents, basis: row.margin.kind === "marge" ? "exact" : "au_mieux" };
+    }, null);
     const overBudget = (data.affaires?.aSurveiller ?? []).filter(
       (row) =>
         (row.margin.kind === "marge" || row.margin.kind === "marge_borne_superieure") &&
         (row.margin.budgetGap?.deltaCents ?? 0) > 0,
     ).length;
 
-    const dayMs = 86_400_000;
-    const echeanceDays =
-      data.echeance === null
-        ? null
-        : Math.ceil((data.echeance.dueDate.getTime() - Date.now()) / dayMs);
+    const stillDue = (data.schedule?.deadlines ?? []).filter((line) => line.status === "prevu");
+    const toEcheance = (line: (typeof stillDue)[number], days: number): BriefEcheance => ({
+      days,
+      amountCents: line.amountCents,
+      dateIsApproximate: line.dateIsApproximate,
+    });
+    // Une date approximative est la borne BASSE d'une fenêtre légale : la
+    // déclarer « en retard » le lendemain annoncerait une pénalité qui n'existe
+    // pas. Le doute profite ici au silence, pas à l'alerte.
+    const lateDays = (line: (typeof stillDue)[number]): number =>
+      Math.floor(
+        (Date.parse(`${todayIso}T00:00:00Z`) - Date.parse(`${line.dueDate}T00:00:00Z`)) / dayMs,
+      ) - (line.dateIsApproximate ? APPROXIMATE_DUE_DATE_SLACK_DAYS : 0);
+    /*
+     * « EN RETARD » EXIGE UNE ANNOTATION HUMAINE — et ce n'est pas un détail.
+     *
+     * `applyTaxOverrides` rend `prevu` par DÉFAUT : une occurrence que personne
+     * n'a pointée est indiscernable d'une occurrence déclarée impayée. Sans
+     * cette garde, la CA3 payée en juin mais jamais annotée — le cas nominal,
+     * puisque l'écran d'annotation est facultatif — criait « en retard de 55
+     * jours » tous les matins. Un brief qui hurle au loup chaque matin, on
+     * cesse de l'ouvrir en trois jours.
+     *
+     * Le silence n'est pas une omission : le compte des occurrences passées non
+     * pointées part en angle mort, avec de quoi agir.
+     */
+    const past = stillDue.filter((line) => line.dueDate < todayIso && lateDays(line) > 0);
+    const key = (line: (typeof stillDue)[number]): string =>
+      `${line.obligationId}|${line.dueDate}`;
+    const late = past.filter((line) => data.annotated.has(key(line)));
+    const unpointed = past.length - late.length;
+    if (unpointed > 0) {
+      blindSpots.push({
+        area: "échéancier",
+        why: `${unpointed} échéance(s) passée(s) non pointée(s) : impossible de dire si elles sont payées`,
+      });
+    }
+    const earliest = (lines: readonly (typeof stillDue)[number][]): (typeof stillDue)[number] | null =>
+      lines.reduce<(typeof stillDue)[number] | null>(
+        (current, line) => (current === null || line.dueDate < current.dueDate ? line : current),
+        null,
+      );
+    const oldestLate = earliest(late);
+    const nextUp = earliest(stillDue.filter((line) => line.dueDate >= todayIso));
 
     const brief = composeMorningBrief({
       pendingActions: data.pendingActions,
       documentsAVerifier: data.documentsAVerifier ?? 0,
-      affairesEnPerte: data.affaires === null ? null : { count: losing.length, worstCents },
+      affairesEnPerte:
+        data.affaires === null || worst === null ? null : { count: losing.length, worst },
       budgetsDepasses: data.affaires === null ? null : overBudget,
-      prochaineEcheance:
-        echeanceDays === null
+      echeances:
+        data.schedule === null
           ? null
           : {
-              days: echeanceDays,
-              amountCents:
-                data.echeance?.amountCents === null || data.echeance?.amountCents === undefined
+              enRetard: oldestLate === null ? null : toEcheance(oldestLate, lateDays(oldestLate)),
+              prochaine:
+                nextUp === null
                   ? null
-                  : Number(data.echeance.amountCents),
+                  : toEcheance(
+                      nextUp,
+                      Math.round(
+                        (Date.parse(`${nextUp.dueDate}T00:00:00Z`) -
+                          Date.parse(`${todayIso}T00:00:00Z`)) /
+                          dayMs,
+                      ),
+                    ),
             },
       impayes:
         data.impayes === null
           ? null
           : {
-              count: data.impayes.length,
-              totalCents: data.impayes.reduce(
-                (sum, invoice) => sum + Number(invoice.residualCents),
-                0,
-              ),
+              count: data.impayes._count._all,
+              totalCents: Number(data.impayes._sum.residualCents ?? 0),
             },
       stockSousSeuil: data.stock === null ? null : (data.stock[0]?.count ?? 0),
       blindSpots,

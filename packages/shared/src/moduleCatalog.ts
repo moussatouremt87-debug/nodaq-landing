@@ -26,7 +26,7 @@ import type { Vertical } from "./regulatoryWatch.js";
  */
 
 /** Catalog snapshot date — bump on every module/defaults change. */
-export const MODULE_CATALOG_VERSION = "2026-08-04";
+export const MODULE_CATALOG_VERSION = "2026-08-03";
 
 export interface ModuleDefinition {
   id: string;

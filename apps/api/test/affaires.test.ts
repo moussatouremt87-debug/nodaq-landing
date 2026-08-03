@@ -1025,7 +1025,7 @@ describe("F5 — le brief du matin", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     const areas = body.blindSpots.map((spot: { area: string }) => spot.area);
-    expect(areas).toContain("montants");
+    expect(areas).toContain("montants et échéances");
     // Aucune ligne financière ne doit avoir fuité.
     const items = body.kind === "brief" ? body.items : [];
     expect(
@@ -1051,6 +1051,160 @@ describe("F5 — le brief du matin", () => {
     expect(perte.severity).toBe("urgent");
     // Le montant affiché est le PIRE, donc négatif.
     expect(perte.amountCents).toBeLessThan(0);
+  });
+
+  it("l'échéance vient du CALENDRIER, pas de la table d'annotations", async () => {
+    /*
+     * LE test de ce ticket. La table `tax_deadlines` ne porte QUE les décisions
+     * humaines : le calendrier, lui, est recalculé (2.9). Lire la table seule
+     * laissait le brief muet sur une CA3 due dans deux jours tant que personne
+     * ne l'avait annotée — c'est-à-dire dans le cas nominal.
+     *
+     * La preuve tient à `applyTaxOverrides`, qui IGNORE une surcharge ne
+     * correspondant à aucune occurrence : si la ligne remonte, c'est que le
+     * calendrier a bien été construit depuis le régime de TVA du profil.
+     */
+    await app.inject({
+      method: "PUT",
+      url: "/echeancier/profil",
+      headers: { cookie: ownerCookie },
+      payload: {
+        vatRegime: "reel_normal_mensuel",
+        corporateTaxLiable: true,
+        fiscalYearEndMonth: 12,
+        payrollPeriodicity: "aucune",
+      },
+    });
+
+    // CA3 du mois dernier : toujours passée, toujours dans la fenêtre de 60 j.
+    const now = new Date();
+    const lastMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15));
+    const dueDate = lastMonth.toISOString().slice(0, 10);
+
+    // Sans annotation : rien n'est AFFIRMÉ, mais l'angle mort est déclaré.
+    const muet = (
+      await app.inject({ method: "GET", url: "/brief", headers: { cookie: ownerCookie } })
+    ).json();
+    const muetItems = muet.kind === "brief" ? muet.items : [];
+    expect(
+      muetItems.some((item: { kind: string }) => item.kind === "echeance_en_retard"),
+    ).toBe(false);
+    expect(
+      muet.blindSpots.some((spot: { why: string }) => spot.why.includes("non pointée")),
+    ).toBe(true);
+
+    // Pointée par l'humain : le retard devient une affirmation.
+    await app.inject({
+      method: "PUT",
+      url: "/echeancier/deadline",
+      headers: { cookie: ownerCookie },
+      payload: {
+        obligationId: "tva_ca3",
+        dueDate,
+        amountCents: 250_000,
+        status: "prevu",
+        note: null,
+      },
+    });
+    const res = await app.inject({
+      method: "GET",
+      url: "/brief",
+      headers: { cookie: ownerCookie },
+    });
+    const body = res.json();
+    expect(body.kind).toBe("brief");
+    const retard = body.items.find(
+      (item: { kind: string }) => item.kind === "echeance_en_retard",
+    );
+    expect(retard).toBeDefined();
+    expect(retard.severity).toBe("urgent");
+    expect(retard.amountCents).toBe(250_000);
+
+    // Remise à l'état neutre : les cas suivants ne doivent pas hériter du régime.
+    await app.inject({
+      method: "PUT",
+      url: "/echeancier/deadline",
+      headers: { cookie: ownerCookie },
+      payload: {
+        obligationId: "tva_ca3",
+        dueDate,
+        amountCents: null,
+        status: "paye",
+        note: null,
+      },
+    });
+    await app.inject({
+      method: "PUT",
+      url: "/echeancier/profil",
+      headers: { cookie: ownerCookie },
+      payload: {
+        vatRegime: "inconnu",
+        corporateTaxLiable: true,
+        fiscalYearEndMonth: 12,
+        payrollPeriodicity: "aucune",
+      },
+    });
+  });
+
+  it("un régime de TVA non renseigné devient un ANGLE MORT, pas un silence", async () => {
+    // « Aucune échéance » se lirait « rien à payer ». Le calendrier sait qu'il
+    // ne sait pas, et le brief relaie ce refus motivé.
+    const res = await app.inject({
+      method: "GET",
+      url: "/brief",
+      headers: { cookie: ownerCookie },
+    });
+    const body = res.json();
+    expect(
+      body.blindSpots.some(
+        (spot: { area: string; why: string }) =>
+          spot.area === "échéancier" && spot.why.includes("TVA"),
+      ),
+    ).toBe(true);
+  });
+
+  it("une facture au solde NUL n'est pas un impayé (même filtre que US-8)", async () => {
+    // Une facture soldée par une pièce distincte garde `settled: false` et une
+    // échéance passée : sans le filtre sur le solde, elle ressort en retard et
+    // fait relancer un client qui a payé.
+    const imported = await withTenant(orgA, (tx) =>
+      tx.fecImport.create({
+        data: {
+          tenantId: orgA,
+          fileHash: `hash-brief-${RUN}`,
+          entryCount: 1,
+          customerCount: 1,
+          invoiceCount: 1,
+          overdueCount: 0,
+          overdueCents: 0,
+          warnings: [],
+        },
+      }),
+    );
+    await withTenant(orgA, (tx) =>
+      tx.fecInvoice.create({
+        data: {
+          tenantId: orgA,
+          importId: imported.id,
+          customerRef: "411SOLDE",
+          number: `F-SOLDE-${RUN}`,
+          issuedDate: new Date("2026-01-01"),
+          dueDate: new Date("2026-02-01"),
+          amountCents: 400_000n,
+          residualCents: 0n,
+          settled: false,
+        },
+      }),
+    );
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/brief",
+      headers: { cookie: ownerCookie },
+    });
+    const body = res.json();
+    const items = body.kind === "brief" ? body.items : [];
+    expect(items.some((item: { kind: string }) => item.kind === "impayes")).toBe(false);
   });
 
   it("module affaires éteint : le brief le DIT et ne prétend rien savoir", async () => {
