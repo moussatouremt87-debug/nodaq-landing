@@ -1,5 +1,5 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
   // "native" (dev/CI) + cible EXPLICITE du runtime Docker (node:22-slim =
   // Debian 12 / OpenSSL 3). Sans elle, un build sans openssl installé génère
   // le moteur pour openssl-1.1.x par défaut -> crash au boot du conteneur
@@ -19,43 +19,46 @@ datasource db {
 /// Tenant = better-auth "organization" (plugin organization, mapped via modelName).
 /// slug/logo/metadata are owned by the plugin; slug is unique (checked on create).
 model Tenant {
-  id          String       @id @default(uuid()) @db.Uuid
-  name        String
-  slug        String?      @unique
-  logo        String?
-  metadata    String?
-  createdAt   DateTime     @default(now()) @map("created_at")
-  memberships Membership[]
-  invitations Invitation[]
-  notes       Note[]
-  classifications Classification[]
-  policy      TenantPolicy?
-  connectors  Connector[]
-  documents       Document[]
-  documentChunks  DocumentChunk[]
-  pendingActions  PendingAction[]
-  agentConversations AgentConversation[]
-  fecImports      FecImport[]
-  fecInvoices     FecInvoice[]
-  classeurDocuments ClasseurDocument[]
-  stockItems      StockItem[]
-  stockMovements  StockMovement[]
-  pushSubscriptions   PushSubscription[]
-  pushDispatchStates  PushDispatchState[]
-  fixedAssets         FixedAsset[]
-  staffMembers        StaffMember[]
-  staffAbsences       StaffAbsence[]
-  profile             TenantProfile?
-  reviews             CustomerReview[]
+  id                   String                @id @default(uuid()) @db.Uuid
+  name                 String
+  slug                 String?               @unique
+  logo                 String?
+  metadata             String?
+  createdAt            DateTime              @default(now()) @map("created_at")
+  memberships          Membership[]
+  invitations          Invitation[]
+  notes                Note[]
+  classifications      Classification[]
+  policy               TenantPolicy?
+  connectors           Connector[]
+  documents            Document[]
+  documentChunks       DocumentChunk[]
+  pendingActions       PendingAction[]
+  agentConversations   AgentConversation[]
+  fecImports           FecImport[]
+  fecInvoices          FecInvoice[]
+  classeurDocuments    ClasseurDocument[]
+  stockItems           StockItem[]
+  stockMovements       StockMovement[]
+  pushSubscriptions    PushSubscription[]
+  pushDispatchStates   PushDispatchState[]
+  fixedAssets          FixedAsset[]
+  staffMembers         StaffMember[]
+  staffAbsences        StaffAbsence[]
+  profile              TenantProfile?
+  reviews              CustomerReview[]
   processingActivities ProcessingActivity[]
-  webhookEndpoints    WebhookEndpoint[]
-  webhookEvents       WebhookEvent[]
-  einvoiceSubmissions EInvoiceSubmission[]
-  taxDeadlines        TaxDeadline[]
-  prospects           Prospect[]
+  webhookEndpoints     WebhookEndpoint[]
+  webhookEvents        WebhookEvent[]
+  einvoiceSubmissions  EInvoiceSubmission[]
+  taxDeadlines         TaxDeadline[]
+  prospects            Prospect[]
   prospectInteractions ProspectInteraction[]
-  prospectExclusions  ProspectExclusion[]
-  costEntries         CostEntry[]
+  prospectExclusions   ProspectExclusion[]
+  costEntries          CostEntry[]
+  affaires             Affaire[]
+  affaireCounters      AffaireCounter[]
+  affaireImputations   AffaireImputation[]
 
   @@map("tenants")
   @@schema("public")
@@ -91,11 +94,11 @@ model Session {
   /// session-create database hook.
   activeOrganizationId String?  @map("active_organization_id") @db.Uuid
   expiresAt            DateTime @map("expires_at")
-  ipAddress String?  @map("ip_address")
-  userAgent String?  @map("user_agent")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ipAddress            String?  @map("ip_address")
+  userAgent            String?  @map("user_agent")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at")
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@map("sessions")
@@ -222,19 +225,19 @@ model Classification {
 /// Qonto). Sealed by RLS (see the migration `20260725120548_connectors`). `credentialsRef` is
 /// the NAME of the secret in the Secret Manager — never a credential value.
 model Connector {
-  id              String   @id @default(uuid()) @db.Uuid
-  tenantId        String   @map("tenant_id") @db.Uuid
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
   /// 'pennylane' | 'qonto' | 'bridge' — validated app-side by Zod.
-  type            String
+  type           String
   /// Secret NAME in the vault (Scaleway Secret Manager in prod) — never the credential itself.
-  credentialsRef  String   @map("credentials_ref")
+  credentialsRef String   @map("credentials_ref")
   /// 'active' | 'disabled' | 'demo' | 'file' (import FEC) — validé côté app. 'demo' n'est posé QUE
   /// par le script de seed démo (clients-fixtures, jamais une vraie connexion) ;
   /// l'API d'onboarding ne crée que 'active'.
-  status          String   @default("active")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
-  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  status         String   @default("active")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, type])
   @@index([tenantId])
@@ -245,14 +248,14 @@ model Connector {
 /// Per-tenant model routing policy. Sealed by RLS (see the migration
 /// `rls_classifications_and_policies`).
 model TenantPolicy {
-  id               String   @id @default(uuid()) @db.Uuid
-  tenantId         String   @unique @map("tenant_id") @db.Uuid
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @unique @map("tenant_id") @db.Uuid
   /// Whether this tenant is allowed to route non-sensitive requests to frontier
   /// (non-sovereign) model providers.
-  frontierEnabled  Boolean  @default(false) @map("frontier_enabled")
-  createdAt        DateTime @default(now()) @map("created_at")
-  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at")
-  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  frontierEnabled Boolean  @default(false) @map("frontier_enabled")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("tenant_policies")
   @@schema("public")
@@ -264,21 +267,21 @@ model TenantPolicy {
 /// `hash` (sha256 of the raw file) is the idempotency key per tenant: re-ingesting
 /// the same file for the same tenant is a no-op.
 model Document {
-  id         String    @id @default(uuid()) @db.Uuid
-  tenantId   String    @map("tenant_id") @db.Uuid
+  id        String          @id @default(uuid()) @db.Uuid
+  tenantId  String          @map("tenant_id") @db.Uuid
   /// Object Storage key (provenance) — optional (e.g. not yet uploaded, or ingested
   /// straight from a connector without persisting the raw file).
-  objectKey  String?   @map("object_key")
+  objectKey String?         @map("object_key")
   /// Department scope — validated app-side (Zod), not a DB enum.
-  dept       String
+  dept      String
   /// 'UPLOAD' | 'CONNECTOR' — validated app-side.
-  source     String    @default("UPLOAD")
+  source    String          @default("UPLOAD")
   /// sha256 of the raw file — idempotency key (see @@unique below).
-  hash       String
-  indexedAt  DateTime? @map("indexed_at")
-  createdAt  DateTime  @default(now()) @map("created_at")
-  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  chunks     DocumentChunk[]
+  hash      String
+  indexedAt DateTime?       @map("indexed_at")
+  createdAt DateTime        @default(now()) @map("created_at")
+  tenant    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  chunks    DocumentChunk[]
 
   @@unique([tenantId, hash])
   @@index([tenantId])
@@ -292,20 +295,20 @@ model Document {
 /// EMBEDDING_DIM in `services/rag` (bge-m3) — changing one without the other
 /// breaks ingestion/search silently (dimension mismatch at insert time).
 model DocumentChunk {
-  id         String    @id @default(uuid()) @db.Uuid
-  tenantId   String    @map("tenant_id") @db.Uuid
-  documentId String    @map("document_id") @db.Uuid
-  chunkIndex Int       @map("chunk_index")
+  id         String                       @id @default(uuid()) @db.Uuid
+  tenantId   String                       @map("tenant_id") @db.Uuid
+  documentId String                       @map("document_id") @db.Uuid
+  chunkIndex Int                          @map("chunk_index")
   content    String
   /// pgvector column, dim 1024 (bge-m3) — see the note above on the model doc.
   /// Prisma's `Unsupported` type: no client-side CRUD on this field, raw SQL only.
   embedding  Unsupported("vector(1024)")?
   dept       String
-  source     String    @default("UPLOAD")
+  source     String                       @default("UPLOAD")
   metadata   Json?
-  createdAt  DateTime  @default(now()) @map("created_at")
-  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  document   Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdAt  DateTime                     @default(now()) @map("created_at")
+  tenant     Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  document   Document                     @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@unique([documentId, chunkIndex])
   @@index([tenantId])
@@ -325,30 +328,30 @@ model DocumentChunk {
 /// is the legal attribution of who approved it. Sealed by RLS (see the migration
 /// `rls_pending_actions`).
 model PendingAction {
-  id           String    @id @default(uuid()) @db.Uuid
-  tenantId     String    @map("tenant_id") @db.Uuid
+  id          String    @id @default(uuid()) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
   /// e.g. 'book_invoice', 'send_dunning' — validated app-side by Zod.
-  type         String
+  type        String
   /// The prepared action, ready to execute after approval.
-  payload      Json
+  payload     Json
   /// 'pending' | 'approved' | 'rejected' | 'executed' | 'failed' — validated app-side.
-  status       String    @default("pending")
+  status      String    @default("pending")
   /// The user or agent run that prepared the action.
-  requestedBy  String?   @map("requested_by") @db.Uuid
+  requestedBy String?   @map("requested_by") @db.Uuid
   /// Which virtual employee prepared this action (e.g. 'compta'). Nullable: a human
   /// can also submit an action directly.
-  employee     String?
+  employee    String?
   /// The HUMAN who clicked to approve/reject — legal attribution, never an agent.
-  validatedBy  String?   @map("validated_by") @db.Uuid
-  validatedAt  DateTime? @map("validated_at")
+  validatedBy String?   @map("validated_by") @db.Uuid
+  validatedAt DateTime? @map("validated_at")
   /// When post-approval execution actually happened (set once, by the executor).
-  executedAt   DateTime? @map("executed_at")
+  executedAt  DateTime? @map("executed_at")
   /// Execution outcome metadata only (e.g. external id, error code) — NEVER
   /// sensitive client content.
-  result       Json?
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at")
-  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  result      Json?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([tenantId, status])
@@ -430,8 +433,12 @@ model FecInvoice {
   /// relancer un client sur sa retenue est la faute qui coûte le plus cher.
   retainedCents BigInt    @default(0) @map("retained_cents")
   settled       Boolean
+  /// Rattachement à une affaire (4.1) — NULLABLE. Une facture client peut très
+  /// bien ne concerner aucun chantier identifié.
+  affaireId     String?   @map("affaire_id") @db.Uuid
   tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   import        FecImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+  affaire       Affaire?  @relation(fields: [affaireId], references: [id], onDelete: SetNull)
 
   @@index([tenantId])
   @@index([tenantId, settled])
@@ -449,38 +456,44 @@ model FecInvoice {
 /// par tenant (voir @@unique ci-dessous). Sealed by RLS (see the migration
 /// `rls_classeur_documents`).
 model ClasseurDocument {
-  id                    String    @id @default(uuid()) @db.Uuid
-  tenantId              String    @map("tenant_id") @db.Uuid
-  fileName              String    @map("file_name")
-  mimeType              String    @map("mime_type")
-  byteSize              Int       @map("byte_size")
+  id                   String    @id @default(uuid()) @db.Uuid
+  tenantId             String    @map("tenant_id") @db.Uuid
+  fileName             String    @map("file_name")
+  mimeType             String    @map("mime_type")
+  byteSize             Int       @map("byte_size")
   /// sha256 of the raw file — idempotency key (see @@unique below).
-  sha256                String
+  sha256               String
   /// The document itself (photo) — CONFIDENTIAL, never logged.
-  photo                 Bytes
+  photo                Bytes
   /// 'facture_fournisseur' | 'recu' | 'note_de_frais' | 'autre' — validated app-side by Zod.
-  docType               String    @default("autre") @map("doc_type")
+  docType              String    @default("autre") @map("doc_type")
   /// 'a_verifier' | 'verifie' | 'rapproche' — validated app-side by Zod.
-  status                String    @default("a_verifier")
+  status               String    @default("a_verifier")
   /// Current extracted fields (possibly human-corrected).
-  extraction            Json?
+  extraction           Json?
   /// FROZEN model output — never rewritten afterwards (learning material).
-  originalExtraction    Json?     @map("original_extraction")
+  originalExtraction   Json?     @map("original_extraction")
   /// Append-only list of human corrections: [{by, at, fields}].
-  corrections           Json      @default("[]")
+  corrections          Json      @default("[]")
   /// Apprentissage appliqué au classement (2.16b) : liste des champs comblés
   /// ou signalés en désaccord par la mémoire fournisseur, avec le nombre de
   /// corrections humaines qui les fondent. Trace d'EXPLICABILITÉ — la mémoire
   /// elle-même est dérivée à la volée, jamais stockée.
-  learned               Json?
-  matchedTransactionId  String?   @map("matched_transaction_id")
-  matchedAt             DateTime? @map("matched_at")
-  createdAt             DateTime  @default(now()) @map("created_at")
-  updatedAt             DateTime  @updatedAt @map("updated_at")
-  tenant                Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  learned              Json?
+  matchedTransactionId String?   @map("matched_transaction_id")
+  matchedAt            DateTime? @map("matched_at")
+  /// Rattachement à une affaire (4.1) — NULLABLE, et la majorité des pièces le
+  /// restera (essence, assurance, frais généraux). Aucun backfill, aucune
+  /// contrainte : l'écran classeur fonctionne à l'identique sans affaires.
+  affaireId            String?   @map("affaire_id") @db.Uuid
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+  tenant               Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  affaire              Affaire?  @relation(fields: [affaireId], references: [id], onDelete: SetNull)
 
   @@unique([tenantId, sha256])
   @@index([tenantId, status])
+  @@index([tenantId, affaireId])
   @@map("classeur_documents")
   @@schema("public")
 }
@@ -542,26 +555,26 @@ model StockMovement {
 /// comme un secret d'appareil, jamais loggées. Sealed by RLS (see the migration
 /// `rls_push_notifications`).
 model PushSubscription {
-  id              String    @id @default(uuid()) @db.Uuid
-  tenantId        String    @map("tenant_id") @db.Uuid
-  userId          String    @map("user_id") @db.Uuid
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
   /// Canal de livraison : WEBPUSH aujourd'hui — FCM/APNS arriveront avec les
   /// app stores (T.11). Enum applicative (Zod) ; un sender par canal derrière
   /// l'interface commune PushSender.
-  channel         String    @default("WEBPUSH")
+  channel        String    @default("WEBPUSH")
   /// URL du service push navigateur. Unicité PAR TENANT : un même appareil
   /// peut servir plusieurs organisations (expert-comptable multi-tenants).
-  endpoint        String
+  endpoint       String
   /// Clés Web Push de la subscription — sensibles, jamais loggées.
-  p256dh          String
-  auth            String
+  p256dh         String
+  auth           String
   /// Libellé d'appareil (ex. user agent), pour affichage dans les réglages.
-  userAgent       String?   @map("user_agent")
-  actionsEnabled  Boolean   @default(true) @map("actions_enabled")
-  alertsEnabled   Boolean   @default(true) @map("alerts_enabled")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  lastUsedAt      DateTime? @map("last_used_at")
-  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userAgent      String?   @map("user_agent")
+  actionsEnabled Boolean   @default(true) @map("actions_enabled")
+  alertsEnabled  Boolean   @default(true) @map("alerts_enabled")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  lastUsedAt     DateTime? @map("last_used_at")
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, endpoint])
   @@index([tenantId, userId])
@@ -598,29 +611,29 @@ model PushDispatchState {
 /// jamais recalculés, juste reportés. `renewalCostCents` est le CAPEX de
 /// renouvellement prévisionnel, éditable côté app (défaut = base historique).
 model FixedAsset {
-  id             String    @id @default(uuid()) @db.Uuid
-  tenantId       String    @map("tenant_id") @db.Uuid
-  label          String
+  id                     String    @id @default(uuid()) @db.Uuid
+  tenantId               String    @map("tenant_id") @db.Uuid
+  label                  String
   /// 'informatique' | 'logiciel' | 'vehicule' | 'materiel' | 'mobilier' | 'agencement'
   /// — validé côté app par Zod.
-  category       String
-  inServiceDate  DateTime  @map("in_service_date")
-  baseCents      BigInt    @map("base_cents")
-  durationMonths Int       @map("duration_months")
+  category               String
+  inServiceDate          DateTime  @map("in_service_date")
+  baseCents              BigInt    @map("base_cents")
+  durationMonths         Int       @map("duration_months")
   /// 'LINEAIRE' | 'DEGRESSIF' — validé côté app par Zod.
-  method         String    @default("LINEAIRE")
+  method                 String    @default("LINEAIRE")
   /// 'FEC' | 'DOCUMENT' | 'MANUEL' — validé côté app par Zod.
-  source         String    @default("MANUEL")
-  sourceRef      String?   @map("source_ref")
+  source                 String    @default("MANUEL")
+  sourceRef              String?   @map("source_ref")
   /// 'ACTIF' | 'CEDE' | 'SORTI' — validé côté app par Zod.
-  status         String    @default("ACTIF")
-  disposedAt     DateTime? @map("disposed_at")
+  status                 String    @default("ACTIF")
+  disposedAt             DateTime? @map("disposed_at")
   /// Amortissements déjà pratiqués AVANT l'entrée dans nodaq (reprise FEC 28x), en centimes.
-  priorDepreciationCents BigInt  @default(0) @map("prior_depreciation_cents")
-  renewalCostCents       BigInt? @map("renewal_cost_cents")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
-  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  priorDepreciationCents BigInt    @default(0) @map("prior_depreciation_cents")
+  renewalCostCents       BigInt?   @map("renewal_cost_cents")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @default(now()) @updatedAt @map("updated_at")
+  tenant                 Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, status])
   @@map("fixed_assets")
@@ -655,18 +668,18 @@ model StaffMember {
 /// Ticket 3.5 — plannings RH : absences déclarées par salarié. Sealed by RLS
 /// (see the migration `rls_staff_planning`).
 model StaffAbsence {
-  id        String      @id @default(uuid()) @db.Uuid
-  tenantId  String      @map("tenant_id") @db.Uuid
-  staffId   String      @map("staff_id") @db.Uuid
+  id          String      @id @default(uuid()) @db.Uuid
+  tenantId    String      @map("tenant_id") @db.Uuid
+  staffId     String      @map("staff_id") @db.Uuid
   /// 'conges' | 'maladie' | 'formation' | 'autre' — validé côté app par Zod.
-  type      String      @default("conges")
-  startDate DateTime    @map("start_date")
-  endDate   DateTime    @map("end_date")
+  type        String      @default("conges")
+  startDate   DateTime    @map("start_date")
+  endDate     DateTime    @map("end_date")
   /// Id de l'absence chez le SIRH source (Silae) — réconciliation sync 3.10.
-  externalRef String?   @map("external_ref")
-  createdAt DateTime    @default(now()) @map("created_at")
-  tenant    Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  staff     StaffMember @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  externalRef String?     @map("external_ref")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  staff       StaffMember @relation(fields: [staffId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, externalRef])
   @@index([tenantId, staffId])
@@ -710,6 +723,10 @@ model TenantProfile {
   /// défense en profondeur via CHECK en base. 'aucune' PAR DÉFAUT (jamais
   /// deviné — pas de charges sociales inventées sans effectif déclaré).
   payrollPeriodicity String   @default("aucune") @map("payroll_periodicity")
+  /// Coût horaire CHARGÉ, en centimes (4.1). NULL par défaut et jamais deviné :
+  /// sans lui, le coût de main-d'oeuvre d'une affaire est INCONNU, et le calcul
+  /// le dit au lieu de compter zéro heure de travail.
+  hourlyCostCents    Int?     @map("hourly_cost_cents")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @default(now()) @updatedAt @map("updated_at")
   tenant             Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -900,22 +917,22 @@ model EInvoiceSubmission {
 /// garantit une seule surcharge par occurrence. Sealed by RLS (see the
 /// migration `rls_tax_deadlines`).
 model TaxDeadline {
-  id           String    @id @default(uuid()) @db.Uuid
-  tenantId     String    @map("tenant_id") @db.Uuid
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
   /// Identifiant de l'obligation dans le catalogue versionné (`taxCalendar.ts`).
-  obligationId String    @map("obligation_id")
+  obligationId String   @map("obligation_id")
   /// Échéance concernée — une occurrence précise (le calendrier peut être récurrent).
-  dueDate      DateTime  @map("due_date") @db.Date
+  dueDate      DateTime @map("due_date") @db.Date
   /// Montant DÉCLARÉ par l'owner, en centimes — NULL = inconnu, jamais estimé.
-  amountCents  Int?      @map("amount_cents")
+  amountCents  Int?     @map("amount_cents")
   /// 'prevu' | 'paye' | 'non_applicable' — validé côté app par Zod, défense
   /// en profondeur via CHECK en base.
-  status       String    @default("prevu")
+  status       String   @default("prevu")
   /// Annotation libre de l'owner — bornée côté app à 500 caractères.
   note         String?
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at")
-  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, obligationId, dueDate])
   @@index([tenantId, dueDate])
@@ -937,26 +954,27 @@ model TaxDeadline {
 /// append-only `prospect_interactions` (doctrine 2.9/2.16b). Sealed by RLS
 /// (see the migration `rls_prospects`).
 model Prospect {
-  id          String                @id @default(uuid()) @db.Uuid
-  tenantId    String                @map("tenant_id") @db.Uuid
+  id           String                @id @default(uuid()) @db.Uuid
+  tenantId     String                @map("tenant_id") @db.Uuid
   /// Donnée personnelle d'un tiers — bornée côté app, jamais loguée.
-  name        String
-  company     String?
-  email       String?
-  phone       String?
+  name         String
+  company      String?
+  email        String?
+  phone        String?
   /// Étape du pipeline : 'nouveau'|'contacte'|'qualifie'|'devis_envoye'|'gagne'|'perdu'.
-  stage       String                @default("nouveau")
+  stage        String                @default("nouveau")
   /// Provenance de la fiche — enum fermé validé par Zod, CHECK en base.
-  source      String
+  source       String
   /// Opposition à la prospection : exclusion structurelle des relances.
-  optedOut    Boolean               @default(false) @map("opted_out")
-  optedOutAt  DateTime?             @map("opted_out_at")
+  optedOut     Boolean               @default(false) @map("opted_out")
+  optedOutAt   DateTime?             @map("opted_out_at")
   /// Annotation libre — bornée côté app à 1 000 caractères.
-  notes       String?
-  createdAt   DateTime              @default(now()) @map("created_at")
-  updatedAt   DateTime              @default(now()) @updatedAt @map("updated_at")
-  tenant      Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  notes        String?
+  createdAt    DateTime              @default(now()) @map("created_at")
+  updatedAt    DateTime              @default(now()) @updatedAt @map("updated_at")
+  tenant       Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   interactions ProspectInteraction[]
+  affaires     Affaire[]
 
   @@index([tenantId, stage])
   @@index([tenantId, optedOut])
@@ -1048,33 +1066,33 @@ model ProspectInteraction {
 /// ─────────────────────────────────────────────────────────────────────────────
 
 model SupportTicket {
-  id         String    @id @default(uuid()) @db.Uuid
+  id          String    @id @default(uuid()) @db.Uuid
   /// Idempotence d'ingestion : re-poller la boîte ne crée jamais un doublon.
-  messageId  String    @unique @map("message_id")
-  fromEmail  String    @map("from_email")
-  subject    String    @default("")
+  messageId   String    @unique @map("message_id")
+  fromEmail   String    @map("from_email")
+  subject     String    @default("")
   /// Tenant identifié via From -> user -> memberships ; null = file générique.
-  tenantId   String?   @map("tenant_id") @db.Uuid
-  userId     String?   @map("user_id") @db.Uuid
+  tenantId    String?   @map("tenant_id") @db.Uuid
+  userId      String?   @map("user_id") @db.Uuid
   /// USAGE | DONNEES_CONNECTEURS | BUG_PRODUIT (triage), null avant triage.
-  origin     String?
+  origin      String?
   /// P1 | P2 | P3, null avant triage.
-  level      String?
+  level       String?
   /// NOUVEAU | TRIE | BROUILLON_PRET | REPONDU | RESOLU | SPAM.
-  status     String    @default("NOUVEAU")
+  status      String    @default("NOUVEAU")
   /// Clés Object Storage du corps + pièces jointes (jamais le contenu ici).
-  objectKeys Json      @default("[]") @map("object_keys")
+  objectKeys  Json      @default("[]") @map("object_keys")
   /// SPF/DKIM = signal (jamais une preuve d'identité).
-  authSignal String?   @map("auth_signal")
+  authSignal  String?   @map("auth_signal")
   /// Brouillon de réponse GÉNÉRÉ (pas le corps entrant) — validé avant envoi.
-  draftReply String?   @map("draft_reply")
+  draftReply  String?   @map("draft_reply")
   /// Diagnostic / rapport ANONYMISÉ produit par l'agent (jamais de donnée client).
-  agentReport Json?    @map("agent_report")
+  agentReport Json?     @map("agent_report")
   /// Fil e-mail (In-Reply-To à poser sur la réponse).
-  inReplyTo  String?   @map("in_reply_to")
-  repliedAt  DateTime? @map("replied_at")
-  createdAt  DateTime  @default(now()) @map("created_at")
-  updatedAt  DateTime  @default(now()) @updatedAt @map("updated_at")
+  inReplyTo   String?   @map("in_reply_to")
+  repliedAt   DateTime? @map("replied_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
 
   @@index([status])
   @@index([createdAt])
@@ -1101,4 +1119,136 @@ model SupportIssue {
   @@index([validated])
   @@map("support_issues")
   @@schema("ops")
+}
+
+/// ─────────────────────────────────────────────────────────────────────────────
+/// Ticket 4.1 — L'OBJET AFFAIRE, pivot du produit (ADR-007).
+///
+/// Une affaire = un chantier, un événement, une intervention, une mission. Le
+/// MOT vient du pack vertical, jamais du code (`affaireVocabulary.ts`).
+///
+/// Deux règles de structure, non négociables :
+///  1. TOUT rattachement est NULLABLE. Une pièce sans affaire (essence,
+///     assurance, frais généraux) est le cas MAJORITAIRE au démarrage, et
+///     l'existant doit continuer de fonctionner sans connaître les affaires.
+///  2. Une affaire ne se SUPPRIME jamais — des pièces comptables y sont
+///     rattachées. Statut ARCHIVEE, et archiver ne détache rien.
+/// ─────────────────────────────────────────────────────────────────────────────
+
+/// Le client n'est PAS une clé étrangère vers une table `contacts` : cette
+/// table n'existe pas dans le produit. `clientName` est un libellé de
+/// contrepartie commerciale (saisi ou repris d'une pièce) ; `prospectId` relie
+/// à une fiche de prospection QUAND l'affaire en vient — nullable, et mis à
+/// NULL si la fiche est effacée (une opposition RGPD ne doit pas emporter le
+/// chantier, qui a sa propre base légale : l'exécution du contrat).
+model Affaire {
+  id                   String              @id @default(uuid()) @db.Uuid
+  tenantId             String              @map("tenant_id") @db.Uuid
+  /// « 2026-014 » — unique par tenant, générée par `affaire_counters` (compteur
+  /// atomique), jamais par un count()+1.
+  reference            String
+  label                String
+  clientName           String?             @map("client_name")
+  prospectId           String?             @map("prospect_id") @db.Uuid
+  /// PROSPECT | DEVIS_ENVOYE | ACCEPTEE | EN_COURS | TERMINEE | PERDUE |
+  /// ARCHIVEE — Zod côté app, CHECK en base (défense en profondeur).
+  status               String              @default("PROSPECT")
+  address              String?
+  /// Coordonnées optionnelles, pour le rapprochement géographique (F2). Jamais
+  /// devinées : renseignées seulement si l'utilisateur les fournit.
+  latitude             Float?
+  longitude            Float?
+  /// Montant DEVISÉ HT en centimes. NULL = pas de devis : on affiche alors les
+  /// coûts, et AUCUNE marge (une marge sans devis serait inventée).
+  quotedAmountCents    BigInt?             @map("quoted_amount_cents")
+  /// Taux de TVA en points de base (2000 = 20 %). Entier : pas de flottant sur
+  /// une donnée fiscale.
+  vatRateBps           Int?                @map("vat_rate_bps")
+  estimatedHours       Int?                @map("estimated_hours")
+  /// Retenue de garantie (US-8/US-9) : taux en points de base et date de
+  /// libération. Elle est EXCLUE du reste à facturer et affichée à part —
+  /// relancer un client sur sa retenue est la faute qui coûte un client.
+  retentionRateBps     Int?                @map("retention_rate_bps")
+  retentionReleaseDate DateTime?           @map("retention_release_date") @db.Date
+  startDate            DateTime?           @map("start_date") @db.Date
+  plannedEndDate       DateTime?           @map("planned_end_date") @db.Date
+  actualEndDate        DateTime?           @map("actual_end_date") @db.Date
+  createdAt            DateTime            @default(now()) @map("created_at")
+  updatedAt            DateTime            @default(now()) @updatedAt @map("updated_at")
+  tenant               Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  prospect             Prospect?           @relation(fields: [prospectId], references: [id], onDelete: SetNull)
+  imputations          AffaireImputation[]
+  classeurDocuments    ClasseurDocument[]
+  fecInvoices          FecInvoice[]
+
+  @@unique([tenantId, reference])
+  @@index([tenantId, status])
+  @@index([tenantId, prospectId])
+  @@map("affaires")
+  @@schema("public")
+}
+
+/// Compteur de référence PAR TENANT ET PAR ANNÉE.
+///
+/// Le piège du ticket : `count() + 1` donne deux fois « 2026-014 » à deux
+/// créations simultanées. Ici l'incrément est un UPSERT atomique
+/// (`ON CONFLICT DO UPDATE ... RETURNING`) : le verrou de ligne Postgres
+/// sérialise les concurrents, et l'unicité (tenantId, reference) sur
+/// `affaires` reste le dernier rempart.
+model AffaireCounter {
+  tenantId  String   @map("tenant_id") @db.Uuid
+  year      Int
+  nextSeq   Int      @default(0) @map("next_seq")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, year])
+  @@map("affaire_counters")
+  @@schema("public")
+}
+
+/// Imputation d'une pièce à une affaire — APPEND-ONLY, révocable.
+///
+/// POLYMORPHE par nécessité, pas par goût : les transactions bancaires ne sont
+/// PAS stockées dans le produit (elles vivent chez Qonto/Bridge, on n'en garde
+/// qu'un identifiant externe, cf. `classeur_documents.matched_transaction_id`),
+/// et ni les lignes de temps ni les devis n'ont de table. Une colonne
+/// `affaireId` ne peut donc exister que là où une table existe : c'est cette
+/// table-ci qui porte le rattachement dans le cas général.
+///
+/// Défaire = `revokedAt`, jamais DELETE : c'est la trace qui alimentera
+/// l'apprentissage (F2) et qui permet d'expliquer un chiffre a posteriori.
+model AffaireImputation {
+  id          String    @id @default(uuid()) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  affaireId   String    @map("affaire_id") @db.Uuid
+  /// 'classeur_document' | 'transaction_bancaire' | 'facture' | 'charge' —
+  /// Zod côté app, CHECK en base.
+  targetType  String    @map("target_type")
+  /// UUID interne, ou identifiant EXTERNE pour une transaction bancaire.
+  targetId    String    @map("target_id")
+  /// AUTO (suggérée, non confirmée) | CONFIRMEE (suggestion validée par un
+  /// humain) | MANUELLE. La distinction est ce qui rendra F2 mesurable.
+  source      String    @default("MANUELLE")
+  /// Instantané du montant AU MOMENT de l'imputation, en centimes. Nullable :
+  /// une pièce dont on ne connaît pas le montant s'impute quand même — c'est
+  /// le calcul qui DIRA qu'il lui manque des montants.
+  amountCents BigInt?   @map("amount_cents")
+  /// 'ht' | 'ttc' — base du montant ci-dessus. JAMAIS de conversion TTC→HT :
+  /// sans le taux réel de la pièce, ce serait un chiffre inventé. Le calcul
+  /// tient les deux séparément et le dit.
+  amountBasis String?   @map("amount_basis")
+  /// Marque une facture de SOUS-TRAITANCE (poste de coût distinct au devis).
+  subcontract Boolean   @default(false)
+  createdBy   String?   @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  revokedAt   DateTime? @map("revoked_at")
+  revokedBy   String?   @map("revoked_by")
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  affaire     Affaire   @relation(fields: [affaireId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, affaireId, revokedAt])
+  @@index([tenantId, targetType, targetId])
+  @@map("affaire_imputations")
+  @@schema("public")
 }
