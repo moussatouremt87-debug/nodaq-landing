@@ -777,3 +777,135 @@ describe("F2 — photo → suggestion d'imputation", () => {
     expect(row?.source).toBe("CONFIRMEE");
   });
 });
+
+describe("F4 — la marge de chaque chantier dans le cockpit", () => {
+  it("sépare ce qui est à surveiller, ce qui est chiffrable, et ce qu'on ne sait PAS chiffrer", async () => {
+    // Un classement unique ferait passer « inconnu » pour « va bien ». Les
+    // trois groupes existent pour que ce soit impossible.
+    await withTenant(orgA, (tx) =>
+      tx.tenantProfile.upsert({
+        where: { tenantId: orgA },
+        create: { tenantId: orgA, hourlyCostCents: 3_500 },
+        update: { hourlyCostCents: 3_500 },
+      }),
+    );
+
+    // Un chantier qui PERD de l'argent.
+    const perdant = await createAffaire({
+      label: "Chantier perdant",
+      status: "EN_COURS",
+      quotedAmountCents: 100_000,
+      hoursWorked: 0,
+    });
+    await app.inject({
+      method: "POST",
+      url: `/affaires/${perdant}/imputations`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        targetType: "transaction_bancaire",
+        targetId: `tx-f4-perdant-${RUN}`,
+        amountCents: 250_000,
+        amountBasis: "ht",
+      },
+    });
+
+    // Un chantier sain.
+    const sain = await createAffaire({
+      label: "Chantier sain",
+      status: "EN_COURS",
+      quotedAmountCents: 1_000_000,
+      hoursWorked: 0,
+    });
+    await app.inject({
+      method: "POST",
+      url: `/affaires/${sain}/imputations`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        targetType: "transaction_bancaire",
+        targetId: `tx-f4-sain-${RUN}`,
+        amountCents: 200_000,
+        amountBasis: "ht",
+      },
+    });
+
+    // Un chantier dont on ne sait rien.
+    const inconnu = await createAffaire({
+      label: "Chantier vide",
+      status: "EN_COURS",
+      quotedAmountCents: 500_000,
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/affaires/marges",
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+
+    expect(body.aSurveiller.some((r: { id: string }) => r.id === perdant)).toBe(true);
+    expect(body.chiffrables.some((r: { id: string }) => r.id === sain)).toBe(true);
+    // Le chantier vide n'est NI à surveiller NI chiffrable : il est nommé.
+    expect(body.nonChiffrables.some((r: { id: string }) => r.id === inconnu)).toBe(true);
+    expect(body.aSurveiller.some((r: { id: string }) => r.id === inconnu)).toBe(false);
+    expect(body.chiffrables.some((r: { id: string }) => r.id === inconnu)).toBe(false);
+  });
+
+  it("le pire chantier est en tête : c'est celui sur lequel on peut encore agir", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/affaires/marges",
+      headers: { cookie: ownerCookie },
+    });
+    const surveiller = res.json().aSurveiller as { margin: { marginCents?: number } }[];
+    if (surveiller.length > 1) {
+      const first = surveiller[0]?.margin.marginCents ?? 0;
+      const second = surveiller[1]?.margin.marginCents ?? 0;
+      expect(first).toBeLessThanOrEqual(second);
+    }
+    expect(surveiller.length).toBeGreaterThan(0);
+  });
+
+  it("la marge du cockpit est la MÊME que celle de la fiche — un seul moteur", async () => {
+    // Deux calculs qui divergent, c'est le patron qui découvre deux chiffres
+    // pour le même chantier.
+    const liste = await app.inject({
+      method: "GET",
+      url: "/affaires/marges",
+      headers: { cookie: ownerCookie },
+    });
+    const rows = [...liste.json().aSurveiller, ...liste.json().chiffrables] as {
+      id: string;
+      margin: { kind: string; marginCents?: number };
+    }[];
+    const sample = rows[0];
+    if (!sample) throw new Error("au moins une affaire chiffrable attendue");
+    const fiche = await app.inject({
+      method: "GET",
+      url: `/affaires/${sample.id}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(fiche.json().marge.kind).toBe(sample.margin.kind);
+    expect(fiche.json().marge.marginCents).toBe(sample.margin.marginCents);
+  });
+
+  it("réservée au dirigeant", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/affaires/marges",
+      headers: { cookie: memberCookie },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("« marges » n'est pas confondu avec un identifiant d'affaire", async () => {
+    // Route statique vs paramétrique : si l'ordre changeait, le cockpit
+    // recevrait un 400 « invalid id » au lieu de ses chiffres.
+    const res = await app.inject({
+      method: "GET",
+      url: "/affaires/marges",
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.statusCode).not.toBe(400);
+  });
+});

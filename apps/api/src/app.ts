@@ -24,6 +24,7 @@ import {
   AffaireUpdateInput,
   imputationAmountIsCoherent,
   loadAffaireMargin,
+  loadAffairesMargins,
   serializeAffaire,
   toPrismaData,
 } from "./affaires.js";
@@ -5137,6 +5138,36 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     if (!created) return reply.code(404).send({ error: "prospect inconnu" });
     void reply.header("cache-control", "private, no-store");
     return reply.code(201).send(serializeAffaire(created));
+  });
+
+  /*
+   * F4 — la marge de chaque chantier, dans le cockpit.
+   *
+   * Donnée financière agrégée du tenant : OWNER uniquement, même raisonnement
+   * que la prévision de trésorerie et la page marge. Module `affaires` éteint
+   * => la carte disparaît, comme les alertes de stock.
+   */
+  app.get("/affaires/marges", { preHandler: ownerRoute }, async (request, reply) => {
+    void reply.header("cache-control", "private, no-store");
+    if (!(await isModuleActive(request.tenantId, "affaires"))) {
+      return reply.code(409).send({ error: "module désactivé" });
+    }
+    const view = await withTenant(request.tenantId, async (tx) => {
+      const profile = await tx.tenantProfile.findUnique({
+        where: { tenantId: request.tenantId },
+      });
+      const margins = await loadAffairesMargins(tx, profile?.hourlyCostCents ?? null);
+      return { margins, hourlyCostKnown: (profile?.hourlyCostCents ?? null) !== null };
+    });
+    return {
+      aSurveiller: view.margins.aSurveiller,
+      chiffrables: view.margins.chiffrables,
+      // Comptées et NOMMÉES : une affaire dont on ne sait rien n'est pas une
+      // affaire qui va bien.
+      nonChiffrables: view.margins.nonChiffrables,
+      ignorees: view.margins.ignorees,
+      hourlyCostKnown: view.hourlyCostKnown,
+    };
   });
 
   app.get("/affaires/:id", { preHandler: businessRoute }, async (request, reply) => {

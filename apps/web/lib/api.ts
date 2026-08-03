@@ -1724,6 +1724,34 @@ export const removeImputation = (
   );
 
 /*
+ * F4 — la marge de chaque chantier, pour le cockpit.
+ *
+ * Trois groupes SÉPARÉS, jamais un classement unique : mélanger une marge
+ * exacte, un plafond et une affaire dont on ne sait rien ferait passer
+ * « inconnu » pour « va bien ».
+ */
+const AffaireMarginRow = z.object({
+  id: z.string(),
+  reference: z.string(),
+  label: z.string(),
+  status: z.string(),
+  margin: AffaireMarge,
+});
+export type AffaireMarginRow = z.infer<typeof AffaireMarginRow>;
+
+const AffairesMarges = z.object({
+  aSurveiller: z.array(AffaireMarginRow),
+  chiffrables: z.array(AffaireMarginRow),
+  nonChiffrables: z.array(AffaireMarginRow),
+  ignorees: z.number(),
+  hourlyCostKnown: z.boolean(),
+});
+export type AffairesMarges = z.infer<typeof AffairesMarges>;
+
+export const getAffairesMarges = (): Promise<AffairesMarges> =>
+  call(AffairesMarges, "/affaires/marges");
+
+/*
  * F2 — suggestion d'affaire pour une pièce photographiée.
  *
  * Union discriminée : l'ABSTENTION est une réponse à part entière, avec son

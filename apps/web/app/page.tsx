@@ -6,16 +6,24 @@ import { emitDomainEvent, eventForTool, type DomainEvent } from "../lib/freshnes
 import { useFreshness } from "../lib/useFreshness";
 import {
   askCockpit,
+  getAffairesMarges,
   formatEuroCents,
   getKpis,
   getMe,
   getPendingAction,
   getTaxScheduleIfOwner,
   decidePendingAction,
+  listAffaires,
   listConnectors,
   listPendingActions,
 } from "../lib/api";
-import type { CockpitKpis, PendingActionDetail, PendingActionSummary } from "../lib/api";
+import type {
+  AffairesMarges,
+  CockpitKpis,
+  PendingActionDetail,
+  PendingActionSummary,
+} from "../lib/api";
+import { affaireWords } from "@nodaq/shared";
 import { actionChipLabel, actionTypeLabel } from "../lib/labels";
 
 /*
@@ -105,6 +113,10 @@ export default function CockpitPage() {
     plannedOutflowCents: number;
   } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // F4 — marge par affaire. Owner-only et module-gated côté API : un 403 ou un
+  // 409 laisse la carte muette, jamais une erreur à l'écran.
+  const [marges, setMarges] = useState<AffairesMarges | null>(null);
+  const [vertical, setVertical] = useState<string | null>(null);
   // Cockpit conversationnel (2.5) : la question passe par la MÊME boucle que
   // le chat — mêmes outils, mêmes gardes de rôle.
   const [question, setQuestion] = useState("");
@@ -140,6 +152,15 @@ export default function CockpitPage() {
         // présenté comme une vraie connexion.
         setDemoMode(connectors.some((connector) => connector.status === "demo"));
       }),
+      // La marge par chantier fait partie du CHARGEUR : une carte chargée une
+      // seule fois au montage resterait figée pendant que l'écran se dit
+      // « à jour » — la leçon du ticket 2.21 A.
+      getAffairesMarges()
+        .then(setMarges)
+        .catch(() => setMarges(null)),
+      listAffaires()
+        .then((state) => setVertical(state.vertical))
+        .catch(() => undefined),
       listPendingActions().then((actions) => {
         const waiting = actions.filter((a) => a.status === "pending");
         setPending(waiting);
@@ -380,6 +401,87 @@ export default function CockpitPage() {
           </div>
         )}
       </div>
+
+      {marges !== null &&
+        (marges.aSurveiller.length > 0 ||
+          marges.chiffrables.length > 0 ||
+          marges.nonChiffrables.length > 0) && (
+          <div className="card" style={{ marginBottom: 18 }}>
+            <div className="card-header">
+              <div className="titles">
+                <div className="title">
+                  Marge par {affaireWords(vertical).singular}
+                </div>
+                <div className="sub">
+                  Pendant que le travail est en cours — pas au bilan.
+                </div>
+              </div>
+            </div>
+
+            {marges.aSurveiller.length > 0 && (
+              <>
+                <span className="overline">À surveiller</span>
+                <ul className="device-list">
+                  {marges.aSurveiller.slice(0, 5).map((row) => (
+                    <li key={row.id} className="device-row">
+                      <div>
+                        <Link href={`/affaires/${row.id}`}>
+                          <strong>
+                            {row.reference} · {row.label}
+                          </strong>
+                        </Link>
+                        <br />
+                        <span className="hint">
+                          {row.margin.kind === "marge"
+                            ? `marge ${formatEuroCents(row.margin.marginCents)}`
+                            : row.margin.kind === "marge_borne_superieure"
+                              ? /* « au mieux » : le mot compte. Ce n'est pas
+                                   une marge, c'est un plafond. */
+                                `au mieux ${formatEuroCents(row.margin.upperBoundCents)}`
+                              : "—"}
+                          {(row.margin.kind === "marge" ||
+                            row.margin.kind === "marge_borne_superieure") &&
+                            row.margin.budgetGap !== null &&
+                            row.margin.budgetGap.deltaCents > 0 &&
+                            ` · budget matière dépassé de ${formatEuroCents(row.margin.budgetGap.deltaCents)}`}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                {marges.aSurveiller.length > 5 && (
+                  <p className="hint">
+                    et {marges.aSurveiller.length - 5} autre(s) — voir la page{" "}
+                    {affaireWords(vertical).plural}.
+                  </p>
+                )}
+              </>
+            )}
+
+            {marges.chiffrables.length > 0 && (
+              <p className="hint">
+                {marges.chiffrables.length} {affaireWords(vertical).singular}
+                (s) dans le vert.
+              </p>
+            )}
+
+            {/* Une affaire dont on ne sait rien n'est PAS une affaire qui va
+                bien : elle est comptée à part, jamais fondue dans le vert. */}
+            {marges.nonChiffrables.length > 0 && (
+              <p className="hint">
+                {marges.nonChiffrables.length} sans marge calculable
+                {!marges.hourlyCostKnown && " — coût horaire chargé non renseigné"}.
+              </p>
+            )}
+
+            {marges.ignorees > 0 && (
+              <p className="hint">
+                {marges.ignorees} {affaireWords(vertical).singular}(s) au-delà de la limite
+                d&apos;affichage ne sont pas comptés ici.
+              </p>
+            )}
+          </div>
+        )}
 
       <div className="cockpit-cols">
         <div className="card">

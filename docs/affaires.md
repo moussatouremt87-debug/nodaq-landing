@@ -162,6 +162,30 @@ Effacer une pièce du classeur **révoque** son imputation : sans cela, la fiche
 continuerait d'afficher un coût pour une pièce disparue, que plus personne ne
 peut vérifier.
 
+## F4 — la marge de chaque chantier dans le cockpit
+
+`GET /affaires/marges` (owner-only, module-gated) rend **trois groupes séparés**,
+jamais un classement unique :
+
+| Groupe | Contenu |
+|---|---|
+| `aSurveiller` | marge connue **négative**, ou budget matière dépassé — le pire en tête |
+| `chiffrables` | marge connue et positive |
+| `nonChiffrables` | ni marge ni plafond — **comptées et nommées** |
+
+Mélanger les trois dans un seul tri ferait passer « inconnu » pour « va bien ».
+Une affaire dont on ne sait rien n'est pas une affaire saine, et un plafond
+n'est pas une marge : la carte écrit « au mieux X » et non « marge X ».
+
+`ignorees` compte les affaires ouvertes au-delà de la borne de lecture (100) :
+une troncature silencieuse ferait disparaître des chantiers d'un écran censé
+les surveiller.
+
+Trois requêtes au total quel que soit le nombre d'affaires (affaires,
+imputations, factures) — jamais une requête par chantier. Et **un seul moteur** :
+la marge du cockpit et celle de la fiche viennent du même `computeAffaireMargin`,
+avec un test qui échoue si les deux divergent.
+
 ## Ce que 4.1 ne livre pas
 
 Dictée → devis (F1), suggestion automatique d'imputation (F2), marge dans le

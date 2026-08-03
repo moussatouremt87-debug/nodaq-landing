@@ -24,7 +24,7 @@
  */
 
 /** Bump à chaque ajout de vue ou d'événement. */
-export const FRESHNESS_RULES_VERSION = "2026-08-03";
+export const FRESHNESS_RULES_VERSION = "2026-08-04";
 
 /** Vues de données rafraîchissables. */
 export const VIEW_KEYS = [
@@ -155,12 +155,14 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   "avis.modifie": ["avis"],
   // Le cockpit affiche la prochaine échéance fiscale (owner).
   "echeance.modifiee": ["echeancier", "cockpit"],
-  // Création, modification, archivage d'une affaire (4.1).
-  "affaire.modifiee": ["affaires"],
-  // Rattacher une pièce touche AUSSI le classeur : le document y affiche son
-  // affaire. Le cockpit ne montre pas encore de marge par affaire (F4) — le
-  // jour où il le fera, c'est cette ligne qui bougera, pas dix écrans.
-  "affaire.imputee": ["affaires", "classeur"],
+  // Création, modification, archivage d'une affaire (4.1). `cockpit` depuis F4 :
+  // il affiche désormais la marge de chaque chantier.
+  "affaire.modifiee": ["affaires", "cockpit"],
+  // Rattacher une pièce touche AUSSI le classeur (le document y affiche son
+  // affaire) ET le cockpit depuis F4 : une dépense de plus change la marge du
+  // chantier. La ligne annoncée par le commentaire d'origine a bougé, et rien
+  // d'autre n'a eu à bouger — c'était le pari de cette config.
+  "affaire.imputee": ["affaires", "classeur", "cockpit"],
 };
 
 export function viewsFor(event: DomainEvent): readonly ViewKey[] {
