@@ -1701,6 +1701,8 @@ export const imputeToAffaire = (
   input: {
     targetType: string;
     targetId: string;
+    /** CONFIRMEE quand l'humain accepte une suggestion, MANUELLE quand il choisit seul. */
+    source?: "AUTO" | "CONFIRMEE" | "MANUELLE";
     amountCents?: number | null;
     amountBasis?: "ht" | "ttc" | null;
     subcontract?: boolean;
@@ -1720,6 +1722,39 @@ export const removeImputation = (
     `/affaires/${encodeURIComponent(affaireId)}/imputations/${encodeURIComponent(imputationId)}`,
     { method: "DELETE" },
   );
+
+/*
+ * F2 — suggestion d'affaire pour une pièce photographiée.
+ *
+ * Union discriminée : l'ABSTENTION est une réponse à part entière, avec son
+ * motif. Un écran ne peut pas la confondre avec « pas encore chargé », ni la
+ * remplacer par une suggestion vide.
+ */
+export const AffaireSuggestionReason = z.union([
+  z.object({ kind: z.literal("historique_fournisseur"), count: z.number() }),
+  z.object({ kind: z.literal("dans_la_periode") }),
+  z.object({ kind: z.literal("seule_affaire_en_cours") }),
+]);
+
+export const AffaireSuggestions = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("suggestions"),
+    items: z.array(
+      z.object({
+        affaireId: z.string(),
+        reference: z.string(),
+        label: z.string(),
+        reasons: z.array(AffaireSuggestionReason),
+      }),
+    ),
+    version: z.string(),
+  }),
+  z.object({ kind: z.literal("abstention"), why: z.string(), version: z.string() }),
+]);
+export type AffaireSuggestions = z.infer<typeof AffaireSuggestions>;
+
+export const getAffaireSuggestions = (documentId: string): Promise<AffaireSuggestions> =>
+  call(AffaireSuggestions, `/classeur/documents/${encodeURIComponent(documentId)}/affaires-suggerees`);
 
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {

@@ -565,3 +565,129 @@ describe("gardes de la revue — un coût ne s'invente pas", () => {
     expect(marge.missing).toContain("facture_base_ttc");
   });
 });
+
+describe("F2 — photo → suggestion d'imputation", () => {
+  async function newDocument(supplierName: string, docDate: string, sha: string) {
+    return withTenant(orgA, (tx) =>
+      tx.classeurDocument.create({
+        data: {
+          tenantId: orgA,
+          fileName: `${sha}.jpg`,
+          mimeType: "image/jpeg",
+          byteSize: 12,
+          sha256: sha,
+          photo: Buffer.from("photo"),
+          docType: "facture_fournisseur",
+          extraction: { supplierName, docDate, totalInclTax: 120 },
+        },
+      }),
+    );
+  }
+
+  it("apprend du tenant : le fournisseur déjà rattaché ici est proposé, avec ses preuves", async () => {
+    const chantier = await createAffaire({
+      label: "Suggestion A",
+      status: "EN_COURS",
+      startDate: "2026-05-01",
+      plannedEndDate: "2026-07-31",
+    });
+    const autre = await createAffaire({
+      label: "Suggestion B",
+      status: "EN_COURS",
+      startDate: "2026-05-01",
+      plannedEndDate: "2026-07-31",
+    });
+
+    const past = await newDocument("Point P", "2026-06-01", `sha-f2-past-${RUN}`);
+    const imputed = await app.inject({
+      method: "POST",
+      url: `/affaires/${chantier}/imputations`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        targetType: "classeur_document",
+        targetId: past.id,
+        amountCents: 12_000,
+        amountBasis: "ttc",
+      },
+    });
+    expect(imputed.statusCode).toBe(201);
+
+    const fresh = await newDocument("POINT P", "2026-06-20", `sha-f2-new-${RUN}`);
+    const res = await app.inject({
+      method: "GET",
+      url: `/classeur/documents/${fresh.id}/affaires-suggerees`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.kind).toBe("suggestions");
+    expect(body.items[0].affaireId).toBe(chantier);
+    expect(body.items[0].reasons).toContainEqual({ kind: "historique_fournisseur", count: 1 });
+    expect(autre).toBeDefined();
+  });
+
+  it("ne CRÉE aucune imputation : suggérer n'est pas écrire", async () => {
+    // Une imputation posée d'office entrerait dans la marge sans validation.
+    const chantier = await createAffaire({ label: "Sans écriture", status: "EN_COURS" });
+    const document = await newDocument("Brico Dépôt", "2026-06-05", `sha-f2-dry-${RUN}`);
+    await app.inject({
+      method: "GET",
+      url: `/classeur/documents/${document.id}/affaires-suggerees`,
+      headers: { cookie: ownerCookie },
+    });
+    const imputations = await withTenant(orgA, (tx) =>
+      tx.affaireImputation.findMany({ where: { affaireId: chantier } }),
+    );
+    expect(imputations).toHaveLength(0);
+    const stillFree = await withTenant(orgA, (tx) =>
+      tx.classeurDocument.findUnique({ where: { id: document.id } }),
+    );
+    expect(stillFree?.affaireId).toBeNull();
+  });
+
+  it("une pièce déjà rattachée ne se fait pas re-suggérer ailleurs", async () => {
+    const chantier = await createAffaire({ label: "Déjà rattachée", status: "EN_COURS" });
+    const document = await newDocument("Leroy", "2026-06-05", `sha-f2-done-${RUN}`);
+    await app.inject({
+      method: "POST",
+      url: `/affaires/${chantier}/imputations`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        targetType: "classeur_document",
+        targetId: document.id,
+        amountCents: 5_000,
+        amountBasis: "ttc",
+      },
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/classeur/documents/${document.id}/affaires-suggerees`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.json().kind).toBe("abstention");
+    expect(res.json().why).toBe("deja_rattachee");
+  });
+
+  it("accepter une suggestion s'enregistre en CONFIRMEE — c'est la mesure de F2", async () => {
+    const chantier = await createAffaire({ label: "Mesurable", status: "EN_COURS" });
+    const document = await newDocument("Castorama", "2026-06-07", `sha-f2-conf-${RUN}`);
+    const accepted = await app.inject({
+      method: "POST",
+      url: `/affaires/${chantier}/imputations`,
+      headers: { cookie: memberCookie },
+      payload: {
+        targetType: "classeur_document",
+        targetId: document.id,
+        source: "CONFIRMEE",
+        amountCents: 8_000,
+        amountBasis: "ttc",
+      },
+    });
+    expect(accepted.statusCode).toBe(201);
+    const row = await withTenant(orgA, (tx) =>
+      tx.affaireImputation.findUnique({ where: { id: accepted.json().id } }),
+    );
+    expect(row?.source).toBe("CONFIRMEE");
+  });
+});

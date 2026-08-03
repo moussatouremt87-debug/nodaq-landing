@@ -6,6 +6,7 @@ import {
   classeurPhotoUrl,
   correctClasseurDocument,
   deleteClasseurDocument,
+  getAffaireSuggestions,
   getClasseurCandidates,
   getClasseurMemory,
   imputeToAffaire,
@@ -17,6 +18,7 @@ import {
 import { emitDomainEvent } from "../../lib/freshness";
 import type {
   Affaire,
+  AffaireSuggestions,
   ClasseurCorrection,
   ClasseurDocument,
   ClasseurMemory,
@@ -95,6 +97,8 @@ export default function ClasseurPage() {
   // vide et inoffensive si le module est éteint ou s'il n'y a aucune affaire :
   // le classeur fonctionne exactement comme avant.
   const [affaires, setAffaires] = useState<Affaire[]>([]);
+  // Suggestion F2 : proposée à la sélection, jamais appliquée d'office.
+  const [suggestions, setSuggestions] = useState<AffaireSuggestions | null>(null);
 
   const selected = documents.find((d) => d.id === selectedId) ?? null;
 
@@ -120,6 +124,16 @@ export default function ClasseurPage() {
     setForm(formFrom(document));
     setCandidates(null);
     setNotice(null);
+    setSuggestions(null);
+    getAffaireSuggestions(document.id)
+      .then((result) => {
+        if (selectedRef.current !== document.id) return;
+        setSuggestions(result);
+      })
+      .catch(() => {
+        if (selectedRef.current !== document.id) return;
+        setSuggestions(null);
+      });
     getClasseurCandidates(document.id)
       .then((result) => {
         if (selectedRef.current !== document.id) return;
@@ -209,13 +223,16 @@ export default function ClasseurPage() {
     }
   }
 
-  async function imputer(affaireId: string): Promise<void> {
+  async function imputer(affaireId: string, fromSuggestion = false): Promise<void> {
     if (!selected) return;
     setBusy(true);
     try {
       await imputeToAffaire(affaireId, {
         targetType: "classeur_document",
         targetId: selected.id,
+        // CONFIRMEE = l'humain a validé une proposition ; MANUELLE = il a choisi
+        // seul. L'écart entre les deux est la seule mesure honnête de F2.
+        ...(fromSuggestion ? { source: "CONFIRMEE" as const } : {}),
         // Le classeur ne connaît que le TTC : on le DIT au lieu de le convertir
         // en HT avec un taux supposé — le calcul de marge tient les deux à part.
         ...(selected.extraction?.totalInclTax !== null &&
@@ -470,6 +487,59 @@ export default function ClasseurPage() {
                   Rattachée —{" "}
                   <a href={`/affaires/${selected.affaireId}`}>ouvrir la fiche</a> pour la détacher.
                 </p>
+              ) : suggestions?.kind === "suggestions" ? (
+                <>
+                  <p className="hint" style={{ margin: "4px 0 8px" }}>
+                    {/* Une proposition qu'on ne peut pas contester est une
+                        proposition qu'on valide par réflexe : le motif est
+                        affiché avec elle, pas caché derrière un score. */}
+                    Proposition — vérifiez avant de valider :
+                  </p>
+                  {suggestions.items.map((item) => (
+                    <div key={item.affaireId} style={{ marginBottom: 10 }}>
+                      <strong>
+                        {item.reference} · {item.label}
+                      </strong>
+                      <br />
+                      <span className="hint">
+                        {item.reasons
+                          .map((reason) =>
+                            reason.kind === "historique_fournisseur"
+                              ? `déjà rattaché ${reason.count} fois à ce fournisseur`
+                              : reason.kind === "dans_la_periode"
+                                ? "la date tombe dans la période"
+                                : "seule affaire en cours",
+                          )
+                          .join(" · ")}
+                      </span>
+                      <br />
+                      <button
+                        className="primary"
+                        disabled={busy}
+                        onClick={() => void imputer(item.affaireId, true)}
+                      >
+                        Rattacher ici
+                      </button>
+                    </div>
+                  ))}
+                  <p className="hint">Ou choisissez vous-même :</p>
+                  <select
+                    disabled={busy}
+                    defaultValue=""
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      event.target.value = "";
+                      if (value) void imputer(value);
+                    }}
+                  >
+                    <option value="">Une autre affaire…</option>
+                    {affaires.map((affaire) => (
+                      <option key={affaire.id} value={affaire.id}>
+                        {affaire.reference} · {affaire.label}
+                      </option>
+                    ))}
+                  </select>
+                </>
               ) : affaires.length === 0 ? (
                 <p className="hint">
                   {/* Aucune affaire ouverte : le classeur ne change pas de
