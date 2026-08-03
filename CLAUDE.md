@@ -137,6 +137,7 @@ Le détail vit dans `docs/` — **lis le doc du domaine avant d'y toucher**.
 | Classeur photo + mémoire tenant | `apps/api/src/classeur*.ts` | `classeur.md` |
 | Équipe, plannings, performance horaire (**PII, owner-only**) | `apps/api/src` | `plannings-rh.md`, `performance-horaire.md` |
 | Import FEC (source de données) | `packages/fec` | `fec-import.md` |
+| **Effacement (art. 17)** : effacer une source efface ce qui en DÉRIVE | `apps/api/src/app.ts` | `effacement.md` |
 | Marge, rapport mensuel, cockpit conversationnel, devis e-mail, prospection | `mcp-servers/actions/src` | `marge.md`, `rapport-mensuel.md`, `cockpit-conversationnel.md`, `devis-email.md`, `prospection.md` |
 | Registre de modules (**frontière du produit**) | `packages/shared/src/moduleCatalog.ts` | `modules.md` |
 | Webhooks entrants, push, support e-mail | `apps/api/src` | `webhooks.md`, `notifications-push.md`, `support.md` |

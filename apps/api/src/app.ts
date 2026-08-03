@@ -1291,6 +1291,60 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     );
   });
 
+  /**
+   * Réduit les propositions dérivées d'une source qu'on vient d'effacer.
+   *
+   * Une proposition d'immobilisation porte dans son `payload` un libellé de
+   * compte, des montants et des avertissements TIRÉS de la source (journal
+   * comptable, pièce photographiée). Effacer la source sans y toucher laissait
+   * ces dérivés en base — un effacement qui affirme plus qu'il ne fait.
+   *
+   * DEUX RÉGIMES, parce que les deux lignes ne valent pas la même chose :
+   *
+   * - `pending` : la proposition est REJETÉE et réduite. Approuver une
+   *   proposition dont la source a disparu créerait une immobilisation que
+   *   plus personne ne peut vérifier ;
+   * - décidée : le `payload` est réduit, mais la ligne, son statut et son
+   *   attribution RESTENT. Qui a décidé quoi et quand n'est pas une donnée
+   *   dérivée de la source : c'est la trace de la décision d'un humain, et
+   *   l'effacement d'une source ne réécrit pas l'histoire.
+   *
+   * Ce que la purge NE touche PAS : l'immobilisation déjà créée. C'est une
+   * donnée métier propre — un actif que l'entreprise possède, saisi par une
+   * décision humaine explicite. La supprimer détruirait de la comptabilité
+   * légitime au nom de l'effacement d'autre chose.
+   *
+   * Même patron que `rejectProspectDrafts` (2.12), pour la même raison.
+   */
+  async function reduceDerivedProposals(
+    tx: Prisma.TransactionClient,
+    source: { readonly label: string; readonly sourceRefPrefix: string },
+  ): Promise<{ rejected: number; reduced: number }> {
+    // `string_starts_with` sur le chemin JSON : les propositions FEC portent
+    // `fec:<compte>`, celles du classeur `classeur:<id>`.
+    const where = {
+      type: "create_fixed_asset",
+      payload: {
+        path: ["sourceRef"],
+        string_starts_with: source.sourceRefPrefix,
+      },
+    } as const;
+    const reducedPayload = {
+      reduced: true,
+      reducedReason: source.label,
+    } as Prisma.InputJsonValue;
+
+    const rejected = await tx.pendingAction.updateMany({
+      where: { ...where, status: "pending" },
+      data: { status: "rejected", payload: reducedPayload },
+    });
+    const reduced = await tx.pendingAction.updateMany({
+      where: { ...where, status: { not: "rejected" } },
+      data: { payload: reducedPayload },
+    });
+    return { rejected: rejected.count, reduced: reduced.count };
+  }
+
   // Droit à l'effacement (RGPD art. 17) : purge des données dérivées du FEC
   // (imports + factures via cascade) et du connecteur fichier. Owner only.
   app.delete(
@@ -1300,6 +1354,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       const removed = await withTenant(request.tenantId, async (tx) => {
         const { count } = await tx.fecImport.deleteMany({
           where: { tenantId: request.tenantId },
+        });
+        // DANS LA MÊME TRANSACTION : une purge partiellement appliquée serait
+        // le pire des deux mondes — la source effacée, les dérivés restants,
+        // et plus rien pour les relier à quoi que ce soit.
+        await reduceDerivedProposals(tx, {
+          label: "source effacée (purge FEC)",
+          sourceRefPrefix: "fec:",
         });
         await tx.connector.deleteMany({ where: { type: FEC_CONNECTOR_TYPE } });
         return count;
@@ -1815,6 +1876,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         await tx.affaireImputation.updateMany({
           where: { targetType: "classeur_document", targetId: id, revokedAt: null },
           data: { revokedAt: new Date(), revokedBy: request.authSession.user.id },
+        });
+        // Même écart que la purge FEC : au-delà du seuil de capitalisation, la
+        // pièce a fait naître une proposition d'immobilisation dont le libellé
+        // porte un nom de FOURNISSEUR. Effacer la photo en la laissant, c'est
+        // un effacement partiel qui se croit complet.
+        await reduceDerivedProposals(tx, {
+          label: "pièce effacée du classeur",
+          sourceRefPrefix: `classeur:${id}`,
         });
         return tx.classeurDocument.deleteMany({ where: { id, tenantId: request.tenantId } });
       });
@@ -4977,16 +5046,61 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
       if (!params.success) return reply.code(400).send({ error: "invalid payload" });
       void reply.header("cache-control", "private, no-store");
-      const count = await withTenant(request.tenantId, async (tx) => {
+      const outcome = await withTenant(request.tenantId, async (tx) => {
         // La cascade FK emporte le journal, mais pas la file : un brouillon
         // nominatif y survivrait à l'effacement, qui ne serait donc que
         // partiel. On le retire dans la MÊME transaction.
         await rejectProspectDrafts(tx, params.data.id);
+
+        /*
+         * L'identité RECOPIÉE sur les affaires (4.1) — et c'est la limite que
+         * `docs/affaires.md` annonçait sans la traiter.
+         *
+         * `client_name`, `address` et les coordonnées GPS sont une copie
+         * INDÉPENDANTE de l'identité et de l'adresse — souvent le domicile —
+         * de la personne. La clé composite met `prospect_id` à NULL ; la copie,
+         * elle, survivait intacte. Effacer la fiche en gardant l'adresse, ce
+         * n'est pas un effacement.
+         *
+         * MAIS on n'efface pas tout : une affaire ACCEPTEE, EN_COURS ou
+         * TERMINEE a été (ou est) un CONTRAT, et son exécution fonde la
+         * conservation de ces données — les effacer détruirait la preuve d'un
+         * travail réellement effectué. Une affaire restée PROSPECT,
+         * DEVIS_ENVOYE ou PERDUE n'a jamais rien fondé.
+         *
+         * ARCHIVEE ne dit PAS si un contrat a existé : l'archivage est la
+         * sortie commune des affaires gagnées et perdues. Trancher au hasard
+         * détruirait de la donnée contractuelle une fois sur deux, alors on ne
+         * tranche pas — on RAPPORTE, et l'owner décide affaire par affaire.
+         */
+        const anonymisables = ["PROSPECT", "DEVIS_ENVOYE", "PERDUE"];
+        const { count: anonymisees } = await tx.affaire.updateMany({
+          where: { prospectId: params.data.id, status: { in: anonymisables } },
+          data: { clientName: null, address: null, latitude: null, longitude: null },
+        });
+        // Ce qui RESTE, et pourquoi — jamais une conservation muette.
+        const conservees = await tx.affaire.findMany({
+          where: { prospectId: params.data.id, status: { notIn: anonymisables } },
+          select: { id: true, reference: true, label: true, status: true },
+        });
+
         const deleted = await tx.prospect.deleteMany({ where: { id: params.data.id } });
-        return deleted.count;
+        return { count: deleted.count, anonymisees, conservees };
       });
-      if (count === 0) return reply.code(404).send({ error: "prospect not found" });
-      return { deleted: true };
+      if (outcome.count === 0) return reply.code(404).send({ error: "prospect not found" });
+      return {
+        deleted: true,
+        affairesAnonymisees: outcome.anonymisees,
+        // Un effacement qui laisse des données DOIT dire lesquelles : c'est ce
+        // qui permet à l'owner de terminer le travail à la main.
+        affairesConservees: outcome.conservees.map((affaire) => ({
+          ...affaire,
+          motif:
+            affaire.status === "ARCHIVEE"
+              ? "archivée — le statut ne dit pas si un contrat a existé, à vérifier"
+              : "exécution du contrat",
+        })),
+      };
     },
   );
 

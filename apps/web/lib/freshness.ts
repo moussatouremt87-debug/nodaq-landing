@@ -65,6 +65,7 @@ export type DomainEvent =
   | "connecteur.modifie"
   | "module.bascule"
   | "prospect.modifie"
+  | "prospect.efface"
   | "stock.modifie"
   | "rh.modifie"
   | "immobilisation.modifiee"
@@ -153,6 +154,12 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   // les deux doivent suivre sans rechargement (pivot ADR-007).
   "module.bascule": ["nav", "cockpit", "connecteurs", "brief"],
   "prospect.modifie": ["prospects", "cockpit"],
+  // Effacer une fiche (art. 17) ANONYMISE l'identité recopiée sur les affaires
+  // jamais contractées : le nom du client disparaît d'une fiche chantier qu'un
+  // autre onglet peut avoir sous les yeux. Événement distinct de
+  // `prospect.modifie`, qui ne touche aucune affaire — périmer les affaires à
+  // chaque changement d'étape ferait clignoter un écran pour rien.
+  "prospect.efface": ["prospects", "cockpit", "affaires"],
   // Le cockpit affiche les alertes de stock (quand le module est actif).
   "stock.modifie": ["stocks", "cockpit", "brief"],
   // Salariés, absences, synchro paie. `marge` est de la sur-invalidation
@@ -264,7 +271,7 @@ export const MUTATION_EFFECTS: Readonly<Record<string, MutationEffect>> = {
   updateProspect: ["prospect.modifie"],
   logProspectInteraction: ["prospect.modifie"],
   opposeProspect: ["prospect.modifie"],
-  deleteProspect: ["prospect.modifie"],
+  deleteProspect: ["prospect.efface"],
   // Avis clients
   createReview: ["avis.modifie"],
   importReviews: ["avis.modifie"],

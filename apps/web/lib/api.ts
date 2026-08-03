@@ -996,8 +996,32 @@ export const opposeProspect = (id: string): Promise<{ optedOut: boolean }> =>
     { method: "POST" },
   );
 
-export const deleteProspect = (id: string): Promise<{ deleted: boolean }> =>
-  call(z.object({ deleted: z.boolean() }), `/prospects/${encodeURIComponent(id)}`, {
+/**
+ * Effacement d'une fiche (art. 17).
+ *
+ * La réponse RAPPORTE ce qui a été anonymisé sur les affaires et, surtout, ce
+ * qui a été CONSERVÉ avec son motif : une affaire en cours d'exécution fonde la
+ * conservation, une affaire archivée ne dit plus si un contrat a existé. Un
+ * effacement qui laisse des données doit dire lesquelles — sinon l'owner ne
+ * peut pas terminer le travail.
+ */
+export const ProspectDeletion = z.object({
+  deleted: z.boolean(),
+  affairesAnonymisees: z.number(),
+  affairesConservees: z.array(
+    z.object({
+      id: z.string(),
+      reference: z.string(),
+      label: z.string(),
+      status: z.string(),
+      motif: z.string(),
+    }),
+  ),
+});
+export type ProspectDeletion = z.infer<typeof ProspectDeletion>;
+
+export const deleteProspect = (id: string): Promise<ProspectDeletion> =>
+  call(ProspectDeletion, `/prospects/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 
