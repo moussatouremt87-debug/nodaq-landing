@@ -1142,44 +1142,51 @@ model SupportIssue {
 /// NULL si la fiche est effacée (une opposition RGPD ne doit pas emporter le
 /// chantier, qui a sa propre base légale : l'exécution du contrat).
 model Affaire {
-  id                   String              @id @default(uuid()) @db.Uuid
-  tenantId             String              @map("tenant_id") @db.Uuid
+  id                     String              @id @default(uuid()) @db.Uuid
+  tenantId               String              @map("tenant_id") @db.Uuid
   /// « 2026-014 » — unique par tenant, générée par `affaire_counters` (compteur
   /// atomique), jamais par un count()+1.
-  reference            String
-  label                String
-  clientName           String?             @map("client_name")
-  prospectId           String?             @map("prospect_id") @db.Uuid
+  reference              String
+  label                  String
+  clientName             String?             @map("client_name")
+  prospectId             String?             @map("prospect_id") @db.Uuid
   /// PROSPECT | DEVIS_ENVOYE | ACCEPTEE | EN_COURS | TERMINEE | PERDUE |
   /// ARCHIVEE — Zod côté app, CHECK en base (défense en profondeur).
-  status               String              @default("PROSPECT")
-  address              String?
+  status                 String              @default("PROSPECT")
+  address                String?
   /// Coordonnées optionnelles, pour le rapprochement géographique (F2). Jamais
   /// devinées : renseignées seulement si l'utilisateur les fournit.
-  latitude             Float?
-  longitude            Float?
+  latitude               Float?
+  longitude              Float?
   /// Montant DEVISÉ HT en centimes. NULL = pas de devis : on affiche alors les
   /// coûts, et AUCUNE marge (une marge sans devis serait inventée).
-  quotedAmountCents    BigInt?             @map("quoted_amount_cents")
+  quotedAmountCents      BigInt?             @map("quoted_amount_cents")
   /// Taux de TVA en points de base (2000 = 20 %). Entier : pas de flottant sur
   /// une donnée fiscale.
-  vatRateBps           Int?                @map("vat_rate_bps")
-  estimatedHours       Int?                @map("estimated_hours")
+  vatRateBps             Int?                @map("vat_rate_bps")
+  estimatedHours         Int?                @map("estimated_hours")
+  /// Heures réellement passées, DÉCLARÉES : il n'existe pas de lignes de temps
+  /// dans le produit. NULL = inconnu (marge en borne supérieure), 0 = déclaré nul.
+  hoursWorked            Int?                @map("hours_worked")
+  /// Coût matière PRÉVU au devis — seule référence possible de l'écart budget.
+  estimatedMaterialCents BigInt?             @map("estimated_material_cents")
+  /// Acomptes encaissés, déclarés. Jamais comptés en marge acquise.
+  depositsCents          BigInt?             @map("deposits_cents")
   /// Retenue de garantie (US-8/US-9) : taux en points de base et date de
   /// libération. Elle est EXCLUE du reste à facturer et affichée à part —
   /// relancer un client sur sa retenue est la faute qui coûte un client.
-  retentionRateBps     Int?                @map("retention_rate_bps")
-  retentionReleaseDate DateTime?           @map("retention_release_date") @db.Date
-  startDate            DateTime?           @map("start_date") @db.Date
-  plannedEndDate       DateTime?           @map("planned_end_date") @db.Date
-  actualEndDate        DateTime?           @map("actual_end_date") @db.Date
-  createdAt            DateTime            @default(now()) @map("created_at")
-  updatedAt            DateTime            @default(now()) @updatedAt @map("updated_at")
-  tenant               Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  prospect             Prospect?           @relation(fields: [prospectId], references: [id], onDelete: SetNull)
-  imputations          AffaireImputation[]
-  classeurDocuments    ClasseurDocument[]
-  fecInvoices          FecInvoice[]
+  retentionRateBps       Int?                @map("retention_rate_bps")
+  retentionReleaseDate   DateTime?           @map("retention_release_date") @db.Date
+  startDate              DateTime?           @map("start_date") @db.Date
+  plannedEndDate         DateTime?           @map("planned_end_date") @db.Date
+  actualEndDate          DateTime?           @map("actual_end_date") @db.Date
+  createdAt              DateTime            @default(now()) @map("created_at")
+  updatedAt              DateTime            @default(now()) @updatedAt @map("updated_at")
+  tenant                 Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  prospect               Prospect?           @relation(fields: [prospectId], references: [id], onDelete: SetNull)
+  imputations            AffaireImputation[]
+  classeurDocuments      ClasseurDocument[]
+  fecInvoices            FecInvoice[]
 
   @@unique([tenantId, reference])
   @@index([tenantId, status])
