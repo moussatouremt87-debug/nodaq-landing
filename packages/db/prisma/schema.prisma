@@ -349,12 +349,19 @@ model PendingAction {
   /// Execution outcome metadata only (e.g. external id, error code) — NEVER
   /// sensitive client content.
   result      Json?
+  /// Affaire this decision concerns (F6). ALWAYS NULLABLE, like every other
+  /// affaire link: general-overhead actions have no chantier, and that is the
+  /// majority case at onboarding. NEVER feeds the margin — a decision is not a
+  /// cost; only `affaire_imputations` carries money (see docs/affaires.md).
+  affaireId   String?   @map("affaire_id") @db.Uuid
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
   tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  affaire     Affaire?  @relation(fields: [tenantId, affaireId], references: [tenantId, id], onDelete: SetNull)
 
   @@index([tenantId])
   @@index([tenantId, status])
+  @@index([tenantId, affaireId])
   @@map("pending_actions")
   @@schema("public")
 }
@@ -1188,6 +1195,7 @@ model Affaire {
   imputations            AffaireImputation[]
   classeurDocuments      ClasseurDocument[]
   fecInvoices            FecInvoice[]
+  pendingActions         PendingAction[]
 
   @@unique([tenantId, reference])
   /// Cible de la clé étrangère COMPOSITE des imputations : l'intégrité

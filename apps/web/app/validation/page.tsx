@@ -1,17 +1,21 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import { resolvePendingActionGroups } from "@nodaq/shared";
 import { emitDomainEvent } from "../../lib/freshness";
 import { useFreshness } from "../../lib/useFreshness";
 import {
   ApiError,
   decidePendingAction,
   formatEuroCents,
+  getModules,
   getPendingAction,
+  listAffaires,
   listPendingActions,
+  setPendingActionAffaire,
   updatePendingActionDraft,
 } from "../../lib/api";
-import type { PendingActionDetail, PendingActionSummary } from "../../lib/api";
+import type { Affaire, PendingActionDetail, PendingActionSummary } from "../../lib/api";
 import { actionChipLabel, actionStatusLabel, actionTypeLabel, timeAgo } from "../../lib/labels";
 
 /*
@@ -28,13 +32,17 @@ const asDict = (value: unknown): Dict | null =>
 const asString = (value: unknown): string | null => (typeof value === "string" ? value : null);
 const asNumber = (value: unknown): number | null => (typeof value === "number" ? value : null);
 
-const TABS = [
-  { key: "all", label: "Toutes", types: null },
-  { key: "dunning", label: "Relances", types: ["send_dunning"] },
-  { key: "quote", label: "Devis", types: ["create_quote"] },
-  { key: "entries", label: "Écritures", types: ["submit_reconciliation", "book_invoice"] },
-  { key: "reviews", label: "Avis", types: ["record_review_reply"] },
-] as const;
+/*
+ * Les onglets viennent du CATALOGUE (F6), plus d'une liste écrite ici.
+ *
+ * La liste en dur avait cessé d'être vraie : cinq types d'action sur dix
+ * n'avaient aucun onglet et n'existaient que dans « Toutes », introuvables dès
+ * que la file dépassait un écran ; et un onglet « Avis » subsistait alors que
+ * son module est hors socle depuis le pivot.
+ *
+ * Le registre gouverne les ONGLETS, jamais les actions : une action dont le
+ * module a été éteint garde son onglet, et l'écran dit pourquoi.
+ */
 
 /** Titre + méta d'une action pour la liste (payload owner-gated si chargé). */
 function actionLine(action: PendingActionSummary, detail: PendingActionDetail | undefined) {
@@ -272,9 +280,14 @@ function subjectFor(payload: Dict | null): string | null {
 export default function ValidationPage() {
   const [actions, setActions] = useState<PendingActionSummary[]>([]);
   const [details, setDetails] = useState<Record<string, PendingActionDetail>>({});
-  const [tab, setTab] = useState<(typeof TABS)[number]["key"]>("all");
+  const [tab, setTab] = useState<string>("all");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Modules ÉTEINTS (registre 3.11) et chantiers ouverts, pour les onglets et
+  // le rattachement. FAIL-OPEN : en erreur, on n'éteint aucun onglet — masquer
+  // par accident vaut moins qu'afficher un onglet de trop.
+  const [inactiveModules, setInactiveModules] = useState<string[]>([]);
+  const [affaires, setAffaires] = useState<Affaire[]>([]);
 
   // Détail SÉLECTIONNÉ. La ref miroir empêche une réponse tardive d'une
   // sélection précédente d'écraser la ligne courante (aucune fuite de
@@ -312,8 +325,25 @@ export default function ValidationPage() {
       });
   }, []);
 
+  // Registre et chantiers : indépendants de la file, et leur échec ne doit pas
+  // empêcher de valider quoi que ce soit.
+  const loadContext = useCallback(() => {
+    getModules()
+      .then((state) =>
+        setInactiveModules(state.modules.filter((m) => !m.active).map((m) => m.id)),
+      )
+      .catch(() => setInactiveModules([]));
+    listAffaires()
+      .then((list) => setAffaires(list.affaires))
+      .catch(() => setAffaires([]));
+  }, []);
+
   const freshness = useFreshness(["validation"], load);
   const refresh = freshness.refresh;
+
+  // La nav et la liste des chantiers vieillissent elles aussi : basculer un
+  // module ou créer une affaire doit se voir ici sans rechargement.
+  useFreshness(["nav", "affaires"], async () => loadContext());
 
   const clearSelection = useCallback(() => {
     selectedRef.current = null;
@@ -380,6 +410,25 @@ export default function ValidationPage() {
     }
   }
 
+  async function attachAffaire(id: string, affaireId: string | null): Promise<void> {
+    setDetailNotice(null);
+    try {
+      await setPendingActionAffaire(id, affaireId);
+      // Le rattachement se lit sur la carte ET sur la fiche du chantier :
+      // deux vues que cette écriture vient de périmer.
+      emitDomainEvent("action.preparee");
+      refresh();
+    } catch (error) {
+      setDetailNotice(
+        error instanceof ApiError && error.status === 403
+          ? "Rattachement réservé au rôle owner."
+          : error instanceof ApiError && error.status === 409
+            ? "Action déjà décidée — son chantier n'est plus modifiable."
+            : "Échec du rattachement au chantier.",
+      );
+    }
+  }
+
   async function decide(id: string, decision: "approve" | "reject"): Promise<void> {
     setBusyId(id);
     setNotice(null);
@@ -412,10 +461,19 @@ export default function ValidationPage() {
 
   const waiting = actions.filter((a) => a.status === "pending");
   const done = actions.filter((a) => a.status !== "pending");
-  const activeTab = TABS.find((t) => t.key === tab) ?? TABS[0];
-  const visible = activeTab.types
-    ? waiting.filter((a) => (activeTab.types as readonly string[]).includes(a.type))
-    : waiting;
+  const groups = resolvePendingActionGroups(
+    waiting.map((a) => a.type),
+    inactiveModules,
+  );
+  const activeGroup = groups.find((group) => group.id === tab) ?? null;
+  // « Autres » (types hors catalogue) : tout ce qu'aucun groupe ne réclame.
+  const catalogued = new Set(groups.flatMap((group) => group.types));
+  const visible =
+    activeGroup === null
+      ? waiting
+      : activeGroup.id === "autres"
+        ? waiting.filter((a) => !catalogued.has(a.type))
+        : waiting.filter((a) => activeGroup.types.includes(a.type));
 
   const detailPayload = detail ? asDict(detail.payload) : null;
   const hasDraft = asString(detailPayload?.draft) !== null;
@@ -441,22 +499,35 @@ export default function ValidationPage() {
       {notice && <p className="error-line">{notice}</p>}
 
       <div className="tabs">
-        {TABS.map((t) => {
-          const count = t.types
-            ? waiting.filter((a) => (t.types as readonly string[]).includes(a.type)).length
-            : waiting.length;
-          if (t.types && count === 0) return null;
-          return (
-            <button
-              key={t.key}
-              className={tab === t.key ? "active" : ""}
-              onClick={() => setTab(t.key)}
-            >
-              {t.label} <span className="c">{count}</span>
-            </button>
-          );
-        })}
+        <button className={tab === "all" ? "active" : ""} onClick={() => setTab("all")}>
+          Toutes <span className="c">{waiting.length}</span>
+        </button>
+        {groups.map((group) => (
+          <button
+            key={group.id}
+            className={tab === group.id ? "active" : ""}
+            onClick={() => setTab(group.id)}
+            // Un module éteint qui garde des actions : l'onglet reste, et il
+            // s'explique. Sans ça, la présence d'actions d'un module absent de
+            // la navigation passe pour un bug.
+            title={
+              group.moduleOff
+                ? "Module désactivé — ces décisions restent dues et restent validables."
+                : undefined
+            }
+          >
+            {group.label}
+            {group.moduleOff && " ·  éteint"} <span className="c">{group.count}</span>
+          </button>
+        ))}
       </div>
+
+      {activeGroup?.moduleOff && (
+        <p className="hint">
+          Le module « {activeGroup.label} » est désactivé : sa page a disparu de la navigation,
+          mais ces décisions étaient déjà engagées — elles restent à prendre.
+        </p>
+      )}
 
       <div className="validation-cols">
         <div>
@@ -477,6 +548,13 @@ export default function ValidationPage() {
                   </div>
                   <div className="atitle">{line.title}</div>
                   {line.meta && <div className="ameta">{line.meta}</div>}
+                  {/* Le chantier, sur la carte : c'est la question que le
+                      patron se pose en premier devant une relance. */}
+                  {action.affaire && (
+                    <div className="ameta">
+                      {action.affaire.reference} — {action.affaire.label}
+                    </div>
+                  )}
                 </button>
               );
             })
@@ -530,6 +608,29 @@ export default function ValidationPage() {
 
               {detailNotice && <p className="hint">{detailNotice}</p>}
               {!detail && !detailNotice && <p className="hint">Chargement…</p>}
+
+              {/* Rattachement au chantier (F6) — FACULTATIF, et réversible.
+                  Une action de frais généraux n'a pas de chantier : « Aucun »
+                  est une réponse, pas un oubli à corriger. */}
+              {detail && (
+                <div className="meta" style={{ marginBottom: 10 }}>
+                  <span className="overline">Chantier concerné</span>
+                  <select
+                    value={selectedSummary?.affaireId ?? ""}
+                    aria-label="Chantier concerné"
+                    onChange={(event) =>
+                      void attachAffaire(selectedId, event.target.value || null)
+                    }
+                  >
+                    <option value="">Aucun — frais généraux</option>
+                    {affaires.map((affaire) => (
+                      <option key={affaire.id} value={affaire.id}>
+                        {affaire.reference} — {affaire.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {detailPayload && selectedSummary?.type === "create_fixed_asset" && (
                 <FixedAssetProposal payload={detailPayload} />

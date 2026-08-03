@@ -1954,6 +1954,38 @@ describe("isolation tenant (RLS) — affaires et imputations (4.1)", () => {
     ).rejects.toThrow();
   });
 
+  it("test 7 quater (F6) — une action à valider ne peut pas viser l'affaire d'un AUTRE tenant", async () => {
+    // Même mécanisme que le test 7, sur le lien ajouté par F6. La RLS ne
+    // contraint que `tenant_id` : sans clé composite, la file de validation du
+    // tenant A pourrait pointer un chantier de B — un oracle d'existence sur
+    // les affaires du voisin, invisible en lecture.
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.pendingAction.create({
+          data: {
+            tenantId: tenantA,
+            type: "send_dunning",
+            payload: {},
+            affaireId: affaireBId,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 7 quinquies (F6) — le rattachement d'une action reste FACULTATIF", async () => {
+    // La règle de structure n°1 : tout rattachement est nullable, sans
+    // exception. Une action de frais généraux n'a pas de chantier, et c'est le
+    // cas majoritaire au démarrage — l'exiger casserait l'existant.
+    const created = await withTenant(tenantA, (tx) =>
+      tx.pendingAction.create({
+        data: { tenantId: tenantA, type: "send_dunning", payload: {} },
+      }),
+    );
+    expect(created.affaireId).toBeNull();
+    await withTenant(tenantA, (tx) => tx.pendingAction.delete({ where: { id: created.id } }));
+  });
+
   it("test 7 ter — un montant d'imputation NÉGATIF est refusé", async () => {
     // Un coût négatif fait une marge SUPÉRIEURE au devis, présentée comme
     // exacte : le chiffre flatteur et faux que ce ticket existe pour empêcher.

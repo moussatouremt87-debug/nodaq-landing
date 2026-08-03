@@ -348,10 +348,77 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           validatedBy: true,
           validatedAt: true,
           createdAt: true,
+          // F6 — l'affaire concernée. Référence et libellé sont des
+          // MÉTADONNÉES, pas des montants : tout membre voit déjà ses
+          // chantiers (4.1), et sans ce rappel l'owner validerait « Relance —
+          // Facture 2026-124 » sans savoir de quel chantier il s'agit.
+          affaireId: true,
+          affaire: { select: { reference: true, label: true, status: true } },
         },
       }),
     );
   });
+
+  /*
+   * Rattacher (ou détacher) une action à une affaire — F6.
+   *
+   * OWNER-ONLY, et pas par frilosité : le payload d'une action est owner-gated
+   * (1.5), donc un membre ne peut pas VOIR ce que l'action contient. Lui
+   * demander de la classer serait lui demander de classer à l'aveugle. C'est
+   * l'inverse de l'imputation d'une pièce (4.1), ouverte à tous parce que
+   * l'employé de terrain, lui, a la facture sous les yeux.
+   *
+   * `null` DÉTACHE : un rattachement se corrige, il ne se subit pas. Et le
+   * rattachement reste FACULTATIF de bout en bout — une action de frais
+   * généraux n'a pas de chantier.
+   *
+   * Modifiable tant que l'action est `pending` seulement, comme le brouillon :
+   * après décision, la ligne est une trace, et une trace ne se réécrit pas.
+   */
+  app.patch(
+    "/pending-actions/:id/affaire",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const params = z.object({ id: Uuid }).safeParse(request.params);
+      if (!params.success) {
+        return reply.code(400).send({ error: "invalid pending action id" });
+      }
+      const body = z.object({ affaireId: Uuid.nullable() }).strict().safeParse(request.body);
+      if (!body.success) return reply.code(400).send({ error: "invalid affaire id" });
+
+      const outcome = await withTenant(request.tenantId, async (tx) => {
+        const action = await tx.pendingAction.findUnique({
+          where: { id: params.data.id },
+          select: { status: true },
+        });
+        if (!action) return { code: 404 as const, error: "pending action not found" };
+        if (action.status !== "pending") {
+          return { code: 409 as const, error: `already ${action.status}` };
+        }
+        if (body.data.affaireId !== null) {
+          // La clé composite refuserait déjà le croisement de tenants en base
+          // (deuxième couche). On vérifie d'abord pour rendre un 404 motivé
+          // plutôt qu'une erreur Prisma remontée en 500 — un refus est une
+          // RÉPONSE, pas un plantage.
+          const affaire = await tx.affaire.findUnique({
+            where: { id: body.data.affaireId },
+            select: { id: true },
+          });
+          if (!affaire) return { code: 404 as const, error: "affaire not found" };
+        }
+        const { count } = await tx.pendingAction.updateMany({
+          where: { id: params.data.id, status: "pending" },
+          data: { affaireId: body.data.affaireId },
+        });
+        if (count === 0) return { code: 409 as const, error: "already decided" };
+        return { code: 200 as const };
+      });
+      if (outcome.code !== 200) {
+        return reply.code(outcome.code).send({ error: outcome.error });
+      }
+      return reply.send({ id: params.data.id, affaireId: body.data.affaireId });
+    },
+  );
 
   app.get(
     "/pending-actions/:id",
@@ -5524,8 +5591,17 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         select: { id: true, fileName: true, docType: true, status: true, createdAt: true },
         orderBy: [{ createdAt: "desc" }],
       });
+      // F6 — ce qui attend une DÉCISION sur ce chantier. Métadonnées seulement
+      // (jamais le payload) : le compteur est visible de tout membre, comme la
+      // file elle-même, le contenu reste owner-gated derrière son endpoint.
+      const pendingActions = await tx.pendingAction.findMany({
+        where: { affaireId: affaire.id, status: "pending" },
+        select: { id: true, type: true, createdAt: true },
+        orderBy: [{ createdAt: "desc" }],
+        take: 20,
+      });
       const margin = await loadAffaireMargin(tx, affaire.id, profile?.hourlyCostCents ?? null);
-      return { affaire, imputations, documents, margin, profile };
+      return { affaire, imputations, documents, pendingActions, margin, profile };
     });
 
     if (!result) return reply.code(404).send({ error: "affaire inconnue" });
@@ -5558,6 +5634,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       documents: result.documents.map((document) => ({
         ...document,
         createdAt: document.createdAt.toISOString(),
+      })),
+      actionsAValider: result.pendingActions.map((action) => ({
+        ...action,
+        createdAt: action.createdAt.toISOString(),
       })),
       // Marge = donnée financière : owner uniquement, et le refus est MOTIVÉ.
       marge: isOwner ? (result.margin?.margin ?? null) : null,
