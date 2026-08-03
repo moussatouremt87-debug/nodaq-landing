@@ -81,7 +81,11 @@ export type SuggestionOutcome =
         | "aucune_affaire_ouverte"
         | "aucun_signal"
         | "signaux_partages"
-        | "piece_illisible";
+        | "piece_illisible"
+        // Rendu par la route, pas par le moteur : la pièce porte déjà son
+        // affaire. Il vit quand même dans l'union, sinon le contrat côté web
+        // retombe sur `string` et n'importe quelle faute de frappe passe.
+        | "deja_rattachee";
     };
 
 /** Statuts qui peuvent encore recevoir une dépense. Une affaire terminée,
@@ -197,10 +201,23 @@ export function suggestAffaires(
   // gagnant arbitraire.
   if (withWindow.length > 1) return { kind: "abstention", why: "signaux_partages" };
 
-  // Dernier recours : une seule affaire ouverte, et la pièce ne la contredit
-  // pas. Signal faible, donc dit comme tel.
+  // Dernier recours : une seule affaire ouverte. Signal faible, donc dit comme
+  // tel — et il ne s'applique QUE si la pièce ne la contredit pas.
+  //
+  // Le commentaire disait déjà « et la pièce ne la contredit pas », le code ne
+  // le vérifiait pas : une facture de 2020 était proposée pour un chantier de
+  // 2026. C'était aussi incohérent avec le cas à deux affaires, où l'on
+  // s'abstient. Le nombre d'affaires ouvertes ne change pas ce qu'une date dit.
   if (open.length === 1) {
     const only = open[0] as SuggestionAffaire;
+    const day = parseDay(document.docDate);
+    const hasWindow =
+      parseDay(only.startDate) !== null ||
+      parseDay(only.actualEndDate) !== null ||
+      parseDay(only.plannedEndDate) !== null;
+    if (day !== null && hasWindow && !withinWindow(document, only)) {
+      return { kind: "abstention", why: "aucun_signal" };
+    }
     return {
       kind: "suggestions",
       items: [

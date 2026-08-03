@@ -170,11 +170,33 @@ describe("période", () => {
 
 describe("affaire unique — signal faible, dit comme tel", () => {
   it("une seule affaire ouverte et rien qui la contredise : proposée, motif explicite", () => {
+    // Fournisseur inconnu, affaire SANS dates : rien ne contredit.
     const result = suggestAffaires(
-      { supplierName: "Fournisseur inconnu", docDate: "2020-01-01" },
+      { supplierName: "Fournisseur inconnu", docDate: "2026-06-10" },
+      [chantier({ startDate: null, plannedEndDate: null })],
+      [],
+    );
+    if (result.kind !== "suggestions") throw new Error("cas attendu");
+    expect(result.items[0]?.reasons).toEqual([{ kind: "seule_affaire_en_cours" }]);
+  });
+
+  it("une seule affaire ouverte mais la DATE la contredit : abstention", () => {
+    // Le nombre d'affaires ouvertes ne change pas ce qu'une date dit. Proposer
+    // un chantier de 2026 pour une facture de 2020 parce qu'il est seul, c'est
+    // faire d'une absence de concurrence une preuve.
+    const result = suggestAffaires(
+      { supplierName: "Inconnu", docDate: "2020-01-01" },
       [chantier()],
       [],
     );
+    if (result.kind !== "abstention") throw new Error("cas attendu");
+    expect(result.why).toBe("aucun_signal");
+  });
+
+  it("une date ILLISIBLE ne vaut pas une contradiction", () => {
+    // L'extraction ne valide pas le format : « 12 juin » arrive tel quel. On
+    // traite ça comme une date absente, pas comme une date hors période.
+    const result = suggestAffaires({ supplierName: "Inconnu", docDate: "12 juin 2026" }, [chantier()], []);
     if (result.kind !== "suggestions") throw new Error("cas attendu");
     expect(result.items[0]?.reasons).toEqual([{ kind: "seule_affaire_en_cours" }]);
   });

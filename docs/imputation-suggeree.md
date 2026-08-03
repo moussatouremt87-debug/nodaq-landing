@@ -15,7 +15,7 @@ propose ; il n'écrit pas. Une imputation `AUTO` non confirmée entrerait dans l
 calcul de marge de 4.1 — un coût que personne n'a validé déciderait d'un chiffre
 affiché. L'acceptation passe par la route d'imputation normale.
 
-**2. L'abstention est une réponse.** Quatre motifs, tous explicites :
+**2. L'abstention est une réponse.** Cinq motifs, tous explicites, et tous **affichés** à l'écran — un refus muet ne se distingue pas d'une panne :
 
 | `why` | Situation |
 |---|---|
@@ -40,7 +40,19 @@ peut pas contester est une proposition qu'on valide par réflexe.
 2. **Période** — la pièce tombe dans les dates du chantier, avec quinze jours de
    tolérance : un fournisseur qui facture en fin de mois compte encore.
 3. **Affaire unique** — il n'y en a qu'une d'ouverte. Signal faible, affiché
-   comme tel, et **jamais utilisé pour départager** plusieurs affaires.
+   comme tel, **jamais utilisé pour départager** plusieurs affaires, et **jamais
+   contre une date** : une facture de 2020 n'est pas proposée pour un chantier
+   de 2026 sous prétexte qu'il est seul. Le nombre d'affaires ouvertes ne change
+   pas ce qu'une date dit.
+
+L'historique, lui, n'a pas de veto de date : une affaire restée `EN_COURS`
+au-delà de sa fin prévue continue d'attirer les pièces de ses fournisseurs
+habituels. C'est voulu — un chantier qui traîne reste un chantier — mais c'est
+aussi la raison pour laquelle clôturer une affaire compte.
+
+Les deux lectures dérivées sont **bornées** (300 imputations récentes, 200
+affaires), même doctrine que la mémoire fournisseur du classeur : une
+dérivation à la lecture doit avoir un coût borné.
 
 À égalité parfaite sur l'historique, les deux affaires sont proposées : trancher
 au hasard serait pire que demander.
@@ -50,7 +62,9 @@ au hasard serait pire que demander.
 `source` distingue **`CONFIRMEE`** (l'humain a validé une proposition) de
 **`MANUELLE`** (il a choisi seul). L'écart entre les deux est la seule mesure
 honnête de F2 — et elle existe dès le premier jour parce que 4.1 a prévu la
-colonne. **`AUTO` reste inutilisé** : rien n'écrit sans validation humaine.
+colonne. **`AUTO` est REFUSÉ** par la route d'imputation (400), et exclu du calcul de
+marge par ceinture et bretelles : la promesse « rien n'écrit sans validation
+humaine » est appliquée, pas seulement écrite.
 
 ## Zéro LLM
 

@@ -669,6 +669,92 @@ describe("F2 — photo → suggestion d'imputation", () => {
     expect(res.json().why).toBe("deja_rattachee");
   });
 
+  it("la mémoire d'un tenant NE SORT PAS de son tenant", async () => {
+    // Le coeur du ticket : « dérivée à la lecture, jamais partagée ». La RLS
+    // l'assure, mais sans ce test on ne le saurait qu'en production.
+    const otherOwner = await signup(`aff-b-${RUN}@example.com`, "Autre Patron");
+    const otherOrg = await app.inject({
+      method: "POST",
+      url: "/api/auth/organization/create",
+      headers: { cookie: otherOwner },
+      payload: { name: `Org B ${RUN}`, slug: `org-b-${RUN}` },
+    });
+    const orgB = otherOrg.json().id as string;
+
+    // Chez B : le même fournisseur, rattaché à un chantier de B.
+    const affaireB = await app.inject({
+      method: "POST",
+      url: "/affaires",
+      headers: { cookie: otherOwner },
+      payload: { label: "Chantier de B", status: "EN_COURS" },
+    });
+    const documentB = await withTenant(orgB, (tx) =>
+      tx.classeurDocument.create({
+        data: {
+          tenantId: orgB,
+          fileName: "b.jpg",
+          mimeType: "image/jpeg",
+          byteSize: 12,
+          sha256: `sha-f2-b-${RUN}`,
+          photo: Buffer.from("photo"),
+          docType: "facture_fournisseur",
+          extraction: { supplierName: "Fournisseur Partagé", docDate: "2026-06-01" },
+        },
+      }),
+    );
+    await app.inject({
+      method: "POST",
+      url: `/affaires/${affaireB.json().id}/imputations`,
+      headers: { cookie: otherOwner },
+      payload: {
+        targetType: "classeur_document",
+        targetId: documentB.id,
+        amountCents: 9_000,
+        amountBasis: "ttc",
+      },
+    });
+
+    // Chez A : même fournisseur, une seule affaire ouverte sans dates.
+    await createAffaire({ label: "Chantier de A", status: "EN_COURS" });
+    const documentA = await newDocument(
+      "Fournisseur Partagé",
+      "2026-06-02",
+      `sha-f2-a-${RUN}`,
+    );
+    const res = await app.inject({
+      method: "GET",
+      url: `/classeur/documents/${documentA.id}/affaires-suggerees`,
+      headers: { cookie: ownerCookie },
+    });
+    const body = res.json();
+    // Aucune suggestion ne doit s'appuyer sur ce que B a fait.
+    const reasons = body.kind === "suggestions" ? body.items.flatMap((i: { reasons: unknown[] }) => i.reasons) : [];
+    expect(reasons).not.toContainEqual(expect.objectContaining({ kind: "historique_fournisseur" }));
+    // Et surtout : jamais le chantier de B.
+    if (body.kind === "suggestions") {
+      expect(body.items.every((i: { affaireId: string }) => i.affaireId !== affaireB.json().id)).toBe(true);
+    }
+  });
+
+  it("une imputation AUTO est REFUSÉE : rien n'écrit sans validation humaine", async () => {
+    // La doc promet « AUTO reste inutilisé ». Sans ce refus, un client pouvait
+    // en poser une, et elle entrait dans la marge.
+    const chantier = await createAffaire({ label: "Anti-AUTO", status: "EN_COURS" });
+    const res = await app.inject({
+      method: "POST",
+      url: `/affaires/${chantier}/imputations`,
+      headers: { cookie: memberCookie },
+      payload: {
+        targetType: "charge",
+        targetId: `auto-${RUN}`,
+        source: "AUTO",
+        amountCents: 1_000,
+        amountBasis: "ht",
+      },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
   it("accepter une suggestion s'enregistre en CONFIRMEE — c'est la mesure de F2", async () => {
     const chantier = await createAffaire({ label: "Mesurable", status: "EN_COURS" });
     const document = await newDocument("Castorama", "2026-06-07", `sha-f2-conf-${RUN}`);

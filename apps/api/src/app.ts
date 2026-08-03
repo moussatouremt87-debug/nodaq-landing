@@ -211,6 +211,11 @@ async function requireMembership(request: FastifyRequest, reply: FastifyReply): 
   request.membershipRole = membership.role;
 }
 
+/** Bornes de lecture de la suggestion F2 — même doctrine que `MEMORY_WINDOW`
+ *  du classeur : une dérivation à la lecture doit avoir un coût borné. */
+const AFFAIRE_SUGGESTION_HISTORY_WINDOW = 300;
+const AFFAIRE_SUGGESTION_MAX_AFFAIRES = 200;
+
 /** Champ texte d'une extraction JSON — `null` dès que ce n'est pas exploitable. */
 function extractionField(extraction: unknown, field: "supplierName" | "docDate"): string | null {
   if (extraction === null || typeof extraction !== "object" || Array.isArray(extraction)) {
@@ -5257,11 +5262,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       const outcome = await withTenant(request.tenantId, async (tx) => {
         const document = await tx.classeurDocument.findUnique({
           where: { id: params.data.id },
-          select: { id: true, extraction: true, corrections: true, affaireId: true },
+          select: { id: true, extraction: true, affaireId: true },
         });
         if (!document) return null;
 
         const affaires = await tx.affaire.findMany({
+          take: AFFAIRE_SUGGESTION_MAX_AFFAIRES,
+          orderBy: [{ createdAt: "desc" }],
           where: { status: { notIn: ["ARCHIVEE", "PERDUE", "TERMINEE"] } },
           select: {
             id: true,
@@ -5274,10 +5281,25 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           },
         });
 
+        // Aucune affaire ouverte : inutile de payer la lecture de l'historique
+        // pour répondre « rien à proposer ». C'est le cas de tout tenant qui
+        // n'utilise pas encore les affaires, donc le cas le plus fréquent.
+        if (affaires.length === 0) {
+          return { alreadyImputed: false, result: suggestAffaires({ supplierName: null, docDate: null }, [], []) };
+        }
+
         // Historique : ce que CE tenant a rattaché lui-même. Dérivé à la
         // lecture, jamais stocké, jamais partagé — la mémoire d'un tenant ne
         // sort pas de son tenant (règle 7).
+        //
+        // BORNÉ, comme la mémoire fournisseur du classeur (`MEMORY_WINDOW`) :
+        // sans `take`, un tenant à 10 000 imputations désérialiserait 10 000
+        // extractions JSON à chaque clic, et un `IN` de cette taille finit par
+        // dépasser la limite de paramètres de Postgres. Les rattachements
+        // récents sont aussi les plus informatifs.
         const imputations = await tx.affaireImputation.findMany({
+          take: AFFAIRE_SUGGESTION_HISTORY_WINDOW,
+          orderBy: [{ createdAt: "desc" }],
           where: { targetType: "classeur_document", revokedAt: null },
           select: { targetId: true, affaireId: true },
         });
@@ -5340,6 +5362,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     // mesure : refusé ici comme en base.
     if (!imputationAmountIsCoherent(body.data)) {
       return reply.code(400).send({ error: "montant sans base HT/TTC" });
+    }
+    // `AUTO` = imputation posée sans validation humaine. Rien n'a le droit d'en
+    // écrire une : elle entrerait dans le calcul de marge, et un coût que
+    // personne n'a validé déciderait d'un chiffre montré au patron. La doc de
+    // F2 le PROMET — le refus le rend vrai.
+    if (body.data.source === "AUTO") {
+      return reply.code(400).send({ error: "imputation automatique interdite sans validation" });
     }
 
     const outcome = await withTenant(request.tenantId, async (tx) => {

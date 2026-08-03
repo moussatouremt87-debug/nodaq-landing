@@ -1749,7 +1749,19 @@ export const AffaireSuggestions = z.discriminatedUnion("kind", [
     ),
     version: z.string(),
   }),
-  z.object({ kind: z.literal("abstention"), why: z.string(), version: z.string() }),
+  z.object({
+    kind: z.literal("abstention"),
+    // Union fermée, pas `string` : un motif mal orthographié doit échouer à la
+    // frontière, pas s'afficher tel quel à l'utilisateur.
+    why: z.enum([
+      "aucune_affaire_ouverte",
+      "aucun_signal",
+      "signaux_partages",
+      "piece_illisible",
+      "deja_rattachee",
+    ]),
+    version: z.string(),
+  }),
 ]);
 export type AffaireSuggestions = z.infer<typeof AffaireSuggestions>;
 

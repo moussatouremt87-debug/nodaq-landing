@@ -40,6 +40,16 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   autre: "Autre",
 };
 
+/** Pourquoi aucune suggestion — en français, jamais un code brut. */
+const ABSTENTION_LABELS: Record<string, string> = {
+  aucune_affaire_ouverte: "Aucune affaire en cours : une pièce sans affaire est normale.",
+  piece_illisible: "Ni fournisseur ni date lisibles sur la photo — rien à proposer.",
+  signaux_partages:
+    "Plusieurs affaires en cours couvrent cette date : à vous de trancher, la date ne suffit pas.",
+  aucun_signal: "Rien ne relie cette pièce à une affaire en cours.",
+  deja_rattachee: "Pièce déjà rattachée.",
+};
+
 const STATUS_LABELS: Record<string, string> = {
   a_verifier: "À vérifier",
   verifie: "Vérifié",
@@ -99,12 +109,21 @@ export default function ClasseurPage() {
   const [affaires, setAffaires] = useState<Affaire[]>([]);
   // Suggestion F2 : proposée à la sélection, jamais appliquée d'office.
   const [suggestions, setSuggestions] = useState<AffaireSuggestions | null>(null);
+  const [suggestionError, setSuggestionError] = useState(false);
 
   const selected = documents.find((d) => d.id === selectedId) ?? null;
 
   const refresh = useCallback(() => {
-    listAffaires({ statut: "EN_COURS" })
-      .then((state) => setAffaires(state.affaires))
+    // Mêmes statuts que le moteur de suggestion : sinon il peut proposer une
+    // affaire que l'utilisateur ne peut pas choisir lui-même.
+    listAffaires()
+      .then((state) =>
+        setAffaires(
+          state.affaires.filter((affaire) =>
+            ["EN_COURS", "ACCEPTEE", "DEVIS_ENVOYE"].includes(affaire.status),
+          ),
+        ),
+      )
       .catch(() => setAffaires([]));
     getClasseurMemory()
       .then(setMemory)
@@ -125,6 +144,7 @@ export default function ClasseurPage() {
     setCandidates(null);
     setNotice(null);
     setSuggestions(null);
+    setSuggestionError(false);
     getAffaireSuggestions(document.id)
       .then((result) => {
         if (selectedRef.current !== document.id) return;
@@ -132,7 +152,9 @@ export default function ClasseurPage() {
       })
       .catch(() => {
         if (selectedRef.current !== document.id) return;
-        setSuggestions(null);
+        // Une panne n'est PAS une abstention : la confondre laisserait la
+        // feature morte en production sans que rien ne le dise.
+        setSuggestionError(true);
       });
     getClasseurCandidates(document.id)
       .then((result) => {
@@ -540,6 +562,37 @@ export default function ClasseurPage() {
                     ))}
                   </select>
                 </>
+              ) : suggestions?.kind === "abstention" ? (
+                <>
+                  {/* Un refus est une RÉPONSE motivée : sans le motif,
+                      l'utilisateur ne sait pas si le produit a réfléchi ou
+                      s'il est en panne. */}
+                  <p className="hint" style={{ margin: "4px 0 8px" }}>
+                    {ABSTENTION_LABELS[suggestions.why] ?? "aucune suggestion"}
+                  </p>
+                  {affaires.length > 0 && (
+                    <select
+                      disabled={busy}
+                      defaultValue=""
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        event.target.value = "";
+                        if (value) void imputer(value);
+                      }}
+                    >
+                      <option value="">Choisir une affaire…</option>
+                      {affaires.map((affaire) => (
+                        <option key={affaire.id} value={affaire.id}>
+                          {affaire.reference} · {affaire.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </>
+              ) : suggestionError ? (
+                <p className="hint">
+                  Suggestion indisponible — vous pouvez rattacher à la main.
+                </p>
               ) : affaires.length === 0 ? (
                 <p className="hint">
                   {/* Aucune affaire ouverte : le classeur ne change pas de

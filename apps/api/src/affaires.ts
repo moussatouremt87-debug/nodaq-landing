@@ -148,7 +148,12 @@ export async function loadAffaireMargin(
   const affaire = await tx.affaire.findUnique({ where: { id: affaireId } });
   if (!affaire) return null;
   const [imputations, invoices] = await Promise.all([
-    tx.affaireImputation.findMany({ where: { affaireId, revokedAt: null } }),
+    // `source: AUTO` exclu par ceinture ET bretelles : la route d'imputation le
+    // refuse déjà, mais si une ligne AUTO apparaissait un jour (import, futur
+    // outil d'agent), elle ne doit pas entrer dans une marge sans validation.
+    tx.affaireImputation.findMany({
+      where: { affaireId, revokedAt: null, source: { not: "AUTO" } },
+    }),
     tx.fecInvoice.findMany({ where: { affaireId } }),
   ]);
   const invoicedCents = invoices.reduce((total, invoice) => total + Number(invoice.amountCents), 0);
