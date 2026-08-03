@@ -364,3 +364,5 @@ export async function routeChat(
     throw error;
   }
 }
+export { transcribe, TranscribeTask, TRANSCRIPTION_MAX_BYTES } from "./transcribe.js";
+export type { TranscribeResult } from "./transcribe.js";
