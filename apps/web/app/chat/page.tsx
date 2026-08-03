@@ -5,6 +5,7 @@ import { useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { formatEuroCents, getPendingAction, listPendingActions } from "../../lib/api";
 import { toAgentEvent } from "../../lib/events";
+import { emitDomainEvent, eventForTool } from "../../lib/freshness";
 import { readSseEvents } from "../../lib/sse";
 
 /*
@@ -130,9 +131,16 @@ export default function ChatPage() {
           case "tool_call":
             push({ kind: "tool", text: `⚙ ${agentEvent.name}…` });
             break;
-          case "tool_result":
+          case "tool_result": {
             push({ kind: "tool", text: `${agentEvent.ok ? "✓" : "✗"} ${agentEvent.name}` });
+            // L'agent vient d'écrire pendant qu'on le regarde : les écrans
+            // concernés se périment MAINTENANT, sans attendre une navigation.
+            // Le flux ne transporte qu'un NOM d'outil (minimisation 2.17) —
+            // c'est assez pour savoir quoi rafraîchir.
+            const domainEvent = agentEvent.ok ? eventForTool(agentEvent.name) : null;
+            if (domainEvent) emitDomainEvent(domainEvent);
             break;
+          }
           case "assistant":
             push({ kind: "assistant", text: agentEvent.content });
             break;

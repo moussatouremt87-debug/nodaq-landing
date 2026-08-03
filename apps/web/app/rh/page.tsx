@@ -15,6 +15,8 @@ import {
   updateStaff,
 } from "../../lib/api";
 import type { HourlyPerformance, StaffAbsence, StaffMember, StaffingPlan } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
+import { emitDomainEvent } from "../../lib/freshness";
 
 /*
  * Équipe & plannings (3.5) — owner only (données RH = PII). Capacité vs
@@ -61,6 +63,7 @@ export default function RhPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  useViewRefresh(["rh"], () => void refresh());
 
   async function runSilaeSync(): Promise<void> {
     setSyncing(true);
@@ -84,6 +87,8 @@ export default function RhPage() {
           (result.truncated ? " · lecture partielle (bornes atteintes)" : ""),
       );
       await refresh();
+      // La paie importée entre dans le coût horaire, donc dans la marge.
+      emitDomainEvent("rh.modifie");
     } catch (err) {
       setSyncNotice(
         err instanceof ApiError && err.status === 409
@@ -109,6 +114,7 @@ export default function RhPage() {
       await createStaff({ name: staffForm.name, role: staffForm.role, weeklyHours });
       setStaffForm({ name: "", role: "", weeklyHours: "35" });
       await refresh();
+      emitDomainEvent("rh.modifie");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "ajout impossible");
     }
@@ -125,6 +131,7 @@ export default function RhPage() {
       await createAbsence(absenceForm);
       setAbsenceForm({ staffId: "", type: "conges", startDate: "", endDate: "" });
       await refresh();
+      emitDomainEvent("rh.modifie");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "ajout impossible");
     }
@@ -299,7 +306,12 @@ export default function RhPage() {
                 </span>
               </div>
               <button
-                onClick={() => void updateStaff(member.id, { active: !member.active }).then(() => refresh())}
+                onClick={() =>
+                  void updateStaff(member.id, { active: !member.active }).then(() => {
+                    refresh();
+                    emitDomainEvent("rh.modifie");
+                  })
+                }
               >
                 {member.active ? "Désactiver" : "Réactiver"}
               </button>
@@ -338,7 +350,14 @@ export default function RhPage() {
                   {absence.type} · du {absence.startDate.slice(0, 10)} au {absence.endDate.slice(0, 10)}
                 </span>
               </div>
-              <button onClick={() => void deleteAbsence(absence.id).then(() => refresh())}>
+              <button
+                onClick={() =>
+                  void deleteAbsence(absence.id).then(() => {
+                    refresh();
+                    emitDomainEvent("rh.modifie");
+                  })
+                }
+              >
                 Supprimer
               </button>
             </li>

@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
+import { emitDomainEvent } from "../../lib/freshness";
+import { useFreshness } from "../../lib/useFreshness";
 import {
   ApiError,
   decidePendingAction,
@@ -286,8 +288,9 @@ export default function ValidationPage() {
   const [savedDraft, setSavedDraft] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const refresh = useCallback(() => {
-    listPendingActions()
+  // Chargeur : rend une PROMESSE (l'horodatage n'avance qu'au succès).
+  const load = useCallback(async () => {
+    await listPendingActions()
       .then((list) => {
         setActions(list);
         void Promise.allSettled(
@@ -303,10 +306,14 @@ export default function ValidationPage() {
           setDetails(loaded);
         });
       })
-      .catch(() => setNotice("Impossible de charger la file."));
+      .catch((error: unknown) => {
+        setNotice("Impossible de charger la file.");
+        throw error;
+      });
   }, []);
 
-  useEffect(refresh, [refresh]);
+  const freshness = useFreshness(["validation"], load);
+  const refresh = freshness.refresh;
 
   const clearSelection = useCallback(() => {
     selectedRef.current = null;
@@ -355,6 +362,9 @@ export default function ValidationPage() {
       setSavedDraft(updated.draft);
       setDraft(updated.draft);
       setEditing(false);
+      // Le texte qui partira a changé : un autre écran ouvert sur la même
+      // action ne doit pas garder l'ancien sous les yeux.
+      emitDomainEvent("action.preparee");
       setDetailNotice("Brouillon enregistré — c'est ce texte qui partira à la validation.");
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
@@ -383,7 +393,9 @@ export default function ValidationPage() {
           : "Action rejetée, rien n'a été exécuté.",
       );
       clearSelection();
-      refresh();
+      // Le bus périme aussi le cockpit et les agrégats dérivés : la file n'est
+      // pas le seul écran que cette validation vient de rendre faux.
+      emitDomainEvent(decision === "approve" ? "action.validee" : "action.rejetee");
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         setNotice("Déjà traitée (aucune double exécution).");

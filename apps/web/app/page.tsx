@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { emitDomainEvent, eventForTool, type DomainEvent } from "../lib/freshness";
+import { useFreshness } from "../lib/useFreshness";
 import {
   askCockpit,
   formatEuroCents,
@@ -109,10 +111,36 @@ export default function CockpitPage() {
   const [answer, setAnswer] = useState<{ answer: string; tools: string[] } | null>(null);
   const [asking, setAsking] = useState(false);
 
-  const refresh = useCallback(() => {
-    getKpis().then(setKpis).catch(() => undefined);
-    listPendingActions()
-      .then((actions) => {
+  // Chargeur du cockpit : rend une PROMESSE — l'horodatage « à jour il y a X »
+  // ne doit avancer qu'en cas de succès, sinon l'écran se déclare frais après
+  // un refetch raté (le mensonge exact que ce ticket corrige).
+  //
+  // TOUT ce que le cockpit affiche passe par ici, échéancier et connecteurs
+  // compris : une carte chargée une seule fois au montage resterait figée
+  // pendant que l'écran s'annonce « à jour » — la même erreur, en plus discret.
+  // Aucun `.catch()` non plus : un bloc qui a échoué garde ses anciennes
+  // valeurs ET son ancien horodatage, ce qui est la vérité.
+  const load = useCallback(async () => {
+    const [kpisResult] = await Promise.all([
+      getKpis(),
+      // Échéancier owner-only côté API : on n'appelle QUE pour un owner, sinon
+      // chaque ouverture du cockpit par un membre produirait un 403 en logs.
+      getTaxScheduleIfOwner().then((schedule) => {
+        if (!schedule) return;
+        const upcoming = schedule.deadlines.filter((d) => d.status === "prevu");
+        setTaxSchedule({
+          next: upcoming[0] ? { label: upcoming[0].label, dueDate: upcoming[0].dueDate } : null,
+          count: upcoming.length,
+          plannedOutflowCents: schedule.plannedOutflowCents,
+        });
+      }),
+      listConnectors().then((connectors) => {
+        setConnectorCount(connectors.length);
+        // Tenant de démonstration (seed démo) : signalé discrètement, jamais
+        // présenté comme une vraie connexion.
+        setDemoMode(connectors.some((connector) => connector.status === "demo"));
+      }),
+      listPendingActions().then((actions) => {
         const waiting = actions.filter((a) => a.status === "pending");
         setPending(waiting);
         // Owner-gated payloads (titles, amounts). A 403 (member/accountant)
@@ -126,47 +154,39 @@ export default function CockpitPage() {
           }
           setDetails(loaded);
         });
-      })
-      .catch(() => undefined);
+      }),
+    ]);
+    setKpis(kpisResult);
   }, []);
 
+  // Le cockpit AFFICHE la trésorerie et les impayés : s'abonner au seul
+  // « cockpit » laissait un rapprochement bancaire fait ailleurs sans effet
+  // sur les chiffres qu'il montre.
+  const freshness = useFreshness(["cockpit", "tresorerie", "impayes"], load);
+  const refresh = freshness.refresh;
+
+  // L'identité n'est pas une donnée fraîche : elle ne change pas sous nos pieds
+  // et n'a donc rien à faire dans le chargeur.
   useEffect(() => {
-    refresh();
     getMe()
       .then((session) => setFirstName(session.name?.split(" ")[0] ?? null))
       .catch(() => undefined);
-    // Échéancier owner-only côté API : on n'appelle QUE pour un owner, sinon
-    // chaque ouverture du cockpit par un membre produirait un 403 en logs.
-    getTaxScheduleIfOwner()
-      .then((schedule) => {
-        if (!schedule) return;
-        const upcoming = schedule.deadlines.filter((d) => d.status === "prevu");
-        setTaxSchedule({
-          next: upcoming[0] ? { label: upcoming[0].label, dueDate: upcoming[0].dueDate } : null,
-          count: upcoming.length,
-          plannedOutflowCents: schedule.plannedOutflowCents,
-        });
-      })
-      .catch(() => undefined);
-    listConnectors()
-      .then((connectors) => {
-        setConnectorCount(connectors.length);
-        // Tenant de démonstration (seed démo) : signalé discrètement, jamais
-        // présenté comme une vraie connexion.
-        setDemoMode(connectors.some((connector) => connector.status === "demo"));
-      })
-      .catch(() => undefined);
-  }, [refresh]);
+  }, []);
 
   async function decide(id: string, decision: "approve" | "reject"): Promise<void> {
     setBusyId(id);
     try {
       await decidePendingAction(id, decision);
+      // Le bus périme TOUTES les vues concernées (file, trésorerie, impayés,
+      // marge…), pas seulement l'écran d'où part le clic. Émis APRÈS le succès
+      // seulement : sur un 403 ou un 409 rien n'a été écrit, et annoncer une
+      // validation ferait recharger tout le produit pour rien.
+      emitDomainEvent(decision === "approve" ? "action.validee" : "action.rejetee");
     } catch {
       /* conflits (déjà traitée) et 403 : la liste rafraîchie fait foi */
+      refresh();
     } finally {
       setBusyId(null);
-      refresh();
     }
   }
 
@@ -221,6 +241,19 @@ export default function CockpitPage() {
             })}
             {demoMode && " · mode démo, données fictives"}
           </p>
+          {/* S'il ne peut pas rafraîchir, l'écran doit au moins DIRE qu'il est
+              périmé : un cockpit qui ment est pire qu'un cockpit vide. */}
+          <p className="hint" style={{ margin: "4px 0 0" }}>
+            {freshness.label}
+            {freshness.stale && " — données peut-être dépassées"}{" "}
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => freshness.refresh()}
+            >
+              rafraîchir
+            </button>
+          </p>
         </div>
         <span className="tag-souverain">Projection · 90 jours</span>
       </div>
@@ -248,7 +281,24 @@ export default function CockpitPage() {
             setAsking(true);
             setAnswer(null);
             askCockpit(question.trim())
-              .then(setAnswer)
+              .then((result) => {
+                setAnswer(result);
+                // Le cockpit conversationnel passe par la MÊME boucle que le
+                // chat : une question peut avoir PRÉPARÉ une action. Sans ça,
+                // la file se remplit sous les yeux de l'utilisateur pendant
+                // que son compteur reste à l'ancien chiffre.
+                //
+                // NUANCE : `/cockpit/ask` ne rend que les outils APPELÉS, pas
+                // leur issue (le chat, lui, filtre sur `ok`). Un outil qui
+                // échoue provoquera donc un rafraîchissement inutile. Écart
+                // assumé dans ce sens-là seulement : sur-invalider coûte une
+                // requête, sous-invalider laisse un écran faux.
+                for (const event of new Set(
+                  result.tools.map(eventForTool).filter((e): e is DomainEvent => e !== null),
+                )) {
+                  emitDomainEvent(event);
+                }
+              })
               .catch(() => setAnswer({ answer: "Réponse indisponible pour l'instant.", tools: [] }))
               .finally(() => setAsking(false));
           }}

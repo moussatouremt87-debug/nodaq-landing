@@ -16,6 +16,7 @@ import {
   listWebhookEndpoints,
   listWebhookEvents,
 } from "../../lib/api";
+import { emitDomainEvent } from "../../lib/freshness";
 import type {
   ConnectorSummary,
   FecImportReport,
@@ -23,6 +24,7 @@ import type {
   WebhookEndpoint,
   WebhookEvent,
 } from "../../lib/api";
+import { useViewRefresh } from "../../lib/useFreshness";
 
 /*
  * Connector onboarding (ticket 1.8). The credentials travel ONE way: entered
@@ -106,6 +108,7 @@ function ConnectorCard({
     try {
       await connectConnector(spec.type, values);
       setNotice("Connecté — identifiants vérifiés et stockés dans le coffre.");
+      emitDomainEvent("connecteur.modifie");
       onChanged();
     } catch (error) {
       if (error instanceof ApiError && error.status === 422) {
@@ -128,6 +131,7 @@ function ConnectorCard({
     try {
       await disconnectConnector(spec.type);
       setNotice("Déconnecté — identifiants supprimés du coffre.");
+      emitDomainEvent("connecteur.modifie");
       onChanged();
     } catch {
       setNotice("Échec de la déconnexion.");
@@ -202,6 +206,7 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
   }, []);
 
   useEffect(refresh, [refresh]);
+  useViewRefresh(["connecteurs"], refresh);
 
   async function purge(): Promise<void> {
     if (!window.confirm("Supprimer toutes les données dérivées du FEC importé ?")) return;
@@ -219,6 +224,9 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
         retention: { totalCents: 0, releaseDateKnown: false, inProgress: false },
       });
       setNotice("Données importées supprimées.");
+      // Purge, pas import : même portée de vues, autre intention. Un nom
+      // d'événement qui ment finit par tromper celui qui lit la config.
+      emitDomainEvent("fec.purge");
       onChanged();
     } catch (error) {
       setNotice(
@@ -245,6 +253,7 @@ function FecCard({ onChanged }: { onChanged: () => void }) {
           : null,
       );
       refresh();
+      emitDomainEvent("fec.importe");
       onChanged();
     } catch (error) {
       if (error instanceof FecInvalidError) {
@@ -378,6 +387,7 @@ export default function ConnecteursPage() {
   }, []);
 
   useEffect(refresh, [refresh]);
+  useViewRefresh(["connecteurs"], refresh);
 
   return (
     <>
@@ -436,6 +446,7 @@ function WebhooksCard() {
       const endpoint = await createWebhookEndpoint(provider);
       setCreated({ url: endpoint.url, secret: endpoint.secret });
       refresh();
+      emitDomainEvent("connecteur.modifie");
     } catch {
       setNotice("Création impossible.");
     }
@@ -448,6 +459,7 @@ function WebhooksCard() {
       await deleteWebhookEndpoint(target);
       setCreated(null);
       refresh();
+      emitDomainEvent("connecteur.modifie");
     } catch {
       setNotice("Révocation impossible.");
     }
