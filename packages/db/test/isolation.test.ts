@@ -1911,20 +1911,66 @@ describe("isolation tenant (RLS) — affaires et imputations (4.1)", () => {
     expect(imputations.some((i) => i.targetId === "qonto-tx-b-001")).toBe(false);
   });
 
-  it("test 7 (imputations) — rattacher une pièce à l'affaire d'un AUTRE tenant est refusé", async () => {
+  it("test 7 (imputations) — rattacher une pièce à l'affaire d'un AUTRE tenant est refusé EN BASE", async () => {
+    // Version précédente de ce test : elle réutilisait une cible DÉJÀ imputée,
+    // donc elle échouait sur l'index unique et passait policy désactivée — elle
+    // ne prouvait rien. Avec une cible NEUVE, seul le croisement de tenants
+    // peut faire échouer l'insertion.
+    //
+    // Et la RLS seule ne suffit pas ici : elle ne contraint que `tenant_id`,
+    // tandis que l'intégrité référentielle contourne la RLS par conception
+    // Postgres. C'est la clé étrangère COMPOSITE (tenant_id, affaire_id) qui
+    // rend le croisement impossible — la deuxième couche exigée par le CLAUDE.md.
     await expect(
       withTenant(tenantA, (tx) =>
         tx.affaireImputation.create({
           data: {
             tenantId: tenantA,
             affaireId: affaireBId,
-            targetType: "classeur_document",
-            targetId: classeurDocumentAId,
+            targetType: "charge",
+            targetId: "cible-neuve-jamais-imputee",
           },
         }),
       ),
     ).rejects.toThrow();
     expect(imputationBId).toBeDefined();
+  });
+
+  it("test 7 bis — une affaire ne peut pas pointer le prospect d'un AUTRE tenant", async () => {
+    // Même mécanisme : sans clé composite, la FK acceptait le croisement, ce qui
+    // donnait un oracle d'existence et faisait qu'une suppression chez B
+    // modifiait une ligne de A.
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.affaire.create({
+          data: {
+            tenantId: tenantA,
+            reference: "2026-555",
+            label: "Prospect volé",
+            prospectId: prospectBId,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 7 ter — un montant d'imputation NÉGATIF est refusé", async () => {
+    // Un coût négatif fait une marge SUPÉRIEURE au devis, présentée comme
+    // exacte : le chiffre flatteur et faux que ce ticket existe pour empêcher.
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.affaireImputation.create({
+          data: {
+            tenantId: tenantA,
+            affaireId: affaireAId,
+            targetType: "charge",
+            targetId: "avoir-deguise",
+            amountCents: -500_000n,
+            amountBasis: "ht",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
   });
 
   it("test 8 (imputations) — une pièce ne peut pas être imputée DEUX fois en même temps", async () => {

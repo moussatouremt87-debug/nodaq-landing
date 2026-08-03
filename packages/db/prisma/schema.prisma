@@ -976,6 +976,7 @@ model Prospect {
   interactions ProspectInteraction[]
   affaires     Affaire[]
 
+  @@unique([tenantId, id])
   @@index([tenantId, stage])
   @@index([tenantId, optedOut])
   @@map("prospects")
@@ -1183,12 +1184,16 @@ model Affaire {
   createdAt              DateTime            @default(now()) @map("created_at")
   updatedAt              DateTime            @default(now()) @updatedAt @map("updated_at")
   tenant                 Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  prospect               Prospect?           @relation(fields: [prospectId], references: [id], onDelete: SetNull)
+  prospect               Prospect?           @relation(fields: [tenantId, prospectId], references: [tenantId, id], onDelete: SetNull)
   imputations            AffaireImputation[]
   classeurDocuments      ClasseurDocument[]
   fecInvoices            FecInvoice[]
 
   @@unique([tenantId, reference])
+  /// Cible de la clé étrangère COMPOSITE des imputations : l'intégrité
+  /// référentielle contourne la RLS, donc sans elle une imputation d'un tenant
+  /// pouvait pointer l'affaire d'un AUTRE tenant.
+  @@unique([tenantId, id])
   @@index([tenantId, status])
   @@index([tenantId, prospectId])
   @@map("affaires")
@@ -1252,7 +1257,7 @@ model AffaireImputation {
   revokedAt   DateTime? @map("revoked_at")
   revokedBy   String?   @map("revoked_by")
   tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  affaire     Affaire   @relation(fields: [affaireId], references: [id], onDelete: Cascade)
+  affaire     Affaire   @relation(fields: [tenantId, affaireId], references: [tenantId, id], onDelete: Cascade)
 
   @@index([tenantId, affaireId, revokedAt])
   @@index([tenantId, targetType, targetId])

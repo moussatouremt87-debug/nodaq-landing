@@ -154,9 +154,7 @@ export default function AffairesPage() {
       {state === null ? (
         <p className="hint">Chargement…</p>
       ) : state.affaires.length === 0 ? (
-        <p className="hint">
-          Aucun{words.singular === "affaire" ? "e" : ""} {words.singular} pour ce filtre.
-        </p>
+        <p className="hint">{words.noneLabel} pour ce filtre.</p>
       ) : (
         <table className="ledger">
           <thead>

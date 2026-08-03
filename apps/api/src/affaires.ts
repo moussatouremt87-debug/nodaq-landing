@@ -63,7 +63,12 @@ export const AffaireImputeInput = z.object({
   targetType: z.enum(AFFAIRE_TARGET_TYPES),
   targetId: z.string().min(1).max(200),
   source: z.enum(["AUTO", "CONFIRMEE", "MANUELLE"]).optional(),
-  amountCents: z.number().int().nullable().optional(),
+  // `.min(0)` N'EST PAS DÉCORATIF : sans lui, une imputation à −5 000 € donnait
+  // un coût matière négatif, donc une marge SUPÉRIEURE au devis, présentée comme
+  // exacte — et c'était ouvert au rôle le moins privilégié. Un avoir se
+  // modélise en révoquant une imputation, jamais par un coût négatif.
+  // `.max()` borne la conversion BigInt -> Number côté lecture.
+  amountCents: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable().optional(),
   amountBasis: z.enum(["ht", "ttc"]).nullable().optional(),
   subcontract: z.boolean().optional(),
 });
@@ -121,6 +126,11 @@ export function buildCostInput(
     hoursWorked: affaire.hoursWorked,
     hourlyCostCents,
     invoicedCents,
+    // Les factures dérivées du FEC somment les DÉBITS du compte 411 : c'est du
+    // TTC. Le devis, lui, est du HT. Le moteur refusera donc de soustraire l'un
+    // de l'autre et le dira, au lieu de sous-estimer le reste à facturer
+    // d'environ la TVA — ce qui ferait arrêter de facturer trop tôt.
+    invoicedBasis: "ttc",
     // « Non renseigné » vaut zéro DANS LE CALCUL (on n'invente pas d'acompte),
     // mais l'écran, lui, doit distinguer les deux : il lit le champ, pas ceci.
     depositsCents: toNumber(affaire.depositsCents) ?? 0,

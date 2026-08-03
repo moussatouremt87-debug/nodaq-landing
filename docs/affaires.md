@@ -58,7 +58,11 @@ ne se fait remarquer qu'au bilan. D'où une **union discriminée** :
 | `donnees_insuffisantes` | aucun coût rattaché | ni marge, ni pourcentage |
 | `couts_seuls` | pas de montant devisé | les coûts seulement |
 | `marge_borne_superieure` | un coût est **inconnu** | un plafond, dit comme tel |
-| `marge` | tout est connu | la marge |
+| `marge` | tout est connu | la marge, **avec ses réserves** |
+
+Même une marge exacte porte un `missing` : elle peut reposer sur une base vide
+(`aucune_piece_rattachee`). Un chantier de bâtiment sans la moindre facture a un
+chiffre juste et une conclusion fausse — l'écran l'écrit sous le chiffre.
 
 Le champ `marginCents` **n'existe pas** dans les trois premiers cas : un écran
 ne peut pas afficher par distraction une marge qui n'a pas été calculée.
@@ -70,6 +74,19 @@ ne peut pas afficher par distraction une marge qui n'a pas été calculée.
   10 % ou 5,5 % — et le bâtiment en est plein. Les montants TTC sont comptés et
   affichés à part. Le classeur ne connaît que le TTC : une pièce rattachée
   depuis le classeur tombe donc dans ce cas, et l'écran l'explique.
+
+  Mais **elles ne sont pas ignorées pour autant** : la borne supérieure retranche
+  leur coût HT *minimal* (TTC ÷ 1,20, le taux le plus élevé donnant le HT le plus
+  petit). C'est une déduction, pas une supposition, et l'erreur ne peut aller que
+  dans le sens prudent. Les ignorer donnait « marge au mieux = le devis entier »
+  dans le flux le plus courant du produit — le « 100 % de marge » interdit deux
+  paragraphes plus haut, réétiqueté.
+
+- **Reste à facturer : deux bases ne se soustraient pas.** Le facturé vient des
+  débits du compte 411, donc du **TTC** ; le devis est du **HT**. Les soustraire
+  sous-estimerait le reste d'environ la TVA, et le patron arrêterait de facturer
+  trop tôt en croyant avoir tout facturé. Tant qu'on n'a pas de facturé HT,
+  `remainingToInvoiceCents` vaut `null` et l'écran dit pourquoi.
 - **Zéro heure DÉCLARÉE ≠ heures inconnues.** La première donne une marge
   exacte, la seconde une borne supérieure.
 - **Acomptes** : de la trésorerie encaissée, jamais de la marge acquise.
@@ -104,7 +121,9 @@ l'employé de terrain qui photographie une facture et la rattache au chantier ;
 le lui interdire viderait la promesse du produit.
 
 Les **montants** et la marge : owner uniquement, comme le cockpit et la page
-marge. Un membre reçoit un refus motivé (`margeRefus`), jamais un zéro muet, et
+marge. **Asymétrie assumée** : un membre peut *écrire* le montant d'une
+imputation (il tient la facture en main) sans pouvoir le *relire* — la réponse
+lui renvoie `amountCents: null`. Un membre reçoit un refus motivé (`margeRefus`), jamais un zéro muet, et
 la liste affiche « réservé au dirigeant » plutôt qu'un tiret qui se lirait
 « zéro euro ».
 
@@ -118,6 +137,30 @@ appelle `affaireWords(vertical)`.
 Provisoire et dit : les cinq verticaux actuels héritent de l'ancienne
 segmentation (3.7) et ne recouvrent pas la cible du pivot. Le ticket 4.2 apporte
 les vrais packs, et ce fichier est son point d'absorption.
+
+## Données personnelles
+
+Le lien `prospectId` est une **clé étrangère composite** `(tenant_id, prospect_id)` :
+l'intégrité référentielle contourne la RLS, donc sans elle une affaire pouvait
+pointer la fiche d'un autre tenant. Idem pour `(tenant_id, affaire_id)` sur les
+imputations — c'est la **deuxième couche** exigée par le CLAUDE.md, la RLS ne
+contraignant que `tenant_id`.
+
+`DELETE /prospects/:id` (droit à l'effacement) efface la fiche ; l'affaire
+survit, `prospect_id` à `NULL`. L'**opposition**, elle, ne supprime pas : elle
+minimise. Ce sont deux régimes distincts.
+
+> **Limite connue, à traiter dans son propre ticket.** `affaires.client_name`,
+> `address` et les coordonnées GPS sont une **copie indépendante** de l'identité
+> et de l'adresse — potentiellement le domicile — de la personne. Elles
+> survivent à l'effacement du prospect. Pour une affaire `EN_COURS` ou
+> `TERMINEE`, l'exécution du contrat les fonde ; pour une affaire restée
+> `PROSPECT`, `DEVIS_ENVOYE` ou `PERDUE`, **aucun contrat ne les fonde**, et
+> rien ne les anonymise aujourd'hui.
+
+Effacer une pièce du classeur **révoque** son imputation : sans cela, la fiche
+continuerait d'afficher un coût pour une pièce disparue, que plus personne ne
+peut vérifier.
 
 ## Ce que 4.1 ne livre pas
 

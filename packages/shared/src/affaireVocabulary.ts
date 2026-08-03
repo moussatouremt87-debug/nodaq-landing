@@ -30,6 +30,10 @@ export interface AffaireWords {
   readonly definite: string;
   /** Libellé d'action, déjà accordé — « Nouveau chantier », « Nouvelle mission ». */
   readonly newLabel: string;
+  /** Vide accordé — « Aucun chantier », « Aucune mission ». Le genre appartient
+   *  au vocabulaire : un écran qui teste `singular === "affaire"` pour choisir
+   *  un « e » réintroduit une règle de langue dans une feature. */
+  readonly noneLabel: string;
 }
 
 const AFFAIRE: AffaireWords = {
@@ -38,6 +42,7 @@ const AFFAIRE: AffaireWords = {
   indefinite: "une affaire",
   definite: "l'affaire",
   newLabel: "Nouvelle affaire",
+  noneLabel: "Aucune affaire",
 };
 
 const CHANTIER: AffaireWords = {
@@ -46,6 +51,7 @@ const CHANTIER: AffaireWords = {
   indefinite: "un chantier",
   definite: "le chantier",
   newLabel: "Nouveau chantier",
+  noneLabel: "Aucun chantier",
 };
 
 const MISSION: AffaireWords = {
@@ -54,6 +60,7 @@ const MISSION: AffaireWords = {
   indefinite: "une mission",
   definite: "la mission",
   newLabel: "Nouvelle mission",
+  noneLabel: "Aucune mission",
 };
 
 /**

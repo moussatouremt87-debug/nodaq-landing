@@ -45,6 +45,8 @@ const TARGET_LABELS: Record<string, string> = {
 /** Ce qui manque, en français — jamais un code brut à l'écran. */
 const MISSING_LABELS: Record<string, string> = {
   couts: "aucune dépense rattachée",
+  aucune_piece_rattachee: "aucune pièce rattachée — le chiffre est exact, la base ne l'est pas",
+  facture_base_ttc: "le facturé est en TTC et le devis en HT : reste à facturer non calculable",
   heures: "heures passées non renseignées",
   cout_horaire: "coût horaire chargé non renseigné",
   pieces_ttc: "des pièces sont en TTC (non converties)",
@@ -141,7 +143,10 @@ function MargeBlock({ detail }: { detail: AffaireDetail }) {
             </p>
           )}
           <p className="hint">
-            Reste à facturer : {formatEuroCents(marge.remainingToInvoiceCents)}
+            Reste à facturer :{" "}
+            {marge.remainingToInvoiceCents === null
+              ? "non calculable (bases HT/TTC différentes)"
+              : formatEuroCents(marge.remainingToInvoiceCents)}
             {marge.retentionCents > 0 &&
               ` · retenue de garantie ${formatEuroCents(marge.retentionCents)} (exclue)`}
           </p>
@@ -157,7 +162,9 @@ function MargeBlock({ detail }: { detail: AffaireDetail }) {
           <CostLines marge={marge} />
           <p className="hint">
             Coût total : {formatEuroCents(marge.totalCostCents)} · Reste à facturer :{" "}
-            {formatEuroCents(marge.remainingToInvoiceCents)}
+            {marge.remainingToInvoiceCents === null
+              ? "non calculable (le facturé est en TTC, le devis en HT)"
+              : formatEuroCents(marge.remainingToInvoiceCents)}
             {marge.retentionCents > 0 && (
               <>
                 {" "}
@@ -172,6 +179,10 @@ function MargeBlock({ detail }: { detail: AffaireDetail }) {
               {(marge.budgetGap.deltaBps / 100).toFixed(1)} %)
             </p>
           )}
+          {/* Une marge peut être EXACTE et reposer sur une base incomplète :
+              le chiffre est juste, la conclusion qu'on en tirerait ne l'est
+              pas. On l'écrit sous le chiffre, pas ailleurs. */}
+          <MissingList missing={marge.missing} />
         </>
       )}
     </div>

@@ -48,6 +48,14 @@ export interface AffaireCostInput {
   /** Coût horaire chargé du tenant. `null` = non renseigné, jamais deviné. */
   readonly hourlyCostCents: number | null;
   readonly invoicedCents: number;
+  /**
+   * Base du montant facturé. Les factures dérivées du FEC sont la somme des
+   * débits du compte 411 : c'est du TTC. Le devis, lui, est du HT. Soustraire
+   * l'un de l'autre sous-estime le reste à facturer d'environ la TVA — le
+   * patron arrêterait de facturer trop tôt. On ne soustrait donc QUE des bases
+   * comparables, et on dit pourquoi quand on ne peut pas.
+   */
+  readonly invoicedBasis: "ht" | "ttc";
   /** Acomptes encaissés — exposés, jamais comptés en marge. */
   readonly depositsCents: number;
   /** Taux de retenue en points de base (500 = 5 %). */
@@ -62,7 +70,9 @@ export type AffaireMissing =
   | "heures"
   | "cout_horaire"
   | "pieces_ttc"
-  | "montants_inconnus";
+  | "montants_inconnus"
+  | "aucune_piece_rattachee"
+  | "facture_base_ttc";
 
 export interface AffaireBudgetGap {
   readonly deltaCents: number;
@@ -103,14 +113,22 @@ export type AffaireMargin =
       readonly totalCostCents: number;
       readonly marginCents: number;
       readonly marginBps: number | null;
-      readonly remainingToInvoiceCents: number;
+      /** `null` quand les bases ne sont pas comparables — jamais un chiffre faux. */
+      readonly remainingToInvoiceCents: number | null;
       readonly budgetGap: AffaireBudgetGap | null;
+      /**
+       * Une marge EXACTE peut quand même reposer sur une base incomplète (aucune
+       * pièce rattachée). Sans ce champ, la variante « exacte » n'avait aucun
+       * moyen de le nuancer, et un chantier sans la moindre facture affichait
+       * une marge présentée comme certaine.
+       */
+      readonly missing: readonly AffaireMissing[];
     })
   | (AffaireCostsBase & {
       readonly kind: "marge_borne_superieure";
       /** Marge AU MIEUX : les coûts inconnus ne peuvent que la diminuer. */
       readonly upperBoundCents: number;
-      readonly remainingToInvoiceCents: number;
+      readonly remainingToInvoiceCents: number | null;
       readonly budgetGap: AffaireBudgetGap | null;
       readonly missing: readonly AffaireMissing[];
     });
@@ -150,6 +168,23 @@ function sumImputations(imputations: readonly AffaireImputationInput[]): Affaire
   };
 }
 
+/**
+ * Taux de TVA le PLUS ÉLEVÉ de France métropolitaine (20 %).
+ *
+ * Sert à borner, jamais à convertir. Diviser un TTC par le taux le plus haut
+ * donne le HT le plus PETIT possible : un plancher de coût, donc un plafond de
+ * marge — c'est une déduction, pas une supposition. Si la pièce était en
+ * réalité à 5,5 %, son HT est plus grand, donc le coût réel est plus grand, et
+ * la marge réelle plus basse que le plafond annoncé. L'erreur ne peut aller que
+ * dans le sens prudent.
+ */
+const HIGHEST_VAT_RATE = 1.2;
+
+/** Plancher de coût HT déductible d'un total TTC. */
+function minimumHtOf(ttcCents: number): number {
+  return Math.round(ttcCents / HIGHEST_VAT_RATE);
+}
+
 function budgetGapOf(materialCents: number, estimated: number | null): AffaireBudgetGap | null {
   // Sans budget prévu, il n'y a pas d'écart — il y a une absence de référence.
   if (estimated === null || estimated <= 0) return null;
@@ -172,6 +207,10 @@ export function computeAffaireMargin(input: AffaireCostInput): AffaireMargin {
   const missing: AffaireMissing[] = [];
   if (sums.ttcOnlyCount > 0) missing.push("pieces_ttc");
   if (sums.unknownAmountCount > 0) missing.push("montants_inconnus");
+  // Une marge calculée sans AUCUNE pièce rattachée est arithmétiquement exacte
+  // et pratiquement fausse : un chantier de bâtiment sans la moindre facture
+  // n'existe pas. On le dit même quand tout le reste est connu.
+  if (input.imputations.length === 0) missing.push("aucune_piece_rattachee");
 
   const hasAnyCost =
     sums.materialCents > 0 ||
@@ -202,19 +241,37 @@ export function computeAffaireMargin(input: AffaireCostInput): AffaireMargin {
   const knownCostCents = sums.materialCents + sums.subcontractCents + labourCents;
   // Le reste à facturer EXCLUT la retenue de garantie : elle est due, pas
   // exigible. La compter ici déclencherait des relances injustifiées.
-  const remainingToInvoiceCents = Math.max(
-    0,
-    input.quotedAmountCents - input.invoicedCents - retentionCents,
-  );
+  //
+  // Et il n'existe QUE si le facturé est dans la même base que le devis. Le
+  // facturé vient des débits du compte 411 : c'est du TTC, le devis est du HT.
+  // Soustraire les deux sous-estimerait le reste d'environ la TVA — le patron
+  // arrêterait de facturer trop tôt, en croyant avoir tout facturé. Tant qu'on
+  // n'a pas de facturé HT, on rend `null` et on DIT pourquoi.
+  const basesComparable = input.invoicedCents === 0 || input.invoicedBasis === "ht";
+  if (!basesComparable) missing.push("facture_base_ttc");
+  const remainingToInvoiceCents = basesComparable
+    ? Math.max(0, input.quotedAmountCents - input.invoicedCents - retentionCents)
+    : null;
   const budgetGap = budgetGapOf(sums.materialCents, input.estimatedMaterialCents);
 
   // Un coût manquant ne peut que RÉDUIRE la marge : ce qu'on sait calculer est
   // donc un plafond, et il porte un type qui interdit de l'afficher autrement.
-  if (missing.length > 0) {
+  // « aucune_piece_rattachee » nuance une marge, elle ne l'empêche pas : les
+  // coûts sont connus (il n'y en a pas), la marge reste exacte. Idem pour une
+  // base de facturation TTC, qui ne touche que le reste à facturer.
+  const blocking = missing.filter(
+    (item) => item !== "aucune_piece_rattachee" && item !== "facture_base_ttc",
+  );
+  if (blocking.length > 0) {
     return {
       ...base,
       kind: "marge_borne_superieure",
-      upperBoundCents: input.quotedAmountCents - knownCostCents,
+      // Les pièces en TTC ne sont pas ignorées : on en déduit le coût MINIMAL
+      // possible. Les ignorer donnait « marge au mieux = le devis entier » dans
+      // le flux le plus courant du produit (tout vient du classeur, donc tout
+      // est en TTC) — le « 100 % de marge » que ce module refuse d'afficher,
+      // sous une autre étiquette.
+      upperBoundCents: input.quotedAmountCents - knownCostCents - minimumHtOf(sums.ttcOnlyCents),
       remainingToInvoiceCents,
       budgetGap,
       missing,
@@ -225,6 +282,7 @@ export function computeAffaireMargin(input: AffaireCostInput): AffaireMargin {
   return {
     ...base,
     kind: "marge",
+    missing,
     labourCents,
     totalCostCents: knownCostCents,
     marginCents,

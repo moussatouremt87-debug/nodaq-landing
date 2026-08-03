@@ -402,3 +402,166 @@ describe("retenue de garantie", () => {
     expect(marge.remainingToInvoiceCents).toBe(950_000);
   });
 });
+
+describe("gardes de la revue — un coût ne s'invente pas", () => {
+  it("un montant NÉGATIF est refusé (400) : pas de marge supérieure au devis", async () => {
+    // Le trou trouvé en revue : sans borne, un membre pouvait poster
+    // −5 000 € et faire afficher au dirigeant une marge plus grande que son
+    // devis, présentée comme EXACTE.
+    const id = await createAffaire({ label: "Anti-avoir", quotedAmountCents: 1_000_000 });
+    const res = await app.inject({
+      method: "POST",
+      url: `/affaires/${id}/imputations`,
+      headers: { cookie: memberCookie },
+      payload: {
+        targetType: "charge",
+        targetId: `negatif-${RUN}`,
+        amountCents: -500_000,
+        amountBasis: "ht",
+      },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("une pièce INEXISTANTE est refusée (404), pas acceptée avec un montant fourni", async () => {
+    // Avant : 201, et un coût fabriqué entrait dans la marge du dirigeant sur
+    // une pièce qui n'a jamais existé.
+    const id = await createAffaire({ label: "Cible fantôme" });
+    const res = await app.inject({
+      method: "POST",
+      url: `/affaires/${id}/imputations`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        targetType: "classeur_document",
+        targetId: "00000000-0000-4000-8000-000000000000",
+        amountCents: 999_000,
+        amountBasis: "ht",
+      },
+    });
+    expect(res.statusCode).toBe(404);
+
+    const fiche = await app.inject({
+      method: "GET",
+      url: `/affaires/${id}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(fiche.json().imputations).toHaveLength(0);
+    expect(fiche.json().marge.kind).toBe("donnees_insuffisantes");
+  });
+
+  it("un prospect d'un autre tenant est refusé (404)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/affaires",
+      headers: { cookie: ownerCookie },
+      payload: { label: "Prospect étranger", prospectId: "00000000-0000-4000-8000-000000000001" },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("effacer une pièce du classeur RÉVOQUE son imputation", async () => {
+    // Sinon la fiche continue d'afficher un coût pour une pièce disparue, que
+    // plus personne ne peut vérifier (art. 17 + « ce qui n'est pas calculé est dit »).
+    const document = await withTenant(orgA, (tx) =>
+      tx.classeurDocument.create({
+        data: {
+          tenantId: orgA,
+          fileName: "a-effacer.jpg",
+          mimeType: "image/jpeg",
+          byteSize: 12,
+          sha256: `sha-efface-${RUN}`,
+          photo: Buffer.from("photo"),
+          docType: "facture_fournisseur",
+        },
+      }),
+    );
+    const id = await createAffaire({ label: "Effacement", quotedAmountCents: 500_000 });
+    await app.inject({
+      method: "POST",
+      url: `/affaires/${id}/imputations`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        targetType: "classeur_document",
+        targetId: document.id,
+        amountCents: 45_000,
+        amountBasis: "ht",
+      },
+    });
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/classeur/documents/${document.id}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(deleted.statusCode).toBe(204);
+
+    const fiche = await app.inject({
+      method: "GET",
+      url: `/affaires/${id}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(fiche.json().imputations).toHaveLength(0);
+  });
+
+  it("le reste à facturer n'est PAS calculé quand le facturé est en TTC", async () => {
+    // Le facturé vient des débits du compte 411 (TTC), le devis est en HT :
+    // les soustraire ferait arrêter de facturer trop tôt.
+    const id = await createAffaire({
+      label: "Bases différentes",
+      quotedAmountCents: 1_000_000,
+      hoursWorked: 0,
+    });
+    // Une dépense, sinon le calcul s'arrête à « données insuffisantes » avant
+    // même d'arriver au reste à facturer.
+    await app.inject({
+      method: "POST",
+      url: `/affaires/${id}/imputations`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        targetType: "transaction_bancaire",
+        targetId: `tx-bases-${RUN}`,
+        amountCents: 100_000,
+        amountBasis: "ht",
+      },
+    });
+    const fecImport = await withTenant(orgA, (tx) =>
+      tx.fecImport.create({
+        data: {
+          tenantId: orgA,
+          fileHash: `hash-bases-${RUN}`,
+          entryCount: 1,
+          customerCount: 1,
+          invoiceCount: 1,
+          overdueCount: 0,
+          overdueCents: 0,
+          warnings: [],
+        },
+      }),
+    );
+    await withTenant(orgA, (tx) =>
+      tx.fecInvoice.create({
+        data: {
+          tenantId: orgA,
+          importId: fecImport.id,
+          customerRef: "411X",
+          number: `F-${RUN}`,
+          issuedDate: new Date("2026-06-01"),
+          dueDate: new Date("2026-07-01"),
+          amountCents: 600_000n,
+          residualCents: 0n,
+          settled: true,
+          affaireId: id,
+        },
+      }),
+    );
+
+    const fiche = await app.inject({
+      method: "GET",
+      url: `/affaires/${id}`,
+      headers: { cookie: ownerCookie },
+    });
+    const marge = fiche.json().marge;
+    expect(marge.remainingToInvoiceCents).toBeNull();
+    expect(marge.missing).toContain("facture_base_ttc");
+  });
+});

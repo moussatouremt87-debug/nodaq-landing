@@ -1185,6 +1185,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     learned: true,
     matchedTransactionId: true,
     matchedAt: true,
+    // Sans lui, l'écran classeur ne savait jamais qu'une pièce était déjà
+    // rattachée : il reproposait de la rattacher, et l'utilisateur récupérait
+    // un 409 qui parlait d'une « autre » affaire — souvent la même.
+    affaireId: true,
     createdAt: true,
     updatedAt: true,
   } as const; // jamais `photo` dans une liste — servie par la route dédiée
@@ -1657,9 +1661,17 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     { preHandler: [...businessRoute, requireRole(["owner"])] },
     async (request, reply) => {
       const { id } = z.object({ id: Uuid }).parse(request.params);
-      const { count } = await withTenant(request.tenantId, (tx) =>
-        tx.classeurDocument.deleteMany({ where: { id, tenantId: request.tenantId } }),
-      );
+      const { count } = await withTenant(request.tenantId, async (tx) => {
+        // Effacer la pièce (art. 17) doit RÉVOQUER son imputation : sinon la
+        // fiche d'affaire continue d'afficher « Document du classeur — 450 € »
+        // pour une pièce disparue, donc un coût que plus personne ne peut
+        // vérifier. La ligne d'imputation reste, révoquée : c'est la trace.
+        await tx.affaireImputation.updateMany({
+          where: { targetType: "classeur_document", targetId: id, revokedAt: null },
+          data: { revokedAt: new Date(), revokedBy: request.authSession.user.id },
+        });
+        return tx.classeurDocument.deleteMany({ where: { id, tenantId: request.tenantId } });
+      });
       if (count === 0) return reply.code(404).send({ error: "not found" });
       return reply.code(204).send();
     },
@@ -5079,6 +5091,17 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
     const year = new Date().getUTCFullYear();
     const created = await withTenant(request.tenantId, async (tx) => {
+      // `prospectId` vient du client : il se contrôle contre CE tenant avant
+      // d'être écrit. La clé étrangère composite l'empêche désormais en base,
+      // mais un identifiant étranger doit produire un refus clair, pas une
+      // erreur d'intégrité.
+      if (body.data.prospectId) {
+        const prospect = await tx.prospect.findUnique({
+          where: { id: body.data.prospectId },
+          select: { id: true },
+        });
+        if (!prospect) return null;
+      }
       // La référence est réservée DANS la transaction de création : une
       // création qui échoue rend son numéro, deux créations simultanées n'ont
       // jamais la même.
@@ -5092,6 +5115,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         },
       });
     });
+    if (!created) return reply.code(404).send({ error: "prospect inconnu" });
+    void reply.header("cache-control", "private, no-store");
     return reply.code(201).send(serializeAffaire(created));
   });
 
@@ -5167,9 +5192,18 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const updated = await withTenant(request.tenantId, async (tx) => {
       const existing = await tx.affaire.findUnique({ where: { id: params.data.id } });
       if (!existing) return null;
+      if (body.data.prospectId) {
+        const prospect = await tx.prospect.findUnique({
+          where: { id: body.data.prospectId },
+          select: { id: true },
+        });
+        if (!prospect) return null;
+      }
       return tx.affaire.update({ where: { id: params.data.id }, data: toPrismaData(body.data) });
     });
-    if (!updated) return reply.code(404).send({ error: "affaire inconnue" });
+    if (!updated) return reply.code(404).send({ error: "affaire ou prospect inconnu" });
+    // Ces réponses portent le nom du client et les montants : jamais en cache.
+    void reply.header("cache-control", "private, no-store");
     return serializeAffaire(updated);
   });
 
@@ -5185,6 +5219,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       return tx.affaire.update({ where: { id: params.data.id }, data: { status: "ARCHIVEE" } });
     });
     if (!archived) return reply.code(404).send({ error: "affaire inconnue" });
+    void reply.header("cache-control", "private, no-store");
     return serializeAffaire(archived);
   });
 
@@ -5209,6 +5244,27 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       // dans le sens flatteur, celui qu'on ne vérifie pas.
       if (active) return { kind: "conflict" as const, affaireId: active.affaireId };
 
+      // La cible doit EXISTER, et sous RLS donc appartenir à ce tenant. Sans ce
+      // contrôle, un identifiant inexistant (ou d'un autre tenant, invisible
+      // ici) créait quand même l'imputation avec le montant fourni par
+      // l'appelant : un coût FABRIQUÉ entrait dans la marge du dirigeant, et la
+      // route répondait 201. Les transactions bancaires échappent au contrôle
+      // — elles ne sont pas stockées — et c'est dit dans la doc.
+      if (body.data.targetType === "classeur_document") {
+        const document = await tx.classeurDocument.findUnique({
+          where: { id: body.data.targetId },
+          select: { id: true },
+        });
+        if (!document) return { kind: "unknown-target" as const };
+      }
+      if (body.data.targetType === "facture") {
+        const invoice = await tx.fecInvoice.findUnique({
+          where: { id: body.data.targetId },
+          select: { id: true },
+        });
+        if (!invoice) return { kind: "unknown-target" as const };
+      }
+
       const imputation = await tx.affaireImputation.create({
         data: {
           tenantId: request.tenantId,
@@ -5226,21 +5282,28 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         },
       });
       // Rattachement RÉTROACTIF : la pièce existante porte aussi le lien, pour
-      // que l'écran classeur le montre sans jointure supplémentaire.
+      // que l'écran classeur le montre sans jointure supplémentaire. PAS de
+      // `.catch` muet : un échec ici doit annuler la transaction, sinon
+      // l'imputation existerait sans que la pièce le sache.
       if (body.data.targetType === "classeur_document") {
-        await tx.classeurDocument
-          .update({ where: { id: body.data.targetId }, data: { affaireId: affaire.id } })
-          .catch(() => undefined);
+        await tx.classeurDocument.update({
+          where: { id: body.data.targetId },
+          data: { affaireId: affaire.id },
+        });
       }
       if (body.data.targetType === "facture") {
-        await tx.fecInvoice
-          .update({ where: { id: body.data.targetId }, data: { affaireId: affaire.id } })
-          .catch(() => undefined);
+        await tx.fecInvoice.update({
+          where: { id: body.data.targetId },
+          data: { affaireId: affaire.id },
+        });
       }
       return { kind: "ok" as const, imputation };
     });
 
     if (outcome.kind === "not-found") return reply.code(404).send({ error: "affaire inconnue" });
+    if (outcome.kind === "unknown-target") {
+      return reply.code(404).send({ error: "pièce inconnue" });
+    }
     if (outcome.kind === "conflict") {
       return reply.code(409).send({ error: "pièce déjà imputée", affaireId: outcome.affaireId });
     }
@@ -5268,15 +5331,20 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           where: { id: imputation.id },
           data: { revokedAt: new Date(), revokedBy: request.authSession.user.id },
         });
+        // Le document a pu être supprimé entre-temps (droit à l'effacement) :
+        // `updateMany` ne jette pas sur zéro ligne, là où `update` annulerait la
+        // révocation. On détache ce qui existe encore, sans mentir sur le reste.
         if (imputation.targetType === "classeur_document") {
-          await tx.classeurDocument
-            .update({ where: { id: imputation.targetId }, data: { affaireId: null } })
-            .catch(() => undefined);
+          await tx.classeurDocument.updateMany({
+            where: { id: imputation.targetId },
+            data: { affaireId: null },
+          });
         }
         if (imputation.targetType === "facture") {
-          await tx.fecInvoice
-            .update({ where: { id: imputation.targetId }, data: { affaireId: null } })
-            .catch(() => undefined);
+          await tx.fecInvoice.updateMany({
+            where: { id: imputation.targetId },
+            data: { affaireId: null },
+          });
         }
         return updated;
       });

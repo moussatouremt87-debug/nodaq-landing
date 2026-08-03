@@ -19,6 +19,7 @@ const EMPTY: AffaireCostInput = {
   hoursWorked: null,
   hourlyCostCents: null,
   invoicedCents: 0,
+  invoicedBasis: "ht",
   depositsCents: 0,
   retentionRateBps: null,
   estimatedMaterialCents: null,
@@ -298,5 +299,108 @@ describe("garde-fous arithmétiques", () => {
     ]) {
       expect(Number.isInteger(value)).toBe(true);
     }
+  });
+});
+
+describe("bases de facturation incomparables", () => {
+  it("un facturé en TTC face à un devis HT ne donne PAS de reste à facturer", () => {
+    // Soustraire un TTC d'un HT sous-estime le reste d'environ la TVA : le
+    // patron croirait avoir tout facturé et arrêterait trop tôt. On refuse, et
+    // on dit pourquoi.
+    const result = computeAffaireMargin({
+      ...EMPTY,
+      quotedAmountCents: 1_000_000,
+      imputations: [ht(200_000)],
+      hoursWorked: 0,
+      hourlyCostCents: 3_500,
+      invoicedCents: 600_000,
+      invoicedBasis: "ttc",
+    });
+    if (result.kind !== "marge") throw new Error("cas attendu");
+    expect(result.remainingToInvoiceCents).toBeNull();
+    expect(result.missing).toContain("facture_base_ttc");
+    // La MARGE, elle, reste exacte : le facturé n'y entre pas.
+    expect(result.marginCents).toBe(800_000);
+  });
+
+  it("rien de facturé : les bases n'ont pas à être comparées", () => {
+    const result = computeAffaireMargin({
+      ...EMPTY,
+      quotedAmountCents: 1_000_000,
+      imputations: [ht(200_000)],
+      hoursWorked: 0,
+      hourlyCostCents: 3_500,
+      invoicedCents: 0,
+      invoicedBasis: "ttc",
+    });
+    if (result.kind !== "marge") throw new Error("cas attendu");
+    expect(result.remainingToInvoiceCents).toBe(1_000_000);
+  });
+});
+
+describe("borne supérieure et pièces TTC — le flux le plus courant du produit", () => {
+  it("des pièces TTC réduisent le plafond : jamais « au mieux = le devis entier »", () => {
+    // Tout ce qui vient du classeur est en TTC. Ignorer ces pièces affichait
+    // « marge au mieux 12 000 € » sur un devis de 12 000 € avec 4 500 € de
+    // factures rattachées — le « 100 % de marge » interdit, réétiqueté.
+    const result = computeAffaireMargin({
+      ...EMPTY,
+      quotedAmountCents: 1_200_000,
+      imputations: [
+        { targetType: "classeur_document", amountCents: 450_000, amountBasis: "ttc", subcontract: false },
+      ],
+      hoursWorked: 0,
+      hourlyCostCents: 3_500,
+    });
+    if (result.kind !== "marge_borne_superieure") throw new Error("cas attendu");
+    // 450 000 TTC au taux le PLUS HAUT (20 %) = 375 000 HT au minimum.
+    expect(result.upperBoundCents).toBe(1_200_000 - 375_000);
+    expect(result.upperBoundCents).toBeLessThan(1_200_000);
+  });
+
+  it("le plancher de coût est PRUDENT : au taux réel, le coût ne peut qu'être plus grand", () => {
+    // Une pièce à 5,5 % a un HT plus élevé que le même TTC à 20 %. Le plafond
+    // annoncé est donc toujours atteignable au mieux, jamais dépassé.
+    const result = computeAffaireMargin({
+      ...EMPTY,
+      quotedAmountCents: 1_000_000,
+      imputations: [
+        { targetType: "classeur_document", amountCents: 120_000, amountBasis: "ttc", subcontract: false },
+      ],
+      hoursWorked: 0,
+      hourlyCostCents: 3_500,
+    });
+    if (result.kind !== "marge_borne_superieure") throw new Error("cas attendu");
+    const htA55 = Math.round(120_000 / 1.055);
+    expect(result.upperBoundCents).toBeGreaterThanOrEqual(1_000_000 - htA55);
+  });
+});
+
+describe("marge exacte mais base vide", () => {
+  it("aucune pièce rattachée est DIT, même quand la marge est exacte", () => {
+    // Un chantier de bâtiment sans la moindre facture n'existe pas : le chiffre
+    // est juste, la conclusion qu'on en tirerait ne l'est pas.
+    const result = computeAffaireMargin({
+      ...EMPTY,
+      quotedAmountCents: 1_000_000,
+      imputations: [],
+      hoursWorked: 10,
+      hourlyCostCents: 3_500,
+    });
+    if (result.kind !== "marge") throw new Error("cas attendu");
+    expect(result.marginCents).toBe(965_000);
+    expect(result.missing).toContain("aucune_piece_rattachee");
+  });
+
+  it("avec des pièces, la marge exacte ne porte aucune réserve", () => {
+    const result = computeAffaireMargin({
+      ...EMPTY,
+      quotedAmountCents: 1_000_000,
+      imputations: [ht(200_000)],
+      hoursWorked: 10,
+      hourlyCostCents: 3_500,
+    });
+    if (result.kind !== "marge") throw new Error("cas attendu");
+    expect(result.missing).toEqual([]);
   });
 });
