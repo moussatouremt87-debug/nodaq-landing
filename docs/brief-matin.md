@@ -69,8 +69,8 @@ bougé.
 
 Les montants sont **owner-only**, comme partout ailleurs. Un membre reçoit un
 brief réel — actions à valider, pièces à vérifier, alertes de stock — avec un
-angle mort explicite : « montants — réservés au dirigeant ». Pas un écran vide,
-pas un écran qui ment.
+angle mort explicite : « montants et échéances — réservés au dirigeant ». Pas un
+écran vide, pas un écran qui ment.
 
 ## Une affaire « en perte », précisément
 
@@ -97,6 +97,12 @@ annotée, c'est-à-dire dans le cas nominal.
 **Deux créneaux séparés**, jamais un seul : « en retard » et « à venir » sont
 deux problèmes distincts, et n'en garder qu'un laissait une pénalité vieille de
 deux mois occuper la place de la déclaration due après-demain.
+
+**Trois états, pas deux.** Entre « passée » et « à venir » il y a la **fenêtre
+ouverte** : une CA3 datée du 15 se dépose jusqu'au 24. Filtrer sur deux états
+seulement la faisait disparaître du brief **neuf jours par mois** — ni en
+retard, ni à venir, et pas un mot. Une fenêtre ouverte passe devant une échéance
+encore lointaine : c'est elle qui se referme la première.
 
 **« En retard » exige une annotation humaine.** Une occurrence que personne n'a
 pointée est `prevu` par défaut : impossible de la distinguer d'une échéance

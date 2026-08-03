@@ -88,8 +88,12 @@ export default function BriefPage() {
         <div className="card" style={{ maxWidth: 560, marginTop: 14 }}>
           <span className="overline">Non regardé ce matin</span>
           <ul className="hint" style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+            {/* Clé = domaine + raison : un même domaine porte plusieurs angles
+                morts (impayés × avertissements FEC, affaires × trois limites).
+                Une clé dupliquée, c'est React qui réconcilie de travers — sur
+                la liste dont tout l'argument est de ne rien taire. */}
             {brief.blindSpots.map((spot) => (
-              <li key={spot.area}>
+              <li key={`${spot.area}|${spot.why}`}>
                 {spot.area} — {spot.why}
               </li>
             ))}

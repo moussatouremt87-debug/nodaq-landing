@@ -23,6 +23,8 @@
  *     d'anxiété, pas une information.
  */
 
+import { APPROXIMATE_DUE_DATE_SLACK_DAYS } from "@nodaq/shared";
+
 /** Bump à chaque changement de règle de composition ou de seuil. */
 export const BRIEF_RULES_VERSION = "2026-08-03";
 
@@ -125,6 +127,16 @@ export interface BriefEcheance {
   /** Montant DÉCLARÉ par le dirigeant. `null` = inconnu, jamais estimé. */
   readonly amountCents: number | null;
   readonly dateIsApproximate: boolean;
+  /**
+   * La date basse est passée, mais la fenêtre légale court toujours.
+   *
+   * Ni « dans N jours » ni « en retard » : entre le 16 et le 24, une CA3 est
+   * exactement là. Sans ce troisième état, elle tombait entre les deux filtres
+   * et disparaissait du brief neuf jours par mois — l'obligation la plus
+   * récurrente du produit, absente sans un mot, sur l'écran dont tout
+   * l'argument est de ne rien taire.
+   */
+  readonly windowOpen: boolean;
 }
 
 export interface BriefInput {
@@ -133,7 +145,8 @@ export interface BriefInput {
   /** Affaires dont la marge connue est négative (F4). `null` = non regardé. */
   readonly affairesEnPerte: {
     readonly count: number;
-    readonly worst: BriefWorstMargin;
+    /** `null` quand `count` vaut 0 : REGARDÉ et vide, ce qui n'est pas « non regardé ». */
+    readonly worst: BriefWorstMargin | null;
   } | null;
   /** Affaires dont le budget matière est dépassé (F4). `null` = non regardé. */
   readonly budgetsDepasses: number | null;
@@ -151,7 +164,19 @@ export interface BriefInput {
     readonly prochaine: BriefEcheance | null;
   } | null;
   /** Impayés exigibles — retenue de garantie EXCLUE (US-8). `null` = non regardé. */
-  readonly impayes: { readonly count: number; readonly totalCents: number } | null;
+  readonly impayes: {
+    readonly count: number;
+    readonly totalCents: number;
+    /**
+     * La déduction des retenues de garantie a-t-elle pu se faire entièrement ?
+     *
+     * `false` quand le dernier import porte un avertissement de rattachement :
+     * une retenue non rattachable reste comptée en impayé. Affirmer « retenue
+     * exclue » là-dessus ferait relancer un bon client sur une somme qui n'est
+     * pas exigible — la faute exacte que US-8 corrige.
+     */
+    readonly retentionDeducted: boolean;
+  } | null;
   /** Articles sous le seuil d'alerte. `null` = module éteint ou non regardé. */
   readonly stockSousSeuil: number | null;
   /** Pièces photographiées en attente de vérification. */
@@ -161,6 +186,73 @@ export interface BriefInput {
 }
 
 const SEVERITY_ORDER: Record<BriefSeverity, number> = { urgent: 0, attention: 1, info: 2 };
+
+/** Une occurrence encore due, telle que l'échéancier (2.9) la rend. */
+export interface BriefDeadlineLine {
+  readonly obligationId: string;
+  /** "YYYY-MM-DD", date CIVILE française. */
+  readonly dueDate: string;
+  readonly dateIsApproximate: boolean;
+}
+
+/**
+ * Les trois états d'une échéance encore due, et ils sont bien TROIS.
+ *
+ * `windowOpen` est celui qu'on oublie : une CA3 datée du 15 se dépose jusqu'au
+ * 24, elle n'est donc ni passée ni à venir entre les deux. Partitionner sur
+ * deux états la faisait tomber des deux filtres et disparaître du brief neuf
+ * jours par mois.
+ */
+export interface BriefDeadlineSplit<T> {
+  /** Date basse ET marge d'approximation écoulées : la pénalité court. */
+  readonly late: readonly T[];
+  /** Date basse passée, fenêtre légale encore ouverte. */
+  readonly windowOpen: readonly T[];
+  readonly upcoming: readonly T[];
+}
+
+/**
+ * Jours de retard d'une occurrence, marge d'approximation déduite.
+ *
+ * ≤ 0 ne veut pas dire « à l'heure » : ça veut dire « on ne peut pas encore
+ * l'affirmer ». La date rendue par le calendrier est la borne BASSE d'une
+ * fenêtre légale (le jour exact d'une CA3 dépend du SIREN) — annoncer une
+ * pénalité un jour trop tôt coûte plus cher que de la signaler un jour tard.
+ */
+export function lateDaysOf(line: BriefDeadlineLine, todayIso: string): number {
+  const days = Math.floor(
+    (Date.parse(`${todayIso}T00:00:00Z`) - Date.parse(`${line.dueDate}T00:00:00Z`)) / 86_400_000,
+  );
+  return days - (line.dateIsApproximate ? APPROXIMATE_DUE_DATE_SLACK_DAYS : 0);
+}
+
+/**
+ * Partitionne les occurrences encore dues. PURE, et TOTALE : toute ligne
+ * atterrit dans exactement un seau — c'est l'invariant qui manquait, et son
+ * absence coûtait une CA3 par mois.
+ */
+export function splitDeadlines<T extends BriefDeadlineLine>(
+  lines: readonly T[],
+  todayIso: string,
+): BriefDeadlineSplit<T> {
+  const late: T[] = [];
+  const windowOpen: T[] = [];
+  const upcoming: T[] = [];
+  for (const line of lines) {
+    if (line.dueDate >= todayIso) upcoming.push(line);
+    else if (lateDaysOf(line, todayIso) > 0) late.push(line);
+    else windowOpen.push(line);
+  }
+  return { late, windowOpen, upcoming };
+}
+
+/** La plus proche par date d'échéance — ordre stable, jamais un tri instable. */
+export function earliestDeadline<T extends BriefDeadlineLine>(lines: readonly T[]): T | null {
+  return lines.reduce<T | null>(
+    (current, line) => (current === null || line.dueDate < current.dueDate ? line : current),
+    null,
+  );
+}
 
 /**
  * Compose le brief. PURE : aucune I/O, aucune horloge, aucun appel modèle.
@@ -174,7 +266,11 @@ export function composeMorningBrief(input: BriefInput): MorningBrief {
 
   // De l'argent qui part : une affaire en perte est le seul cas où le patron
   // peut encore changer quelque chose aujourd'hui.
-  if (input.affairesEnPerte !== null && input.affairesEnPerte.count > 0) {
+  if (
+    input.affairesEnPerte !== null &&
+    input.affairesEnPerte.count > 0 &&
+    input.affairesEnPerte.worst !== null
+  ) {
     const { count, worst } = input.affairesEnPerte;
     items.push({
       kind: "affaire_en_perte",
@@ -207,7 +303,9 @@ export function composeMorningBrief(input: BriefInput): MorningBrief {
           : `${input.impayes.count} factures en retard de paiement`,
       count: input.impayes.count,
       amountCents: input.impayes.totalCents,
-      amountNote: "total exigible, retenue de garantie exclue",
+      amountNote: input.impayes.retentionDeducted
+        ? "total exigible, retenue de garantie exclue"
+        : "total exigible — une retenue de garantie peut y être comptée",
       href: "/",
     });
   }
@@ -238,13 +336,15 @@ export function composeMorningBrief(input: BriefInput): MorningBrief {
       severity: prochaine.days <= ECHEANCE_URGENT_DAYS ? "urgent" : "attention",
       // Sur une date approximative, la borne rendue est celle du DÉBUT de la
       // fenêtre légale : « dans 2 jours » y serait une certitude inventée.
-      label: prochaine.dateIsApproximate
-        ? prochaine.days === 0
-          ? "Une échéance fiscale s'ouvre aujourd'hui (date exacte selon votre espace professionnel)"
-          : `Échéance fiscale à préparer sous ${prochaine.days} jour${prochaine.days === 1 ? "" : "s"} (date exacte selon votre espace professionnel)`
-        : prochaine.days === 0
-          ? "Une échéance fiscale est due aujourd'hui"
-          : `Échéance fiscale dans ${prochaine.days} jour${prochaine.days === 1 ? "" : "s"}`,
+      label: prochaine.windowOpen
+        ? "Votre fenêtre de dépôt est ouverte (date limite selon votre espace professionnel)"
+        : prochaine.dateIsApproximate
+          ? prochaine.days === 0
+            ? "Une échéance fiscale s'ouvre aujourd'hui (date exacte selon votre espace professionnel)"
+            : `Échéance fiscale à préparer sous ${prochaine.days} jour${prochaine.days === 1 ? "" : "s"} (date exacte selon votre espace professionnel)`
+          : prochaine.days === 0
+            ? "Une échéance fiscale est due aujourd'hui"
+            : `Échéance fiscale dans ${prochaine.days} jour${prochaine.days === 1 ? "" : "s"}`,
       count: null,
       amountCents: prochaine.amountCents,
       amountNote: prochaine.amountCents === null ? null : "montant que vous avez déclaré",

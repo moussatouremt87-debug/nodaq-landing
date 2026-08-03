@@ -15,7 +15,10 @@ import {
 
 describe("catalogue de modules", () => {
   it("versionné ; chaque module a un titre, des défauts et une liste d'outils", () => {
-    expect(MODULE_CATALOG_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // Date, avec un suffixe `.N` optionnel pour deux changements le même jour :
+    // réutiliser la date masquerait le second, la dater du lendemain
+    // annoncerait un instantané qui n'existe pas encore.
+    expect(MODULE_CATALOG_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}(\.\d+)?$/);
     expect(MODULES.length).toBeGreaterThanOrEqual(6);
     for (const module of MODULES) {
       expect(module.id).toBeTruthy();

@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   BRIEF_RULES_VERSION,
   composeMorningBrief,
+  earliestDeadline,
+  lateDaysOf,
+  splitDeadlines,
+  type BriefDeadlineLine,
   type BriefInput,
 } from "../src/briefMatin.js";
 
@@ -29,6 +33,7 @@ const echeance = (days: number, amountCents: number | null = null, approx = fals
   days,
   amountCents,
   dateIsApproximate: approx,
+  windowOpen: false,
 });
 
 describe("config versionnée", () => {
@@ -99,12 +104,27 @@ describe("ce qui remonte en URGENT — de l'argent qui part ou ne rentre pas", (
   it("des impayés remontent avec leur montant EXIGIBLE", () => {
     const brief = composeMorningBrief({
       ...RIEN,
-      impayes: { count: 3, totalCents: 803_000 },
+      impayes: { count: 3, totalCents: 803_000, retentionDeducted: true },
     });
     if (brief.kind !== "brief") throw new Error("cas attendu");
     const impayes = brief.items.find((item) => item.kind === "impayes");
     expect(impayes?.severity).toBe("urgent");
     expect(impayes?.amountCents).toBe(803_000);
+    expect(impayes?.amountNote).toContain("retenue de garantie exclue");
+  });
+
+  it("quand la retenue n'a PAS pu être déduite, le total cesse de l'affirmer", () => {
+    // Une retenue non rattachable reste comptée en impayé (US-8). Écrire
+    // « retenue exclue » là-dessus ferait relancer un bon client sur une somme
+    // qui n'est pas exigible — la faute exacte que ce moteur corrige.
+    const brief = composeMorningBrief({
+      ...RIEN,
+      impayes: { count: 1, totalCents: 803_000, retentionDeducted: false },
+    });
+    if (brief.kind !== "brief") throw new Error("cas attendu");
+    const impayes = brief.items.find((item) => item.kind === "impayes");
+    expect(impayes?.amountNote).not.toContain("exclue");
+    expect(impayes?.amountNote).toContain("peut y être comptée");
   });
 
   it("une échéance à trois jours est urgente, à sept elle est une attention", () => {
@@ -158,6 +178,23 @@ describe("ce qui remonte en URGENT — de l'argent qui part ou ne rentre pas", (
     ]);
   });
 
+  it("une fenêtre de dépôt OUVERTE remonte : ni en retard, ni à venir, mais due", () => {
+    // Une CA3 datée du 15 se dépose jusqu'au 24. Avec deux états seulement,
+    // elle n'était ni « passée » ni « à venir » et disparaissait du brief neuf
+    // jours par mois — sur l'écran dont tout l'argument est de ne rien taire.
+    const brief = composeMorningBrief({
+      ...RIEN,
+      echeances: {
+        enRetard: null,
+        prochaine: { ...echeance(0, null, true), windowOpen: true },
+      },
+    });
+    if (brief.kind !== "brief") throw new Error("cas attendu");
+    expect(brief.items[0]?.kind).toBe("echeance_proche");
+    expect(brief.items[0]?.severity).toBe("urgent");
+    expect(brief.items[0]?.label).toContain("fenêtre de dépôt est ouverte");
+  });
+
   it("une date APPROXIMATIVE ne se rend jamais comme une date certaine", () => {
     // La date d'une CA3 dépend du SIREN : le calendrier rend la borne basse de
     // la fenêtre légale. « dans 2 jours » y serait une certitude inventée.
@@ -170,6 +207,62 @@ describe("ce qui remonte en URGENT — de l'argent qui part ou ne rentre pas", (
   });
 });
 
+describe("les trois états d'une échéance — et il y en a bien TROIS", () => {
+  const ca3 = (dueDate: string): BriefDeadlineLine => ({
+    obligationId: "tva_ca3",
+    dueDate,
+    dateIsApproximate: true,
+  });
+  const dsn = (dueDate: string): BriefDeadlineLine => ({
+    obligationId: "dsn",
+    dueDate,
+    dateIsApproximate: false,
+  });
+
+  it("une CA3 dans sa fenêtre de dépôt n'est NI passée NI à venir — et ne disparaît pas", () => {
+    // LE bug : la CA3 du 15 se dépose jusqu'au 24. Du 16 au 24, une partition
+    // en deux la faisait tomber des deux filtres — l'obligation la plus
+    // récurrente du produit, absente du brief neuf jours par mois, sans un mot.
+    for (const day of ["16", "20", "24"]) {
+      const split = splitDeadlines([ca3("2026-03-15")], `2026-03-${day}`);
+      expect(split.late).toHaveLength(0);
+      expect(split.upcoming).toHaveLength(0);
+      expect(split.windowOpen).toHaveLength(1);
+    }
+  });
+
+  it("passé la fenêtre, la CA3 devient un vrai retard", () => {
+    const split = splitDeadlines([ca3("2026-03-15")], "2026-03-25");
+    expect(split.late).toHaveLength(1);
+    expect(lateDaysOf(ca3("2026-03-15"), "2026-03-25")).toBe(1);
+  });
+
+  it("une date CERTAINE n'a pas de fenêtre : en retard dès le lendemain", () => {
+    const split = splitDeadlines([dsn("2026-03-15")], "2026-03-16");
+    expect(split.late).toHaveLength(1);
+    expect(split.windowOpen).toHaveLength(0);
+  });
+
+  it("la partition est TOTALE : aucune ligne ne tombe entre deux seaux", () => {
+    // L'invariant dont l'absence coûtait une CA3 par mois. Balayé sur tout un
+    // mois pour que la démonstration ne dépende pas du jour où le test tourne.
+    const lines = [ca3("2026-03-15"), dsn("2026-03-05"), ca3("2026-04-15"), dsn("2026-04-05")];
+    for (let day = 1; day <= 31; day += 1) {
+      const today = `2026-03-${String(day).padStart(2, "0")}`;
+      const split = splitDeadlines(lines, today);
+      expect(split.late.length + split.windowOpen.length + split.upcoming.length).toBe(
+        lines.length,
+      );
+    }
+  });
+
+  it("la plus proche échéance est choisie par DATE, pas par ordre d'arrivée", () => {
+    const chosen = earliestDeadline([ca3("2026-05-15"), dsn("2026-04-05"), ca3("2026-04-15")]);
+    expect(chosen?.dueDate).toBe("2026-04-05");
+    expect(earliestDeadline([])).toBeNull();
+  });
+});
+
 describe("l'ordre est fixe", () => {
   it("urgent, puis attention, puis info — et stable à sévérité égale", () => {
     // Un ordre qui bouge d'un matin à l'autre donne l'impression que quelque
@@ -179,7 +272,7 @@ describe("l'ordre est fixe", () => {
       documentsAVerifier: 2,
       pendingActions: 5,
       stockSousSeuil: 1,
-      impayes: { count: 1, totalCents: 50_000 },
+      impayes: { count: 1, totalCents: 50_000, retentionDeducted: true },
       budgetsDepasses: 2,
     };
     const first = composeMorningBrief(input);
@@ -204,7 +297,7 @@ describe("chaque ligne mène quelque part", () => {
       documentsAVerifier: 1,
       stockSousSeuil: 1,
       budgetsDepasses: 1,
-      impayes: { count: 1, totalCents: 1 },
+      impayes: { count: 1, totalCents: 1, retentionDeducted: true },
       affairesEnPerte: { count: 1, worst: { cents: -1, basis: "exact" } },
       echeances: { enRetard: echeance(4, 1), prochaine: echeance(1, 1) },
     });
@@ -229,7 +322,7 @@ describe("zéro n'est pas une nouvelle", () => {
   it("un domaine à zéro ne produit AUCUNE ligne", () => {
     const brief = composeMorningBrief({
       ...RIEN,
-      impayes: { count: 0, totalCents: 0 },
+      impayes: { count: 0, totalCents: 0, retentionDeducted: true },
       affairesEnPerte: { count: 0, worst: { cents: 0, basis: "exact" } },
       budgetsDepasses: 0,
       stockSousSeuil: 0,
@@ -242,7 +335,7 @@ describe("zéro n'est pas une nouvelle", () => {
 
   it("« regardé et vide » et « pas regardé » ne se confondent pas", () => {
     // Zéro impayé => rien à dire. Impayés NON regardés => angle mort déclaré.
-    const vide = composeMorningBrief({ ...RIEN, impayes: { count: 0, totalCents: 0 } });
+    const vide = composeMorningBrief({ ...RIEN, impayes: { count: 0, totalCents: 0, retentionDeducted: true } });
     expect(vide.blindSpots).toHaveLength(0);
 
     const aveugle = composeMorningBrief({

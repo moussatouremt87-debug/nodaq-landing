@@ -16,7 +16,10 @@ import {
   BRIEF_LATE_LOOKBACK_DAYS,
   BRIEF_RULES_VERSION,
   composeMorningBrief,
+  earliestDeadline,
   ECHEANCE_HORIZON_DAYS,
+  lateDaysOf,
+  splitDeadlines,
 } from "./briefMatin.js";
 import type { BriefEcheance, BriefWorstMargin } from "./briefMatin.js";
 import {
@@ -68,7 +71,6 @@ import type { BankClient } from "@nodaq/mcp-connectors";
 import { defaultWritableProvider } from "@nodaq/secrets";
 import type { WritableSecretProvider } from "@nodaq/secrets";
 import {
-  APPROXIMATE_DUE_DATE_SLACK_DAYS,
   applyTaxOverrides,
   ASSET_CATEGORIES,
   buildTaxSchedule,
@@ -3277,6 +3279,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     }
   });
 
+  /** Statuts d'une échéance — écriture ET relecture passent par ce schéma. */
+  const DeadlineStatus = z.enum(["prevu", "paye", "non_applicable"]);
+
   const DeadlineBody = z
     .object({
       obligationId: z.enum(Object.keys(TAX_OBLIGATIONS) as [string, ...string[]]),
@@ -3286,7 +3291,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       dueDate: IsoDay,
       // Montant DÉCLARÉ par le dirigeant : le produit n'en dérive jamais un.
       amountCents: z.number().int().min(0).max(100_000_000_00).nullable(),
-      status: z.enum(["prevu", "paye", "non_applicable"]),
+      status: DeadlineStatus,
       note: z.string().max(500).nullable(),
     })
     .strict();
@@ -5090,9 +5095,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     // lit sur l'écran Échéancier, qui, lui, n'est pas borné.
     const dayMs = 86_400_000;
     const today = new Date();
-    const todayIso = today.toISOString().slice(0, 10);
+    // Date CIVILE française, pas UTC : l'échéancier raisonne en jours du
+    // calendrier français, et entre minuit et 2 h à Paris `toISOString()` rend
+    // la veille — un brief ouvert tôt daterait ses échéances d'un jour de trop.
     const isoDaysFromNow = (days: number): string =>
-      new Date(today.getTime() + days * dayMs).toISOString().slice(0, 10);
+      new Intl.DateTimeFormat("fr-CA", { timeZone: "Europe/Paris" }).format(
+        new Date(today.getTime() + days * dayMs),
+      );
+    const todayIso = isoDaysFromNow(0);
     const windowFrom = isoDaysFromNow(-BRIEF_LATE_LOOKBACK_DAYS);
     const windowTo = isoDaysFromNow(ECHEANCE_HORIZON_DAYS);
 
@@ -5170,7 +5180,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             obligationId: row.obligationId,
             dueDate: row.dueDate.toISOString().slice(0, 10),
             amountCents: row.amountCents,
-            status: row.status as TaxDeadlineOverride["status"],
+            // Frontière typée, même sur une lecture : un statut inattendu
+            // sortirait l'occurrence de `stillDue`, donc du brief, en silence.
+            // `prevu` est le défaut du calendrier — on n'invente rien en y
+            // retombant, on refuse juste de disparaître.
+            status: DeadlineStatus.catch("prevu").parse(row.status),
             note: row.note,
           }),
         ),
@@ -5256,72 +5270,85 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     ).length;
 
     const stillDue = (data.schedule?.deadlines ?? []).filter((line) => line.status === "prevu");
-    const toEcheance = (line: (typeof stillDue)[number], days: number): BriefEcheance => ({
+    const toEcheance = (
+      line: (typeof stillDue)[number],
+      days: number,
+      windowOpen = false,
+    ): BriefEcheance => ({
       days,
       amountCents: line.amountCents,
       dateIsApproximate: line.dateIsApproximate,
+      windowOpen,
     });
-    // Une date approximative est la borne BASSE d'une fenêtre légale : la
-    // déclarer « en retard » le lendemain annoncerait une pénalité qui n'existe
-    // pas. Le doute profite ici au silence, pas à l'alerte.
-    const lateDays = (line: (typeof stillDue)[number]): number =>
-      Math.floor(
-        (Date.parse(`${todayIso}T00:00:00Z`) - Date.parse(`${line.dueDate}T00:00:00Z`)) / dayMs,
-      ) - (line.dateIsApproximate ? APPROXIMATE_DUE_DATE_SLACK_DAYS : 0);
     /*
-     * « EN RETARD » EXIGE UNE ANNOTATION HUMAINE — et ce n'est pas un détail.
+     * TROIS ÉTATS, PAS DEUX — et le troisième n'était pas une subtilité.
      *
-     * `applyTaxOverrides` rend `prevu` par DÉFAUT : une occurrence que personne
-     * n'a pointée est indiscernable d'une occurrence déclarée impayée. Sans
-     * cette garde, la CA3 payée en juin mais jamais annotée — le cas nominal,
-     * puisque l'écran d'annotation est facultatif — criait « en retard de 55
-     * jours » tous les matins. Un brief qui hurle au loup chaque matin, on
-     * cesse de l'ouvrir en trois jours.
+     * Filtrer sur « passée » d'un côté et « à venir » de l'autre laissait
+     * tomber tout ce qui est entre les deux : une CA3 datée du 15, dont la
+     * fenêtre légale court jusqu'au 24, n'était NI en retard (la marge
+     * d'approximation n'était pas écoulée) NI à venir (sa date basse était
+     * passée). L'obligation la plus récurrente du produit disparaissait du
+     * brief neuf jours par mois, sans un mot, sur l'écran dont tout l'argument
+     * est de ne rien taire.
+     *
+     * « EN RETARD » EXIGE UNE ANNOTATION HUMAINE — et ce n'est pas un détail
+     * non plus. `applyTaxOverrides` rend `prevu` par DÉFAUT : une occurrence
+     * que personne n'a pointée est indiscernable d'une occurrence déclarée
+     * impayée. Sans cette garde, la CA3 payée en juin mais jamais annotée — le
+     * cas nominal, puisque l'écran d'annotation est facultatif — criait « en
+     * retard de 55 jours » tous les matins. Un brief qui hurle au loup chaque
+     * matin, on cesse de l'ouvrir en trois jours.
+     *
+     * La fenêtre ouverte, elle, n'a pas besoin d'annotation : l'échéance est
+     * réellement due, personne ne peut affirmer le contraire.
      *
      * Le silence n'est pas une omission : le compte des occurrences passées non
      * pointées part en angle mort, avec de quoi agir.
      */
-    const past = stillDue.filter((line) => line.dueDate < todayIso && lateDays(line) > 0);
-    const key = (line: (typeof stillDue)[number]): string =>
-      `${line.obligationId}|${line.dueDate}`;
-    const late = past.filter((line) => data.annotated.has(key(line)));
-    const unpointed = past.length - late.length;
+    const split = splitDeadlines(stillDue, todayIso);
+    const key = (line: (typeof stillDue)[number]): string => `${line.obligationId}|${line.dueDate}`;
+    const late = split.late.filter((line) => data.annotated.has(key(line)));
+    const unpointed = split.late.length - late.length;
     if (unpointed > 0) {
       blindSpots.push({
         area: "échéancier",
         why: `${unpointed} échéance(s) passée(s) non pointée(s) : impossible de dire si elles sont payées`,
       });
     }
-    const earliest = (lines: readonly (typeof stillDue)[number][]): (typeof stillDue)[number] | null =>
-      lines.reduce<(typeof stillDue)[number] | null>(
-        (current, line) => (current === null || line.dueDate < current.dueDate ? line : current),
-        null,
-      );
-    const oldestLate = earliest(late);
-    const nextUp = earliest(stillDue.filter((line) => line.dueDate >= todayIso));
+    const oldestLate = earliestDeadline(late);
+    // Une fenêtre déjà ouverte passe devant une échéance encore à venir : elle
+    // se referme la première.
+    const openNow = earliestDeadline(split.windowOpen);
+    const nextUp = openNow ?? earliestDeadline(split.upcoming);
 
     const brief = composeMorningBrief({
       pendingActions: data.pendingActions,
       documentsAVerifier: data.documentsAVerifier ?? 0,
-      affairesEnPerte:
-        data.affaires === null || worst === null ? null : { count: losing.length, worst },
+      // « Regardé et vide » n'est PAS « pas regardé » : module allumé et aucune
+      // affaire en perte reste un examen, avec un résultat.
+      affairesEnPerte: data.affaires === null ? null : { count: losing.length, worst },
       budgetsDepasses: data.affaires === null ? null : overBudget,
       echeances:
         data.schedule === null
           ? null
           : {
-              enRetard: oldestLate === null ? null : toEcheance(oldestLate, lateDays(oldestLate)),
+              enRetard:
+                oldestLate === null
+                  ? null
+                  : toEcheance(oldestLate, lateDaysOf(oldestLate, todayIso)),
               prochaine:
                 nextUp === null
                   ? null
-                  : toEcheance(
-                      nextUp,
-                      Math.round(
-                        (Date.parse(`${nextUp.dueDate}T00:00:00Z`) -
-                          Date.parse(`${todayIso}T00:00:00Z`)) /
-                          dayMs,
+                  : nextUp === openNow
+                    ? toEcheance(nextUp, 0, true)
+                    : toEcheance(
+                        nextUp,
+                        Math.round(
+                          (Date.parse(`${nextUp.dueDate}T00:00:00Z`) -
+                            Date.parse(`${todayIso}T00:00:00Z`)) /
+                            dayMs,
+                        ),
                       ),
-                    ),
             },
       impayes:
         data.impayes === null
@@ -5329,6 +5356,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           : {
               count: data.impayes._count._all,
               totalCents: Number(data.impayes._sum.residualCents ?? 0),
+              // Un avertissement de rattachement veut dire qu'une retenue a pu
+              // rester comptée en impayé : le qualificatif du montant doit
+              // cesser d'affirmer le contraire. Filtre LARGE à dessein — tous
+              // les avertissements de retenue ne portent pas sur les impayés,
+              // mais nuancer à tort coûte infiniment moins cher qu'affirmer
+              // « retenue exclue » sur un total qui en contient une.
+              retentionDeducted: !(data.fecWarnings ?? []).some((warning) =>
+                warning.includes("retenue"),
+              ),
             },
       stockSousSeuil: data.stock === null ? null : (data.stock[0]?.count ?? 0),
       blindSpots,

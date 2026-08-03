@@ -152,7 +152,10 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   // il lit les charges saisies et les factures — le lien passe par les comptes
   // 64x/68x du FEC, il est indirect. On recharge pour rien plutôt que de
   // risquer un écran faux, mais que personne ne s'appuie sur un lien direct.
-  "rh.modifie": ["rh", "marge"],
+  // `brief` en fait partie : l'effectif actif alimente le profil fiscal, et il
+  // fait basculer la date de dépôt DSN du 15 au 5 (DSN_EARLY_FILING_HEADCOUNT).
+  // Embaucher change donc l'échéance affichée le lendemain matin.
+  "rh.modifie": ["rh", "marge", "brief"],
   "immobilisation.modifiee": ["immobilisations", "marge"],
   "cout.modifie": ["marge"],
   "avis.modifie": ["avis"],

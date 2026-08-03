@@ -81,7 +81,9 @@ describe("modules par vertical", () => {
       vertical?: string;
       modules: { id: string; active: boolean; source?: string }[];
     };
-    expect(body.version).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // Date, avec un suffixe `.N` optionnel quand deux changements tombent le
+    // même jour (cf. MODULE_CATALOG_VERSION).
+    expect(body.version).toMatch(/^\d{4}-\d{2}-\d{2}(\.\d+)?$/);
     expect(body.vertical).toBeUndefined();
     expect(body.modules.length).toBeGreaterThanOrEqual(6);
     // Depuis le pivot (ADR-007), le catalogue mêle socle actif et modules
