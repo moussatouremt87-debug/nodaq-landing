@@ -1000,3 +1000,82 @@ describe("F4 — la marge de chaque chantier dans le cockpit", () => {
     expect(res.statusCode).not.toBe(400);
   });
 });
+
+describe("F5 — le brief du matin", () => {
+  it("dit ce qu'il n'a PAS pu regarder, au lieu de l'omettre", async () => {
+    // Un brief silencieux sur les impayés faute d'import comptable laisserait
+    // croire qu'il n'y en a pas — le pire mensonge possible sur cet écran.
+    const res = await app.inject({
+      method: "GET",
+      url: "/brief",
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(Array.isArray(body.blindSpots)).toBe(true);
+    expect(["calme", "brief"]).toContain(body.kind);
+  });
+
+  it("un MEMBRE reçoit un brief sans montants, et on le lui dit", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/brief",
+      headers: { cookie: memberCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    const areas = body.blindSpots.map((spot: { area: string }) => spot.area);
+    expect(areas).toContain("montants");
+    // Aucune ligne financière ne doit avoir fuité.
+    const items = body.kind === "brief" ? body.items : [];
+    expect(
+      items.every((item: { kind: string }) =>
+        ["actions_a_valider", "documents_a_verifier", "stock_sous_seuil"].includes(item.kind),
+      ),
+    ).toBe(true);
+  });
+
+  it("une affaire en perte remonte en tête du brief du dirigeant", async () => {
+    // Le chantier « perdant » créé plus haut a une marge négative connue.
+    const res = await app.inject({
+      method: "GET",
+      url: "/brief",
+      headers: { cookie: ownerCookie },
+    });
+    const body = res.json();
+    expect(body.kind).toBe("brief");
+    const perte = body.items.find(
+      (item: { kind: string }) => item.kind === "affaire_en_perte",
+    );
+    expect(perte).toBeDefined();
+    expect(perte.severity).toBe("urgent");
+    // Le montant affiché est le PIRE, donc négatif.
+    expect(perte.amountCents).toBeLessThan(0);
+  });
+
+  it("module affaires éteint : le brief le DIT et ne prétend rien savoir", async () => {
+    await app.inject({
+      method: "PUT",
+      url: "/modules/affaires",
+      headers: { cookie: ownerCookie },
+      payload: { active: false },
+    });
+    const res = await app.inject({
+      method: "GET",
+      url: "/brief",
+      headers: { cookie: ownerCookie },
+    });
+    const body = res.json();
+    const areas = body.blindSpots.map((spot: { area: string }) => spot.area);
+    expect(areas).toContain("affaires");
+    const items = body.kind === "brief" ? body.items : [];
+    expect(items.some((item: { kind: string }) => item.kind === "affaire_en_perte")).toBe(false);
+
+    await app.inject({
+      method: "PUT",
+      url: "/modules/affaires",
+      headers: { cookie: ownerCookie },
+      payload: { active: true },
+    });
+  });
+});

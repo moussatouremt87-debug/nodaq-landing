@@ -52,7 +52,7 @@ describe("frontière du produit (pivot ADR-007)", () => {
     // l'a rejoint au ticket 4.1 : c'est le PIVOT du produit, et comme tout
     // rattachement est nullable, l'allumer n'impose aucune saisie à personne.
     const core = MODULES.filter((m) => m.defaultOn === "tous").map((m) => m.id).sort();
-    expect(core).toEqual(["affaires", "classeur", "rh"]);
+    expect(core).toEqual(["affaires", "brief", "classeur", "rh"]);
   });
 
   it("éteint n'est pas supprimé : chaque module hors socle garde son identité", () => {

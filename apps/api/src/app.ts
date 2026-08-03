@@ -12,6 +12,7 @@ import {
   withOps,
   withTenant,
 } from "@nodaq/db";
+import { BRIEF_RULES_VERSION, composeMorningBrief } from "./briefMatin.js";
 import {
   AFFAIRE_SUGGESTION_RULES_VERSION,
   buildSupplierHistory,
@@ -5047,6 +5048,159 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     } finally {
       await toolset?.close().catch(() => undefined);
     }
+  });
+
+  /*
+   * F5 — le brief du matin.
+   *
+   * Premier écran lu de la journée, sur un téléphone, avant le café. Tout est
+   * assemblé à partir de moteurs déterministes déjà testés — aucun LLM, aucun
+   * chiffre calculé ici.
+   *
+   * Ce qui n'a pas pu être regardé est RENDU (`blindSpots`) : un brief qui omet
+   * silencieusement les impayés parce qu'aucun facturier n'est connecté laisse
+   * croire qu'il n'y en a pas.
+   */
+  app.get("/brief", { preHandler: businessRoute }, async (request, reply) => {
+    void reply.header("cache-control", "private, no-store");
+    const isOwner = request.membershipRole === "owner";
+    const blindSpots: { area: string; why: string }[] = [];
+
+    const [affairesOn, stocksOn, classeurOn] = await Promise.all([
+      isModuleActive(request.tenantId, "affaires"),
+      isModuleActive(request.tenantId, "stocks"),
+      isModuleActive(request.tenantId, "classeur"),
+    ]);
+
+    const data = await withTenant(request.tenantId, async (tx) => {
+      const pendingActions = await tx.pendingAction.count({ where: { status: "pending" } });
+      const documentsAVerifier = classeurOn
+        ? await tx.classeurDocument.count({ where: { status: "a_verifier" } })
+        : null;
+
+      const profile = await tx.tenantProfile.findUnique({
+        where: { tenantId: request.tenantId },
+      });
+
+      // Les montants sont owner-only, comme partout ailleurs (4.1, cockpit).
+      if (!isOwner) {
+        return {
+          pendingActions,
+          documentsAVerifier,
+          affaires: null,
+          echeance: null,
+          impayes: null,
+          stock: stocksOn
+            ? await tx.$queryRaw<{ count: number }[]>`
+                SELECT count(*)::int AS count FROM stock_items
+                WHERE alert_threshold > 0 AND quantity <= alert_threshold`
+            : null,
+        };
+      }
+
+      const margins = affairesOn
+        ? await loadAffairesMargins(tx, profile?.hourlyCostCents ?? null)
+        : null;
+
+      // Impayés EXIGIBLES : la retenue de garantie est due mais pas exigible,
+      // et relancer dessus est la faute qui coûte un client (US-8).
+      const imports = await tx.fecImport.count();
+      const overdue =
+        imports === 0
+          ? null
+          : await tx.fecInvoice.findMany({
+              where: { settled: false, dueDate: { lt: new Date() } },
+              select: { residualCents: true },
+            });
+
+      const deadlines = await tx.taxDeadline.findMany({
+        where: { status: "prevu" },
+        orderBy: [{ dueDate: "asc" }],
+        take: 1,
+        select: { dueDate: true, amountCents: true },
+      });
+
+      return {
+        pendingActions,
+        documentsAVerifier,
+        affaires: margins,
+        echeance: deadlines[0] ?? null,
+        impayes: overdue,
+        stock: stocksOn
+          ? await tx.$queryRaw<{ count: number }[]>`
+              SELECT count(*)::int AS count FROM stock_items
+              WHERE alert_threshold > 0 AND quantity <= alert_threshold`
+          : null,
+      };
+    });
+
+    if (!affairesOn) blindSpots.push({ area: "affaires", why: "module désactivé" });
+    if (!stocksOn) blindSpots.push({ area: "stocks", why: "module désactivé" });
+    if (!classeurOn) blindSpots.push({ area: "classeur", why: "module désactivé" });
+    if (!isOwner) {
+      blindSpots.push({ area: "montants", why: "réservés au dirigeant" });
+    } else if (data.impayes === null) {
+      blindSpots.push({ area: "impayés", why: "aucun import comptable" });
+    }
+
+    // Affaires en perte : marge EXACTE négative, ou plafond négatif (« même au
+    // mieux, ce chantier perd »). Un plafond POSITIF ne dit rien et n'entre pas.
+    const losing = (data.affaires?.aSurveiller ?? []).filter((row) => {
+      if (row.margin.kind === "marge") return row.margin.marginCents < 0;
+      if (row.margin.kind === "marge_borne_superieure") return row.margin.upperBoundCents < 0;
+      return false;
+    });
+    const worstCents = losing.reduce((worst, row) => {
+      const value =
+        row.margin.kind === "marge"
+          ? row.margin.marginCents
+          : row.margin.kind === "marge_borne_superieure"
+            ? row.margin.upperBoundCents
+            : 0;
+      return Math.min(worst, value);
+    }, 0);
+    const overBudget = (data.affaires?.aSurveiller ?? []).filter(
+      (row) =>
+        (row.margin.kind === "marge" || row.margin.kind === "marge_borne_superieure") &&
+        (row.margin.budgetGap?.deltaCents ?? 0) > 0,
+    ).length;
+
+    const dayMs = 86_400_000;
+    const echeanceDays =
+      data.echeance === null
+        ? null
+        : Math.ceil((data.echeance.dueDate.getTime() - Date.now()) / dayMs);
+
+    const brief = composeMorningBrief({
+      pendingActions: data.pendingActions,
+      documentsAVerifier: data.documentsAVerifier ?? 0,
+      affairesEnPerte: data.affaires === null ? null : { count: losing.length, worstCents },
+      budgetsDepasses: data.affaires === null ? null : overBudget,
+      prochaineEcheance:
+        echeanceDays === null
+          ? null
+          : {
+              days: echeanceDays,
+              amountCents:
+                data.echeance?.amountCents === null || data.echeance?.amountCents === undefined
+                  ? null
+                  : Number(data.echeance.amountCents),
+            },
+      impayes:
+        data.impayes === null
+          ? null
+          : {
+              count: data.impayes.length,
+              totalCents: data.impayes.reduce(
+                (sum, invoice) => sum + Number(invoice.residualCents),
+                0,
+              ),
+            },
+      stockSousSeuil: data.stock === null ? null : (data.stock[0]?.count ?? 0),
+      blindSpots,
+    });
+
+    return { ...brief, version: BRIEF_RULES_VERSION };
   });
 
   /*

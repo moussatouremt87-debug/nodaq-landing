@@ -26,7 +26,7 @@ import type { Vertical } from "./regulatoryWatch.js";
  */
 
 /** Catalog snapshot date — bump on every module/defaults change. */
-export const MODULE_CATALOG_VERSION = "2026-08-03";
+export const MODULE_CATALOG_VERSION = "2026-08-04";
 
 export interface ModuleDefinition {
   id: string;
@@ -49,6 +49,18 @@ export interface ModuleDefinition {
 
 export const MODULES: readonly ModuleDefinition[] = [
   // ── SOCLE — l'assistant opérationnel quotidien ──────────────────────────
+  {
+    id: "brief",
+    title: "Brief du matin",
+    description:
+      "Ce qui a changé et ce qui vous attend, en trois lignes — assemblé à partir des " +
+      "écrans existants, sans rien recalculer.",
+    href: "/brief",
+    tools: [],
+    // Socle : c'est le premier écran de la journée. Il n'affiche que ce que
+    // les autres modules produisent, donc l'allumer n'impose rien.
+    defaultOn: "tous",
+  },
   {
     id: "affaires",
     title: "Affaires",
