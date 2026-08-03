@@ -328,7 +328,22 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // List = metadata ONLY: payloads carry confidential drafts/invoice data,
   // reserved to the owner-gated detail endpoint (RGPD audit 1.5 — the
   // `accountant` role is a delegated third party).
+  /**
+   * Budget de lecture des actions EN ATTENTE, indépendant de l'historique.
+   *
+   * Large à dessein : une file de validation qui tronque, c'est une décision
+   * qui n'est jamais prise. Une TPE de 3 à 15 salariés n'approchera pas cette
+   * borne — et si elle l'approchait, c'est la file qu'il faudrait repenser,
+   * pas la borne qu'il faudrait monter.
+   */
+  const PENDING_QUEUE_LIMIT = 500;
+  /** Historique décidé : borné, lui, parce qu'il ne fait que grandir. */
+  const DECIDED_HISTORY_LIMIT = 50;
+  /** Aperçu des actions sur une fiche affaire — le TOTAL est compté à part. */
+  const AFFAIRE_ACTIONS_LIMIT = 20;
+
   app.get("/pending-actions", { preHandler: businessRoute }, async (request) => {
+    const isOwner = request.membershipRole === "owner";
     // Opening the validation queue = the "actions" push events are SEEN:
     // counter resets, re-notification unlocked (anti-spam rule of 2.17).
     // AWAITED : en fire-and-forget, le marquage pouvait s'exécuter APRÈS un
@@ -336,22 +351,118 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     await markPushSeen(request.tenantId, request.authSession.user.id, "actions").catch(
       () => undefined,
     );
-    return withTenant(request.tenantId, (tx) =>
-      tx.pendingAction.findMany({
+    const select = {
+      id: true,
+      type: true,
+      status: true,
+      requestedBy: true,
+      validatedBy: true,
+      validatedAt: true,
+      createdAt: true,
+      // F6 — l'affaire concernée, OWNER SEULEMENT.
+      //
+      // La référence et le libellé d'un chantier ne sont pas secrets (tout
+      // membre lit déjà /affaires). Ce qui l'est, c'est l'ASSOCIATION : « une
+      // relance dort sur le chantier Bardin » se lit « Bardin ne paie pas ».
+      // Le lien porte donc la même sensibilité que le payload qu'il décrit —
+      // et il aurait été incohérent de réserver l'écriture au dirigeant tout
+      // en ouvrant la lecture à tous, dans le même diff.
+      ...(isOwner
+        ? { affaireId: true, affaire: { select: { reference: true, label: true, status: true } } }
+        : {}),
+    } as const;
+
+    return withTenant(request.tenantId, async (tx) => {
+      /*
+       * DEUX requêtes, et c'est la règle du ticket qui l'impose.
+       *
+       * Une seule requête bornée à 100 toutes statuts confondus faisait sortir
+       * une VIEILLE action en attente dès que 100 actions plus récentes —
+       * décidées comprises — existaient. Elle disparaissait aussi du badge de
+       * navigation, qui dérive de la même requête : indécidable, et en
+       * silence. Exactement ce que ce ticket dit interdire.
+       *
+       * Les actions en attente ont donc leur propre budget, indépendant de
+       * l'historique. Au-delà de PENDING_QUEUE_LIMIT la file tronquerait
+       * encore — un TPE n'y arrivera pas, mais la borne est écrite ici plutôt
+       * que promise absente.
+       */
+      const pending = await tx.pendingAction.findMany({
+        where: { status: "pending" },
         orderBy: { createdAt: "desc" },
-        take: 100,
-        select: {
-          id: true,
-          type: true,
-          status: true,
-          requestedBy: true,
-          validatedBy: true,
-          validatedAt: true,
-          createdAt: true,
-        },
-      }),
-    );
+        take: PENDING_QUEUE_LIMIT,
+        select,
+      });
+      const decided = await tx.pendingAction.findMany({
+        where: { status: { not: "pending" } },
+        orderBy: { createdAt: "desc" },
+        take: DECIDED_HISTORY_LIMIT,
+        select,
+      });
+      return [...pending, ...decided];
+    });
   });
+
+  /*
+   * Rattacher (ou détacher) une action à une affaire — F6.
+   *
+   * OWNER-ONLY, et pas par frilosité : le payload d'une action est owner-gated
+   * (1.5), donc un membre ne peut pas VOIR ce que l'action contient. Lui
+   * demander de la classer serait lui demander de classer à l'aveugle. C'est
+   * l'inverse de l'imputation d'une pièce (4.1), ouverte à tous parce que
+   * l'employé de terrain, lui, a la facture sous les yeux.
+   *
+   * `null` DÉTACHE : un rattachement se corrige, il ne se subit pas. Et le
+   * rattachement reste FACULTATIF de bout en bout — une action de frais
+   * généraux n'a pas de chantier.
+   *
+   * Modifiable tant que l'action est `pending` seulement, comme le brouillon :
+   * après décision, la ligne est une trace, et une trace ne se réécrit pas.
+   */
+  app.patch(
+    "/pending-actions/:id/affaire",
+    { preHandler: [...businessRoute, requireRole(["owner"])] },
+    async (request, reply) => {
+      const params = z.object({ id: Uuid }).safeParse(request.params);
+      if (!params.success) {
+        return reply.code(400).send({ error: "invalid pending action id" });
+      }
+      const body = z.object({ affaireId: Uuid.nullable() }).strict().safeParse(request.body);
+      if (!body.success) return reply.code(400).send({ error: "invalid affaire id" });
+
+      const outcome = await withTenant(request.tenantId, async (tx) => {
+        const action = await tx.pendingAction.findUnique({
+          where: { id: params.data.id },
+          select: { status: true },
+        });
+        if (!action) return { code: 404 as const, error: "pending action not found" };
+        if (action.status !== "pending") {
+          return { code: 409 as const, error: `already ${action.status}` };
+        }
+        if (body.data.affaireId !== null) {
+          // La clé composite refuserait déjà le croisement de tenants en base
+          // (deuxième couche). On vérifie d'abord pour rendre un 404 motivé
+          // plutôt qu'une erreur Prisma remontée en 500 — un refus est une
+          // RÉPONSE, pas un plantage.
+          const affaire = await tx.affaire.findUnique({
+            where: { id: body.data.affaireId },
+            select: { id: true },
+          });
+          if (!affaire) return { code: 404 as const, error: "affaire not found" };
+        }
+        const { count } = await tx.pendingAction.updateMany({
+          where: { id: params.data.id, status: "pending" },
+          data: { affaireId: body.data.affaireId },
+        });
+        if (count === 0) return { code: 409 as const, error: "already decided" };
+        return { code: 200 as const };
+      });
+      if (outcome.code !== 200) {
+        return reply.code(outcome.code).send({ error: outcome.error });
+      }
+      return reply.send({ id: params.data.id, affaireId: body.data.affaireId });
+    },
+  );
 
   app.get(
     "/pending-actions/:id",
@@ -5524,8 +5635,41 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         select: { id: true, fileName: true, docType: true, status: true, createdAt: true },
         orderBy: [{ createdAt: "desc" }],
       });
+      /*
+       * F6 — ce qui attend une DÉCISION sur ce chantier. OWNER SEULEMENT.
+       *
+       * Toute autre donnée financière de cette réponse est déjà gated (devis,
+       * budget, acomptes, marge) ; « une relance dort sur ce chantier » en dit
+       * autant qu'un montant : que ce client-là ne paie pas. Ne pas requêter
+       * du tout pour un membre, plutôt que filtrer après coup.
+       *
+       * Le TOTAL est compté à part : la liste est bornée, et afficher « (20) »
+       * pour un chantier qui en compte 30 serait un chiffre faux sur un écran
+       * qui prétend compter.
+       */
+      const pendingActions = isOwner
+        ? await tx.pendingAction.findMany({
+            where: { affaireId: affaire.id, status: "pending" },
+            select: { id: true, type: true, createdAt: true },
+            orderBy: [{ createdAt: "desc" }],
+            take: AFFAIRE_ACTIONS_LIMIT,
+          })
+        : [];
+      const pendingActionsTotal = isOwner
+        ? await tx.pendingAction.count({
+            where: { affaireId: affaire.id, status: "pending" },
+          })
+        : 0;
       const margin = await loadAffaireMargin(tx, affaire.id, profile?.hourlyCostCents ?? null);
-      return { affaire, imputations, documents, margin, profile };
+      return {
+        affaire,
+        imputations,
+        documents,
+        pendingActions,
+        pendingActionsTotal,
+        margin,
+        profile,
+      };
     });
 
     if (!result) return reply.code(404).send({ error: "affaire inconnue" });
@@ -5559,6 +5703,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         ...document,
         createdAt: document.createdAt.toISOString(),
       })),
+      actionsAValider: result.pendingActions.map((action) => ({
+        ...action,
+        createdAt: action.createdAt.toISOString(),
+      })),
+      // Le total RÉEL, à côté de la page rendue : sans lui, un chantier qui
+      // compte trente décisions en annoncerait vingt, sans un mot.
+      actionsAValiderTotal: result.pendingActionsTotal,
+      actionsAValiderRefus: isOwner ? null : "réservé au dirigeant",
       // Marge = donnée financière : owner uniquement, et le refus est MOTIVÉ.
       marge: isOwner ? (result.margin?.margin ?? null) : null,
       margeRefus: isOwner ? null : "réservé au dirigeant",

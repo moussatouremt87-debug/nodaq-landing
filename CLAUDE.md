@@ -133,6 +133,7 @@ Le détail vit dans `docs/` — **lis le doc du domaine avant d'y toucher**.
 | **Affaires** (pivot) : imputations, marge déterministe, vocabulaire | `apps/api/src/affaires.ts`, `packages/shared/src/affaireMargin.ts` | `affaires.md` |
 | Imputation suggérée (photo → affaire, **jamais écrite d'office**) | `apps/api/src/affaireSuggestion.ts` | `imputation-suggeree.md` |
 | Brief du matin (assemblage déterministe, angles morts DITS) | `apps/api/src/briefMatin.ts` | `brief-matin.md` |
+| File de validation (affaire + socle ; une action ne se masque jamais) | `apps/api/src/app.ts`, `packages/shared/src/pendingActionCatalog.ts` | `file-validation.md` |
 | Classeur photo + mémoire tenant | `apps/api/src/classeur*.ts` | `classeur.md` |
 | Équipe, plannings, performance horaire (**PII, owner-only**) | `apps/api/src` | `plannings-rh.md`, `performance-horaire.md` |
 | Import FEC (source de données) | `packages/fec` | `fec-import.md` |

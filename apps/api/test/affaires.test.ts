@@ -1233,3 +1233,248 @@ describe("F5 — le brief du matin", () => {
     });
   });
 });
+
+describe("F6 — la file de validation recentrée sur l'affaire", () => {
+  async function createPendingAction(): Promise<string> {
+    const created = await withTenant(orgA, (tx) =>
+      tx.pendingAction.create({
+        data: {
+          tenantId: orgA,
+          type: "send_dunning",
+          status: "pending",
+          payload: { draft: "Relance à relire" },
+        },
+      }),
+    );
+    return created.id;
+  }
+
+  it("une action sans chantier reste parfaitement valide", async () => {
+    // Règle de structure n°1 : tout rattachement est NULLABLE. Une action de
+    // frais généraux — essence, assurance — n'a pas de chantier, et c'est le
+    // cas majoritaire au démarrage.
+    await createPendingAction();
+    const res = await app.inject({
+      method: "GET",
+      url: "/pending-actions",
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const orphan = res.json().find((a: { affaireId: string | null }) => a.affaireId === null);
+    expect(orphan).toBeDefined();
+  });
+
+  it("rattachée, l'action DIT de quel chantier il s'agit", async () => {
+    // Sans ça, l'owner validait « Relance — Facture 2026-124 » sans savoir sur
+    // quel chantier, dans un produit dont l'affaire est le pivot.
+    const affaireId = await createAffaire({ label: "Toiture Bardin" });
+    const actionId = await createPendingAction();
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${actionId}/affaire`,
+      headers: { cookie: ownerCookie },
+      payload: { affaireId },
+    });
+    expect(patched.statusCode).toBe(200);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/pending-actions",
+      headers: { cookie: ownerCookie },
+    });
+    const line = res.json().find((a: { id: string }) => a.id === actionId);
+    expect(line.affaireId).toBe(affaireId);
+    expect(line.affaire.label).toBe("Toiture Bardin");
+    expect(line.affaire.reference).toMatch(/\d{4}-\d{3}/);
+  });
+
+  it("un rattachement se DÉTACHE : il se corrige, il ne se subit pas", async () => {
+    const affaireId = await createAffaire({ label: "Mauvais chantier" });
+    const actionId = await createPendingAction();
+    await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${actionId}/affaire`,
+      headers: { cookie: ownerCookie },
+      payload: { affaireId },
+    });
+    const detached = await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${actionId}/affaire`,
+      headers: { cookie: ownerCookie },
+      payload: { affaireId: null },
+    });
+    expect(detached.statusCode).toBe(200);
+    expect(detached.json().affaireId).toBeNull();
+  });
+
+  it("une affaire inconnue est un REFUS motivé, jamais un 500", async () => {
+    const actionId = await createPendingAction();
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${actionId}/affaire`,
+      headers: { cookie: ownerCookie },
+      payload: { affaireId: "11111111-1111-4111-8111-111111111111" },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toContain("affaire");
+  });
+
+  it("un MEMBRE ne classe pas ce qu'il ne peut pas lire", async () => {
+    // Le payload est owner-gated (1.5) : demander à un membre de ranger une
+    // action serait lui demander de la ranger à l'aveugle. C'est l'inverse de
+    // l'imputation d'une pièce (4.1), ouverte à tous parce que l'employé de
+    // terrain a la facture sous les yeux.
+    const affaireId = await createAffaire({ label: "Interdit au membre" });
+    const actionId = await createPendingAction();
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${actionId}/affaire`,
+      headers: { cookie: memberCookie },
+      payload: { affaireId },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("après décision, le rattachement ne se réécrit plus", async () => {
+    // Une ligne décidée est une TRACE, et une trace ne se réécrit pas — même
+    // règle que le brouillon.
+    const affaireId = await createAffaire({ label: "Déjà décidé" });
+    const actionId = await createPendingAction();
+    await withTenant(orgA, (tx) =>
+      tx.pendingAction.update({ where: { id: actionId }, data: { status: "executed" } }),
+    );
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${actionId}/affaire`,
+      headers: { cookie: ownerCookie },
+      payload: { affaireId },
+    });
+    expect(res.statusCode).toBe(409);
+  });
+
+  it("un MEMBRE ne voit PAS quel chantier porte une décision", async () => {
+    // L'association fuit ce que le montant fuirait : « une relance dort sur le
+    // chantier Bardin » se lit « Bardin ne paie pas ». Réserver l'ÉCRITURE au
+    // dirigeant tout en ouvrant la LECTURE à tous n'aurait eu aucun sens.
+    const affaireId = await createAffaire({ label: "Chantier discret" });
+    const actionId = await createPendingAction();
+    await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${actionId}/affaire`,
+      headers: { cookie: ownerCookie },
+      payload: { affaireId },
+    });
+
+    const asMember = await app.inject({
+      method: "GET",
+      url: "/pending-actions",
+      headers: { cookie: memberCookie },
+    });
+    const line = asMember.json().find((a: { id: string }) => a.id === actionId);
+    expect(line).toBeDefined();
+    expect(line.affaireId).toBeUndefined();
+    expect(line.affaire).toBeUndefined();
+
+    // Et sur la fiche : une liste vide AVEC son motif, jamais un vide muet.
+    const fiche = await app.inject({
+      method: "GET",
+      url: `/affaires/${affaireId}`,
+      headers: { cookie: memberCookie },
+    });
+    expect(fiche.json().actionsAValider).toHaveLength(0);
+    expect(fiche.json().actionsAValiderRefus).toBe("réservé au dirigeant");
+  });
+
+  it("la fiche du chantier montre ce qui attend une décision", async () => {
+    const affaireId = await createAffaire({ label: "Avec décisions" });
+    const actionId = await createPendingAction();
+    await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${actionId}/affaire`,
+      headers: { cookie: ownerCookie },
+      payload: { affaireId },
+    });
+    const res = await app.inject({
+      method: "GET",
+      url: `/affaires/${affaireId}`,
+      headers: { cookie: ownerCookie },
+    });
+    const actions = res.json().actionsAValider;
+    expect(actions).toHaveLength(1);
+    expect(actions[0].type).toBe("send_dunning");
+    // Métadonnées SEULEMENT : le brouillon reste derrière son endpoint owner.
+    expect(actions[0].payload).toBeUndefined();
+    // Le total est compté à part : afficher la longueur d'une liste bornée
+    // comme un compte exact serait un chiffre faux sur un écran qui compte.
+    expect(res.json().actionsAValiderTotal).toBe(1);
+    expect(res.json().actionsAValiderRefus).toBeNull();
+  });
+
+  it("une action en attente ne sort JAMAIS de la file, même noyée dans l'historique", async () => {
+    /*
+     * La borne de lecture portait sur TOUS les statuts, tri par date : une
+     * vieille action en attente sortait de la file dès qu'assez d'actions plus
+     * récentes — décidées comprises — existaient. Elle sortait aussi du badge
+     * de la nav, qui dérive de la même requête : indécidable, et en silence.
+     * C'est exactement ce que ce ticket dit interdire.
+     */
+    const ancienne = await createPendingAction();
+    await withTenant(orgA, (tx) =>
+      tx.pendingAction.update({
+        where: { id: ancienne },
+        data: { createdAt: new Date("2020-01-01") },
+      }),
+    );
+    // 120 décisions PLUS RÉCENTES — au-delà de l'ancienne borne unique de 100,
+    // et c'est ce nombre qui rend ce test probant : sous l'ancien code, les
+    // 100 lignes rendues étaient toutes des décisions, et l'action de 2020
+    // n'apparaissait nulle part.
+    await withTenant(orgA, (tx) =>
+      tx.pendingAction.createMany({
+        data: Array.from({ length: 120 }, () => ({
+          tenantId: orgA,
+          type: "book_invoice",
+          payload: {},
+          status: "executed",
+        })),
+      }),
+    );
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/pending-actions",
+      headers: { cookie: ownerCookie },
+    });
+    const ids = res.json().map((a: { id: string }) => a.id);
+    expect(ids).toContain(ancienne);
+  });
+
+  it("le rattachement d'une action ne bouge PAS la marge", async () => {
+    // Une décision n'est pas un coût. Si rattacher une relance changeait la
+    // marge du chantier, le chiffre le plus regardé du produit deviendrait
+    // faux au premier classement.
+    const affaireId = await createAffaire({
+      label: "Marge stable",
+      quotedAmountCents: 1_000_000,
+    });
+    const before = await app.inject({
+      method: "GET",
+      url: `/affaires/${affaireId}`,
+      headers: { cookie: ownerCookie },
+    });
+    const actionId = await createPendingAction();
+    await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${actionId}/affaire`,
+      headers: { cookie: ownerCookie },
+      payload: { affaireId },
+    });
+    const after = await app.inject({
+      method: "GET",
+      url: `/affaires/${affaireId}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(after.json().marge).toEqual(before.json().marge);
+    expect(after.json().invoicedCents).toBe(before.json().invoicedCents);
+  });
+});

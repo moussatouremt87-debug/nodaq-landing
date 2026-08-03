@@ -62,6 +62,16 @@ export const PendingActionSummary = z.object({
   validatedBy: z.string().nullable(),
   validatedAt: z.string().nullable(),
   createdAt: z.string(),
+  /**
+   * Chantier concerné (F6) — TOUJOURS nullable.
+   *
+   * Métadonnées seulement (référence, libellé, statut) : ce ne sont pas des
+   * montants, et tout membre voit déjà ses chantiers (4.1).
+   */
+  affaireId: z.string().nullable(),
+  affaire: z
+    .object({ reference: z.string(), label: z.string(), status: z.string() })
+    .nullable(),
 });
 export type PendingActionSummary = z.infer<typeof PendingActionSummary>;
 
@@ -123,6 +133,17 @@ export const updatePendingActionDraft = (id: string, draft: string): Promise<Dra
     method: "PATCH",
     body: JSON.stringify({ draft }),
   });
+
+/** Rattacher l'action à un chantier — ou l'en DÉTACHER avec `null` (F6). */
+export const setPendingActionAffaire = (
+  id: string,
+  affaireId: string | null,
+): Promise<{ id: string; affaireId: string | null }> =>
+  call(
+    z.object({ id: z.string(), affaireId: z.string().nullable() }),
+    `/pending-actions/${encodeURIComponent(id)}/affaire`,
+    { method: "PATCH", body: JSON.stringify({ affaireId }) },
+  );
 
 // Approval executes (ticket 1.6): the response carries the outcome fields.
 export const PendingActionDecision = z.object({
@@ -1663,6 +1684,20 @@ const AffaireDetail = z.object({
       createdAt: z.string(),
     }),
   ),
+  /**
+   * Ce qui attend une DÉCISION sur ce chantier (F6).
+   *
+   * Métadonnées seulement — jamais le payload, qui reste derrière son endpoint
+   * owner-gated. Une affaire dont la marge dérive pendant que trois relances
+   * dorment dans la file, c'est deux écrans qui savent chacun la moitié.
+   */
+  actionsAValider: z.array(
+    z.object({ id: z.string(), type: z.string(), createdAt: z.string() }),
+  ),
+  /** Total RÉEL — la liste ci-dessus est bornée. */
+  actionsAValiderTotal: z.number(),
+  /** Refus MOTIVÉ pour un membre, jamais une liste vide muette. */
+  actionsAValiderRefus: z.string().nullable(),
   marge: AffaireMarge.nullable(),
   margeRefus: z.string().nullable(),
   invoicedCents: z.number().nullable(),

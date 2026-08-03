@@ -13,6 +13,7 @@ import {
 import type { AffaireDetail, AffaireMarge } from "../../../lib/api";
 import { emitDomainEvent } from "../../../lib/freshness";
 import { useFreshness } from "../../../lib/useFreshness";
+import { actionTypeLabel, timeAgo } from "../../../lib/labels";
 import { affaireWords } from "@nodaq/shared";
 
 /*
@@ -293,6 +294,41 @@ export default function AffairePage() {
               </ul>
             )}
           </div>
+
+          {/* F6 — ce qui attend une DÉCISION sur ce chantier. Une marge qui
+              dérive pendant que trois relances dorment dans la file, c'est
+              deux écrans qui savent chacun la moitié de l'histoire. */}
+          {detail.actionsAValider.length > 0 && (
+            <div className="card" style={{ marginTop: 14 }}>
+              <span className="overline">
+                À valider sur {words.definite} ({detail.actionsAValiderTotal})
+              </span>
+              {/* Une liste tronquée qui affiche son total sans le dire ferait
+                  croire qu'on voit tout. */}
+              {detail.actionsAValiderTotal > detail.actionsAValider.length && (
+                <p className="hint">
+                  {detail.actionsAValider.length} affichées sur{" "}
+                  {detail.actionsAValiderTotal} — les autres sont dans la file.
+                </p>
+              )}
+              <ul className="device-list">
+                {detail.actionsAValider.map((action) => (
+                  <li key={action.id} className="device-row">
+                    <div>
+                      <strong>{actionTypeLabel(action.type)}</strong>
+                      <br />
+                      <span className="hint">{timeAgo(action.createdAt)}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              <p className="hint">
+                {/* Le contenu reste derrière la file : ici on dit QU'IL Y A
+                    quelque chose à décider, pas ce que c'est. */}
+                <Link href="/validation">Ouvrir la file de validation</Link>
+              </p>
+            </div>
+          )}
 
           {affaire.status !== "ARCHIVEE" && detail.amountsVisible && (
             <div className="card" style={{ marginTop: 14 }}>

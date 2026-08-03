@@ -1954,6 +1954,79 @@ describe("isolation tenant (RLS) — affaires et imputations (4.1)", () => {
     ).rejects.toThrow();
   });
 
+  it("test 7 quater (F6) — une action à valider ne peut pas viser l'affaire d'un AUTRE tenant", async () => {
+    // Même mécanisme que le test 7, sur le lien ajouté par F6. La RLS ne
+    // contraint que `tenant_id` : sans clé composite, la file de validation du
+    // tenant A pourrait pointer un chantier de B — un oracle d'existence sur
+    // les affaires du voisin, invisible en lecture.
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.pendingAction.create({
+          data: {
+            tenantId: tenantA,
+            type: "send_dunning",
+            payload: {},
+            affaireId: affaireBId,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 7 quinquies (F6) — le rattachement d'une action reste FACULTATIF", async () => {
+    // La règle de structure n°1 : tout rattachement est nullable, sans
+    // exception. Une action de frais généraux n'a pas de chantier, et c'est le
+    // cas majoritaire au démarrage — l'exiger casserait l'existant.
+    const created = await withTenant(tenantA, (tx) =>
+      tx.pendingAction.create({
+        data: { tenantId: tenantA, type: "send_dunning", payload: {} },
+      }),
+    );
+    expect(created.affaireId).toBeNull();
+    await withTenant(tenantA, (tx) => tx.pendingAction.delete({ where: { id: created.id } }));
+  });
+
+  it("test 7 sexies (F6) — supprimer une affaire DÉTACHE l'action, sans la détruire ni planter", async () => {
+    /*
+     * `ON DELETE SET NULL` sur une clé COMPOSITE annule TOUTES les colonnes
+     * référençantes, `tenant_id` compris — qui est NOT NULL. Écrite sans liste
+     * de colonnes, la contrainte se comportait donc en RESTRICT déguisé en
+     * 23502 : la suppression échouait, alors que la migration affirmait
+     * l'inverse. Ce test tient la promesse à la place du commentaire.
+     *
+     * L'enjeu n'est pas théorique : la cascade `tenants -> affaires` d'un
+     * effacement RGPD pouvait échouer là-dessus.
+     */
+    const jetable = await withTenant(tenantA, (tx) =>
+      tx.affaire.create({
+        data: { tenantId: tenantA, reference: "2026-777", label: "Jetable" },
+      }),
+    );
+    const action = await withTenant(tenantA, (tx) =>
+      tx.pendingAction.create({
+        data: {
+          tenantId: tenantA,
+          type: "send_dunning",
+          payload: {},
+          affaireId: jetable.id,
+        },
+      }),
+    );
+
+    await withTenant(tenantA, (tx) => tx.affaire.delete({ where: { id: jetable.id } }));
+
+    const after = await withTenant(tenantA, (tx) =>
+      tx.pendingAction.findUnique({ where: { id: action.id } }),
+    );
+    // La décision SURVIT, détachée : perdre un rattachement se répare, perdre
+    // une action en attente ne se répare pas.
+    expect(after).not.toBeNull();
+    expect(after?.affaireId).toBeNull();
+    expect(after?.tenantId).toBe(tenantA);
+
+    await withTenant(tenantA, (tx) => tx.pendingAction.delete({ where: { id: action.id } }));
+  });
+
   it("test 7 ter — un montant d'imputation NÉGATIF est refusé", async () => {
     // Un coût négatif fait une marge SUPÉRIEURE au devis, présentée comme
     // exacte : le chiffre flatteur et faux que ce ticket existe pour empêcher.

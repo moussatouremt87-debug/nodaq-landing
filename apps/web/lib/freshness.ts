@@ -85,7 +85,12 @@ export type DomainEvent =
 export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   // Une action préparée n'a encore rien écrit au métier : elle change la file
   // et le compteur du cockpit, rien d'autre.
-  "action.preparee": ["cockpit", "validation", "brief"],
+  //
+  // `affaires` depuis F6 : la fiche d'un chantier compte ce qui attend une
+  // décision dessus, et cet événement porte AUSSI le rattachement d'une action
+  // à un chantier. Sans lui, la fiche affichait « 2 à valider » alors que
+  // l'action venait d'être rattachée ailleurs.
+  "action.preparee": ["cockpit", "validation", "brief", "affaires"],
   // Une action VALIDÉE s'exécute. La liste suit ce que les exécuteurs écrivent
   // RÉELLEMENT (`apps/api/src/executors.ts`) : immobilisation, mouvement de
   // stock, avis client, contact prospect, dépôt de facture électronique — et
@@ -105,8 +110,11 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
     "prospects",
     "avis",
     "factures",
+    // F6 : décider fait sortir l'action du compteur « à valider » de la fiche
+    // du chantier auquel elle était rattachée.
+    "affaires",
   ],
-  "action.rejetee": ["nav", "cockpit", "validation", "brief"],
+  "action.rejetee": ["nav", "cockpit", "validation", "brief", "affaires"],
   // `validation` : au-delà du seuil de capitalisation, la pièce photographiée
   // fait naître une proposition d'immobilisation à valider (app.ts, classeur).
   // L'oublier laissait le badge de la nav faux après une photo de facture
@@ -219,6 +227,9 @@ export type MutationEffect = readonly DomainEvent[] | "selon_outils" | null;
 export const MUTATION_EFFECTS: Readonly<Record<string, MutationEffect>> = {
   // File de validation
   updatePendingActionDraft: ["action.preparee"],
+  // F6 — rattacher une action à un chantier périme la file ET la fiche du
+  // chantier (des deux côtés : celui qu'on quitte, celui qu'on rejoint).
+  setPendingActionAffaire: ["action.preparee"],
   decidePendingAction: ["action.validee", "action.rejetee"],
   // Connecteurs & sources de données
   connectConnector: ["connecteur.modifie"],
