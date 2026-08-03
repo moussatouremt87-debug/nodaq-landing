@@ -29,20 +29,36 @@ function runSeed(env: Record<string, string> = {}): void {
   });
 }
 
-/** État métier normalisé du tenant démo — sans ids ni timestamps générés. */
+/**
+ * État métier normalisé du tenant démo — sans ids ni timestamps générés.
+ *
+ * L'ordre est rendu TOTAL côté JS, et c'est le sujet : `orderBy: [{ type }]`
+ * ne départage pas trois `send_dunning`, donc Postgres pouvait rendre les
+ * mêmes lignes dans un ordre différent d'un seed à l'autre et faire échouer
+ * `toEqual` au hasard (issue #64). Un tri partiel dans un test de rejouabilité
+ * ne teste pas la rejouabilité : il teste la chance.
+ */
+function canonical(row: Record<string, unknown>): string {
+  return JSON.stringify(row, Object.keys(row).sort());
+}
+
 async function snapshot() {
   const tenant = await admin.tenant.findUniqueOrThrow({ where: { slug: DEMO_SLUG } });
   const pendingActions = await admin.pendingAction.findMany({
     where: { tenantId: tenant.id },
     select: { type: true, status: true, employee: true, payload: true },
-    orderBy: [{ type: "asc" }],
   });
   const connectors = await admin.connector.findMany({
     where: { tenantId: tenant.id },
     select: { type: true, status: true, credentialsRef: true },
-    orderBy: [{ type: "asc" }],
   });
-  return { name: tenant.name, pendingActions, connectors };
+  return {
+    name: tenant.name,
+    // Tri sur le CONTENU entier : deux lignes identiques sont interchangeables,
+    // deux lignes différentes sont toujours ordonnées de la même façon.
+    pendingActions: [...pendingActions].sort((a, b) => canonical(a).localeCompare(canonical(b))),
+    connectors: [...connectors].sort((a, b) => canonical(a).localeCompare(canonical(b))),
+  };
 }
 
 beforeAll(async () => {
