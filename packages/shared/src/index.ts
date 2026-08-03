@@ -59,3 +59,5 @@ export * from "./prospection.js";
 export * from "./costCategories.js";
 export * from "./receivableAccounts.js";
 export * from "./moduleCatalog.js";
+export * from "./affaireMargin.js";
+export * from "./affaireVocabulary.js";

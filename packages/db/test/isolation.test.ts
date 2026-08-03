@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { PrismaClient } from "@prisma/client";
-import { prisma, withTenant } from "../src/index.js";
+import { prisma, withTenant, nextAffaireReference } from "../src/index.js";
 import { createAdminClient } from "../src/admin.js";
 
 /**
@@ -63,6 +63,10 @@ let taxDeadlineAId: string;
 let taxDeadlineBId: string;
 let costEntryAId: string;
 let costEntryBId: string;
+let affaireAId: string;
+let affaireBId: string;
+let imputationAId: string;
+let imputationBId: string;
 let prospectAId: string;
 let prospectBId: string;
 let interactionAId: string;
@@ -102,6 +106,10 @@ beforeAll(async () => {
   await admin.prospect.deleteMany();
   await admin.prospectExclusion.deleteMany();
   await admin.costEntry.deleteMany();
+  // FK order (4.1) : imputations avant affaires, et le compteur ensuite.
+  await admin.affaireImputation.deleteMany();
+  await admin.affaire.deleteMany();
+  await admin.affaireCounter.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -690,6 +698,63 @@ beforeAll(async () => {
   );
   costEntryAId = costA.id;
   costEntryBId = costB.id;
+
+  // Affaires (4.1) : le pivot du produit. Le libellé d'un chantier et le nom
+  // du client sont des données commerciales — jamais de fuite entre tenants.
+  const affaireA = await withTenant(tenantA, (tx) =>
+    tx.affaire.create({
+      data: {
+        tenantId: tenantA,
+        reference: "2026-001",
+        label: "Rénovation cuisine",
+        clientName: "Client A",
+        status: "EN_COURS",
+        quotedAmountCents: 1_200_000n,
+      },
+    }),
+  );
+  const affaireB = await withTenant(tenantB, (tx) =>
+    tx.affaire.create({
+      data: {
+        tenantId: tenantB,
+        reference: "2026-001",
+        label: "Salle des fetes",
+        clientName: "Client B",
+        status: "EN_COURS",
+      },
+    }),
+  );
+  affaireAId = affaireA.id;
+  affaireBId = affaireB.id;
+
+  const imputationA = await withTenant(tenantA, (tx) =>
+    tx.affaireImputation.create({
+      data: {
+        tenantId: tenantA,
+        affaireId: affaireA.id,
+        targetType: "classeur_document",
+        targetId: classeurDocumentAId,
+        source: "MANUELLE",
+        amountCents: 45_000n,
+        amountBasis: "ht",
+      },
+    }),
+  );
+  const imputationB = await withTenant(tenantB, (tx) =>
+    tx.affaireImputation.create({
+      data: {
+        tenantId: tenantB,
+        affaireId: affaireB.id,
+        targetType: "transaction_bancaire",
+        targetId: "qonto-tx-b-001",
+        source: "MANUELLE",
+        amountCents: 89_000n,
+        amountBasis: "ttc",
+      },
+    }),
+  );
+  imputationAId = imputationA.id;
+  imputationBId = imputationB.id;
 
   // Prospects (2.12) : données personnelles de TIERS non clients. Les noms de
   // test restent fictifs — jamais de PII réelle dans un jeu de test.
@@ -1797,6 +1862,167 @@ describe("isolation tenant (RLS)", () => {
   });
 });
 
+describe("isolation tenant (RLS) — affaires et imputations (4.1)", () => {
+  it("test 1 (affaires) — withTenant(A) ne voit QUE le chantier de A", async () => {
+    const affaires = await withTenant(tenantA, (tx) => tx.affaire.findMany());
+    expect(affaires).toHaveLength(1);
+    expect(affaires[0]?.id).toBe(affaireAId);
+    // Le libellé du chantier du voisin est une information commerciale : savoir
+    // qu'un concurrent refait « la salle des fetes » a de la valeur.
+    expect(affaires.some((affaire) => affaire.label === "Salle des fetes")).toBe(false);
+  });
+
+  it("test 2 (affaires) — sans contexte tenant, aucune ligne", async () => {
+    expect(await prisma.affaire.findMany()).toHaveLength(0);
+    expect(await prisma.affaireImputation.findMany()).toHaveLength(0);
+  });
+
+  it("test 3 (affaires) — lire le chantier de B depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.affaire.findUnique({ where: { id: affaireBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 4 (affaires) — écrire chez B depuis le contexte A est refusé", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.affaire.create({
+          data: { tenantId: tenantB, reference: "2026-666", label: "Injection" },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 5 (affaires) — la MÊME référence chez deux tenants est légitime", async () => {
+    // L'unicité est PAR TENANT : deux artisans ont chacun leur « 2026-001 ».
+    // Une unicité globale ferait fuiter l'activité de l'un chez l'autre.
+    const a = await withTenant(tenantA, (tx) => tx.affaire.findUnique({ where: { id: affaireAId } }));
+    const b = await withTenant(tenantB, (tx) => tx.affaire.findUnique({ where: { id: affaireBId } }));
+    expect(a?.reference).toBe("2026-001");
+    expect(b?.reference).toBe("2026-001");
+  });
+
+  it("test 6 (imputations) — withTenant(A) ne voit QUE ses rattachements", async () => {
+    const imputations = await withTenant(tenantA, (tx) => tx.affaireImputation.findMany());
+    expect(imputations).toHaveLength(1);
+    expect(imputations[0]?.id).toBe(imputationAId);
+    // L'identifiant de transaction bancaire du voisin ne doit jamais paraître.
+    expect(imputations.some((i) => i.targetId === "qonto-tx-b-001")).toBe(false);
+  });
+
+  it("test 7 (imputations) — rattacher une pièce à l'affaire d'un AUTRE tenant est refusé EN BASE", async () => {
+    // Version précédente de ce test : elle réutilisait une cible DÉJÀ imputée,
+    // donc elle échouait sur l'index unique et passait policy désactivée — elle
+    // ne prouvait rien. Avec une cible NEUVE, seul le croisement de tenants
+    // peut faire échouer l'insertion.
+    //
+    // Et la RLS seule ne suffit pas ici : elle ne contraint que `tenant_id`,
+    // tandis que l'intégrité référentielle contourne la RLS par conception
+    // Postgres. C'est la clé étrangère COMPOSITE (tenant_id, affaire_id) qui
+    // rend le croisement impossible — la deuxième couche exigée par le CLAUDE.md.
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.affaireImputation.create({
+          data: {
+            tenantId: tenantA,
+            affaireId: affaireBId,
+            targetType: "charge",
+            targetId: "cible-neuve-jamais-imputee",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(imputationBId).toBeDefined();
+  });
+
+  it("test 7 bis — une affaire ne peut pas pointer le prospect d'un AUTRE tenant", async () => {
+    // Même mécanisme : sans clé composite, la FK acceptait le croisement, ce qui
+    // donnait un oracle d'existence et faisait qu'une suppression chez B
+    // modifiait une ligne de A.
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.affaire.create({
+          data: {
+            tenantId: tenantA,
+            reference: "2026-555",
+            label: "Prospect volé",
+            prospectId: prospectBId,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 7 ter — un montant d'imputation NÉGATIF est refusé", async () => {
+    // Un coût négatif fait une marge SUPÉRIEURE au devis, présentée comme
+    // exacte : le chiffre flatteur et faux que ce ticket existe pour empêcher.
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.affaireImputation.create({
+          data: {
+            tenantId: tenantA,
+            affaireId: affaireAId,
+            targetType: "charge",
+            targetId: "avoir-deguise",
+            amountCents: -500_000n,
+            amountBasis: "ht",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 8 (imputations) — une pièce ne peut pas être imputée DEUX fois en même temps", async () => {
+    // Sinon la même dépense compte dans deux chantiers, et les deux marges
+    // sont fausses — dans le sens flatteur, celui qu'on ne remarque pas.
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.affaireImputation.create({
+          data: {
+            tenantId: tenantA,
+            affaireId: affaireAId,
+            targetType: "classeur_document",
+            targetId: classeurDocumentAId,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 9 (imputations) — un montant sans base (HT/TTC) est refusé par la base", async () => {
+    // Un nombre dont on ignore ce qu'il mesure finirait additionné à tort.
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.affaireImputation.create({
+          data: {
+            tenantId: tenantA,
+            affaireId: affaireAId,
+            targetType: "charge",
+            targetId: "charge-sans-base",
+            amountCents: 1_000n,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 10 (affaires) — un statut inconnu est refusé par le CHECK", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.affaire.create({
+          data: {
+            tenantId: tenantA,
+            reference: "2026-777",
+            label: "Statut inventé",
+            status: "TERMINE_PEUT_ETRE",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+});
+
 describe("isolation tenant (RLS) — cost_entries (2.8)", () => {
   it("test 1 (cost_entries) — withTenant(A) ne voit QUE la charge de A", async () => {
     const costs = await withTenant(tenantA, (tx) => tx.costEntry.findMany());
@@ -1957,6 +2183,49 @@ describe("isolation tenant (RLS) — prospects (2.12)", () => {
 });
 
 describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", () => {
+  it("policy désactivée sur affaires => la fuite se produit aussi (les chantiers des deux tenants)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "affaires" DISABLE ROW LEVEL SECURITY`);
+    try {
+      const leaked = await withTenant(tenantA, (tx) => tx.affaire.findMany());
+      expect(leaked.some((affaire) => affaire.tenantId === tenantB)).toBe(true);
+      expect((await prisma.affaire.findMany()).length).toBeGreaterThan(1);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "affaires" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "affaires" FORCE ROW LEVEL SECURITY`);
+    }
+    const affaires = await withTenant(tenantB, (tx) => tx.affaire.findMany());
+    expect(affaires).toHaveLength(1);
+  });
+
+  it("policy désactivée sur affaire_imputations => la fuite se produit aussi (les pièces rattachées)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "affaire_imputations" DISABLE ROW LEVEL SECURITY`);
+    try {
+      const leaked = await withTenant(tenantA, (tx) => tx.affaireImputation.findMany());
+      expect(leaked.some((imputation) => imputation.tenantId === tenantB)).toBe(true);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "affaire_imputations" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "affaire_imputations" FORCE ROW LEVEL SECURITY`);
+    }
+    const imputations = await withTenant(tenantB, (tx) => tx.affaireImputation.findMany());
+    expect(imputations).toHaveLength(1);
+  });
+
+  it("policy désactivée sur affaire_counters => le compteur du voisin devient lisible ET incrémentable", async () => {
+    // Le pire n'est pas de LIRE le nombre de chantiers du voisin : c'est de
+    // l'incrémenter. Sa numérotation sauterait sans explication possible.
+    await withTenant(tenantB, (tx) => nextAffaireReference(tx, tenantB, 2099));
+    await admin.$executeRawUnsafe(`ALTER TABLE "affaire_counters" DISABLE ROW LEVEL SECURITY`);
+    try {
+      const leaked = await withTenant(tenantA, (tx) => tx.affaireCounter.findMany());
+      expect(leaked.some((counter) => counter.tenantId === tenantB)).toBe(true);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "affaire_counters" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "affaire_counters" FORCE ROW LEVEL SECURITY`);
+    }
+    const counters = await withTenant(tenantA, (tx) => tx.affaireCounter.findMany());
+    expect(counters.every((counter) => counter.tenantId === tenantA)).toBe(true);
+  });
+
   it("policy désactivée sur cost_entries => la fuite se produit aussi (les charges des deux tenants)", async () => {
     await admin.$executeRawUnsafe(`ALTER TABLE "cost_entries" DISABLE ROW LEVEL SECURITY`);
     try {

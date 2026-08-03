@@ -8,12 +8,15 @@ import {
   deleteClasseurDocument,
   getClasseurCandidates,
   getClasseurMemory,
+  imputeToAffaire,
+  listAffaires,
   listClasseurDocuments,
   matchClasseurDocument,
   uploadClasseurDocument,
 } from "../../lib/api";
 import { emitDomainEvent } from "../../lib/freshness";
 import type {
+  Affaire,
   ClasseurCorrection,
   ClasseurDocument,
   ClasseurMemory,
@@ -88,10 +91,17 @@ export default function ClasseurPage() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const selectedRef = useRef<string | null>(null);
+  // Affaires ouvertes, pour le rattachement en un geste (4.1). La liste est
+  // vide et inoffensive si le module est éteint ou s'il n'y a aucune affaire :
+  // le classeur fonctionne exactement comme avant.
+  const [affaires, setAffaires] = useState<Affaire[]>([]);
 
   const selected = documents.find((d) => d.id === selectedId) ?? null;
 
   const refresh = useCallback(() => {
+    listAffaires({ statut: "EN_COURS" })
+      .then((state) => setAffaires(state.affaires))
+      .catch(() => setAffaires([]));
     getClasseurMemory()
       .then(setMemory)
       .catch(() => undefined);
@@ -194,6 +204,37 @@ export default function ClasseurPage() {
       setNotice(transactionId ? "Document rapproché de la transaction." : "Rapprochement retiré.");
     } catch {
       setNotice("Échec du rapprochement.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function imputer(affaireId: string): Promise<void> {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      await imputeToAffaire(affaireId, {
+        targetType: "classeur_document",
+        targetId: selected.id,
+        // Le classeur ne connaît que le TTC : on le DIT au lieu de le convertir
+        // en HT avec un taux supposé — le calcul de marge tient les deux à part.
+        ...(selected.extraction?.totalInclTax !== null &&
+        selected.extraction?.totalInclTax !== undefined
+          ? {
+              amountCents: Math.round(selected.extraction.totalInclTax * 100),
+              amountBasis: "ttc" as const,
+            }
+          : {}),
+      });
+      refresh();
+      emitDomainEvent("affaire.imputee");
+      setNotice("Pièce rattachée.");
+    } catch (error) {
+      setNotice(
+        error instanceof ApiError && error.status === 409
+          ? "Cette pièce est déjà rattachée à une autre affaire."
+          : "Rattachement impossible.",
+      );
     } finally {
       setBusy(false);
     }
@@ -420,6 +461,45 @@ export default function ClasseurPage() {
               <button className="danger" disabled={busy} onClick={() => void remove()}>
                 Supprimer
               </button>
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <span className="overline">Affaire</span>
+              {selected.affaireId ? (
+                <p className="hint">
+                  Rattachée —{" "}
+                  <a href={`/affaires/${selected.affaireId}`}>ouvrir la fiche</a> pour la détacher.
+                </p>
+              ) : affaires.length === 0 ? (
+                <p className="hint">
+                  {/* Aucune affaire ouverte : le classeur ne change pas de
+                      comportement pour autant — le rattachement est facultatif. */}
+                  Aucune affaire en cours. Une pièce sans affaire est parfaitement normale.
+                </p>
+              ) : (
+                <>
+                  <p className="hint" style={{ margin: "4px 0 8px" }}>
+                    Rattacher cette pièce à une affaire en cours. Le montant part en TTC (le
+                    classeur ne connaît pas le HT) : le calcul de marge le tient à part.
+                  </p>
+                  <select
+                    disabled={busy}
+                    defaultValue=""
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      event.target.value = "";
+                      if (value) void imputer(value);
+                    }}
+                  >
+                    <option value="">Choisir une affaire…</option>
+                    {affaires.map((affaire) => (
+                      <option key={affaire.id} value={affaire.id}>
+                        {affaire.reference} · {affaire.label}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              )}
             </div>
 
             {isOwner && (

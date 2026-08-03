@@ -75,6 +75,7 @@ const ICONS: Record<string, ReactNode> = {
 
 const LINKS = [
   { href: "/", label: "Cockpit", icon: "cockpit" },
+  { href: "/affaires", label: "Affaires", icon: "cockpit" },
   { href: "/chat", label: "Employé Compta", icon: "employes" },
   { href: "/classeur", label: "Classeur", icon: "classeur" },
   { href: "/stocks", label: "Stocks", icon: "stocks" },
@@ -97,6 +98,7 @@ const LINKS = [
 
 const TITLES: Record<string, string> = {
   "/": "Cockpit",
+  "/affaires": "Affaires",
   "/chat": "Employé Compta",
   "/classeur": "Classeur",
   "/stocks": "Stocks",

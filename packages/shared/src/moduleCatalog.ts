@@ -26,7 +26,7 @@ import type { Vertical } from "./regulatoryWatch.js";
  */
 
 /** Catalog snapshot date — bump on every module/defaults change. */
-export const MODULE_CATALOG_VERSION = "2026-08-02";
+export const MODULE_CATALOG_VERSION = "2026-08-03";
 
 export interface ModuleDefinition {
   id: string;
@@ -49,6 +49,21 @@ export interface ModuleDefinition {
 
 export const MODULES: readonly ModuleDefinition[] = [
   // ── SOCLE — l'assistant opérationnel quotidien ──────────────────────────
+  {
+    id: "affaires",
+    title: "Affaires",
+    description:
+      "Chantiers, événements, interventions, missions : les pièces s'y rattachent, " +
+      "et la marge se lit pendant que le travail est en cours. Le mot affiché vient " +
+      "du vertical.",
+    href: "/affaires",
+    tools: [],
+    // Pivot ADR-007 : l'affaire est le PIVOT du produit, pas une option. Elle
+    // est donc au socle — et comme tout rattachement est nullable, l'allumer
+    // ne change rien pour un tenant qui ne s'en sert pas : il voit une page de
+    // plus, jamais une saisie de plus.
+    defaultOn: "tous",
+  },
   {
     id: "classeur",
     title: "Classeur photo",

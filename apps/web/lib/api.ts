@@ -324,6 +324,8 @@ export const ClasseurDocument = z.object({
     .nullable()
     .optional(),
   matchedTransactionId: z.string().nullable(),
+  /// Rattachement à une affaire (4.1) — nullable, et le reste la plupart du temps.
+  affaireId: z.string().nullable().optional(),
   matchedAt: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -1534,6 +1536,190 @@ export const draftQuoteFromEmail = (
     method: "POST",
     body: JSON.stringify({ emailBody, ...(from ? { from } : {}) }),
   });
+
+/*
+ * Affaires (4.1) — le pivot du produit.
+ *
+ * Les montants sont NULL pour un membre (l'API les retire, elle ne les masque
+ * pas côté écran) : `amountsVisible` dit lequel des deux cas on regarde, pour
+ * qu'un tiret ne se lise jamais comme « zéro euro ».
+ */
+export const Affaire = z.object({
+  id: z.string(),
+  reference: z.string(),
+  label: z.string(),
+  clientName: z.string().nullable(),
+  status: z.string(),
+  address: z.string().nullable(),
+  quotedAmountCents: z.number().nullable(),
+  estimatedHours: z.number().nullable(),
+  hoursWorked: z.number().nullable(),
+  estimatedMaterialCents: z.number().nullable(),
+  depositsCents: z.number().nullable(),
+  retentionRateBps: z.number().nullable(),
+  retentionReleaseDate: z.string().nullable(),
+  startDate: z.string().nullable(),
+  plannedEndDate: z.string().nullable(),
+  actualEndDate: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type Affaire = z.infer<typeof Affaire>;
+
+const BudgetGap = z.object({ deltaCents: z.number(), deltaBps: z.number() });
+
+/**
+ * Marge — UNION DISCRIMINÉE, transportée telle quelle depuis le moteur.
+ * L'écran choisit son rendu sur `kind` : il ne peut pas afficher une marge qui
+ * n'existe pas, parce que le champ n'est pas là.
+ */
+export const AffaireMarge = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("donnees_insuffisantes"),
+    materialCents: z.number(),
+    subcontractCents: z.number(),
+    ttcOnlyCents: z.number(),
+    ttcOnlyCount: z.number(),
+    unknownAmountCount: z.number(),
+    depositsCents: z.number(),
+    retentionCents: z.number(),
+    missing: z.array(z.string()),
+  }),
+  z.object({
+    kind: z.literal("couts_seuls"),
+    materialCents: z.number(),
+    subcontractCents: z.number(),
+    ttcOnlyCents: z.number(),
+    ttcOnlyCount: z.number(),
+    unknownAmountCount: z.number(),
+    depositsCents: z.number(),
+    retentionCents: z.number(),
+    missing: z.array(z.string()),
+  }),
+  z.object({
+    kind: z.literal("marge"),
+    materialCents: z.number(),
+    subcontractCents: z.number(),
+    ttcOnlyCents: z.number(),
+    ttcOnlyCount: z.number(),
+    unknownAmountCount: z.number(),
+    depositsCents: z.number(),
+    retentionCents: z.number(),
+    labourCents: z.number(),
+    totalCostCents: z.number(),
+    marginCents: z.number(),
+    marginBps: z.number().nullable(),
+    remainingToInvoiceCents: z.number().nullable(),
+    budgetGap: BudgetGap.nullable(),
+    missing: z.array(z.string()),
+  }),
+  z.object({
+    kind: z.literal("marge_borne_superieure"),
+    materialCents: z.number(),
+    subcontractCents: z.number(),
+    ttcOnlyCents: z.number(),
+    ttcOnlyCount: z.number(),
+    unknownAmountCount: z.number(),
+    depositsCents: z.number(),
+    retentionCents: z.number(),
+    upperBoundCents: z.number(),
+    remainingToInvoiceCents: z.number().nullable(),
+    budgetGap: BudgetGap.nullable(),
+    missing: z.array(z.string()),
+  }),
+]);
+export type AffaireMarge = z.infer<typeof AffaireMarge>;
+
+export const AffaireImputation = z.object({
+  id: z.string(),
+  targetType: z.string(),
+  targetId: z.string(),
+  source: z.string(),
+  subcontract: z.boolean(),
+  amountCents: z.number().nullable(),
+  amountBasis: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type AffaireImputation = z.infer<typeof AffaireImputation>;
+
+const AffaireList = z.object({
+  affaires: z.array(Affaire),
+  vertical: z.string().nullable(),
+  amountsVisible: z.boolean(),
+});
+export type AffaireList = z.infer<typeof AffaireList>;
+
+const AffaireDetail = z.object({
+  affaire: Affaire,
+  vertical: z.string().nullable(),
+  amountsVisible: z.boolean(),
+  hourlyCostKnown: z.boolean(),
+  imputations: z.array(AffaireImputation),
+  documents: z.array(
+    z.object({
+      id: z.string(),
+      fileName: z.string(),
+      docType: z.string(),
+      status: z.string(),
+      createdAt: z.string(),
+    }),
+  ),
+  marge: AffaireMarge.nullable(),
+  margeRefus: z.string().nullable(),
+  invoicedCents: z.number().nullable(),
+});
+export type AffaireDetail = z.infer<typeof AffaireDetail>;
+
+export const listAffaires = (options?: {
+  statut?: string;
+  inclureArchivees?: boolean;
+}): Promise<AffaireList> => {
+  const params = new URLSearchParams();
+  if (options?.statut) params.set("statut", options.statut);
+  if (options?.inclureArchivees) params.set("inclureArchivees", "true");
+  const query = params.toString();
+  return call(AffaireList, `/affaires${query ? `?${query}` : ""}`);
+};
+
+export const getAffaire = (id: string): Promise<AffaireDetail> =>
+  call(AffaireDetail, `/affaires/${encodeURIComponent(id)}`);
+
+export const createAffaire = (input: Record<string, unknown>): Promise<Affaire> =>
+  call(Affaire, "/affaires", { method: "POST", body: JSON.stringify(input) });
+
+export const updateAffaire = (id: string, input: Record<string, unknown>): Promise<Affaire> =>
+  call(Affaire, `/affaires/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+
+/** Archiver — il n'existe PAS de suppression, et ce n'est pas un oubli. */
+export const archiveAffaire = (id: string): Promise<Affaire> =>
+  call(Affaire, `/affaires/${encodeURIComponent(id)}/archiver`, { method: "POST", body: "{}" });
+
+export const imputeToAffaire = (
+  affaireId: string,
+  input: {
+    targetType: string;
+    targetId: string;
+    amountCents?: number | null;
+    amountBasis?: "ht" | "ttc" | null;
+    subcontract?: boolean;
+  },
+): Promise<{ id: string }> =>
+  call(z.object({ id: z.string() }), `/affaires/${encodeURIComponent(affaireId)}/imputations`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+export const removeImputation = (
+  affaireId: string,
+  imputationId: string,
+): Promise<{ revoked: boolean }> =>
+  call(
+    z.object({ revoked: z.boolean() }),
+    `/affaires/${encodeURIComponent(affaireId)}/imputations/${encodeURIComponent(imputationId)}`,
+    { method: "DELETE" },
+  );
 
 /** Formats integer cents as French euros (tabular-friendly). */
 export function formatEuroCents(cents: number): string {

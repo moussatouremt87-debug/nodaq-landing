@@ -4,7 +4,24 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
-import { prisma, Prisma, resolveWebhookEndpoint, withOps, withTenant } from "@nodaq/db";
+import {
+  nextAffaireReference,
+  prisma,
+  Prisma,
+  resolveWebhookEndpoint,
+  withOps,
+  withTenant,
+} from "@nodaq/db";
+import {
+  AFFAIRE_STATUSES,
+  AffaireCreateInput,
+  AffaireImputeInput,
+  AffaireUpdateInput,
+  imputationAmountIsCoherent,
+  loadAffaireMargin,
+  serializeAffaire,
+  toPrismaData,
+} from "./affaires.js";
 import { deriveCharges, deriveFixedAssets, deriveReceivables, parseFec } from "@nodaq/fec";
 import {
   aggregateEReporting,
@@ -1168,6 +1185,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     learned: true,
     matchedTransactionId: true,
     matchedAt: true,
+    // Sans lui, l'écran classeur ne savait jamais qu'une pièce était déjà
+    // rattachée : il reproposait de la rattacher, et l'utilisateur récupérait
+    // un 409 qui parlait d'une « autre » affaire — souvent la même.
+    affaireId: true,
     createdAt: true,
     updatedAt: true,
   } as const; // jamais `photo` dans une liste — servie par la route dédiée
@@ -1640,9 +1661,17 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     { preHandler: [...businessRoute, requireRole(["owner"])] },
     async (request, reply) => {
       const { id } = z.object({ id: Uuid }).parse(request.params);
-      const { count } = await withTenant(request.tenantId, (tx) =>
-        tx.classeurDocument.deleteMany({ where: { id, tenantId: request.tenantId } }),
-      );
+      const { count } = await withTenant(request.tenantId, async (tx) => {
+        // Effacer la pièce (art. 17) doit RÉVOQUER son imputation : sinon la
+        // fiche d'affaire continue d'afficher « Document du classeur — 450 € »
+        // pour une pièce disparue, donc un coût que plus personne ne peut
+        // vérifier. La ligne d'imputation reste, révoquée : c'est la trace.
+        await tx.affaireImputation.updateMany({
+          where: { targetType: "classeur_document", targetId: id, revokedAt: null },
+          data: { revokedAt: new Date(), revokedBy: request.authSession.user.id },
+        });
+        return tx.classeurDocument.deleteMany({ where: { id, tenantId: request.tenantId } });
+      });
       if (count === 0) return reply.code(404).send({ error: "not found" });
       return reply.code(204).send();
     },
@@ -4999,6 +5028,330 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       await toolset?.close().catch(() => undefined);
     }
   });
+
+  /*
+   * ─────────────────────────────────────────────────────────────────────────
+   * AFFAIRES (ticket 4.1) — le pivot du produit.
+   *
+   * Lecture et imputation sont ouvertes à TOUS LES MEMBRES : c'est l'employé de
+   * terrain qui photographie une facture et la rattache au chantier, et lui
+   * interdire l'imputation viderait la promesse du produit. Les MONTANTS, eux,
+   * restent owner-only — même règle que le cockpit et la marge.
+   * ─────────────────────────────────────────────────────────────────────────
+   */
+
+  app.get("/affaires", { preHandler: businessRoute }, async (request, reply) => {
+    void reply.header("cache-control", "private, no-store");
+    const query = z
+      .object({
+        statut: z.enum(AFFAIRE_STATUSES).optional(),
+        // Les archivées sont RANGÉES, pas supprimées : on ne les montre que si
+        // on les demande.
+        inclureArchivees: z.enum(["true", "false"]).optional(),
+      })
+      .safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send({ error: "invalid query" });
+
+    const includeArchived = query.data.inclureArchivees === "true";
+    const where = query.data.statut
+      ? { status: query.data.statut }
+      : includeArchived
+        ? {}
+        : { status: { not: "ARCHIVEE" } };
+
+    const { rows, profile } = await withTenant(request.tenantId, async (tx) => ({
+      rows: await tx.affaire.findMany({ where, orderBy: [{ createdAt: "desc" }] }),
+      profile: await tx.tenantProfile.findUnique({ where: { tenantId: request.tenantId } }),
+    }));
+
+    const isOwner = request.membershipRole === "owner";
+    return {
+      affaires: rows.map((affaire) => {
+        const serialized = serializeAffaire(affaire);
+        // Un membre voit ses chantiers et peut y rattacher des pièces ; il n'en
+        // voit pas les montants.
+        return isOwner
+          ? serialized
+          : {
+              ...serialized,
+              quotedAmountCents: null,
+              estimatedMaterialCents: null,
+              depositsCents: null,
+            };
+      }),
+      // Le mot vient du vertical, pas du code — l'écran l'affiche tel quel.
+      vertical: profile?.vertical ?? null,
+      amountsVisible: isOwner,
+    };
+  });
+
+  app.post("/affaires", { preHandler: ownerRoute }, async (request, reply) => {
+    const body = AffaireCreateInput.safeParse(request.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: "invalid body" });
+
+    const year = new Date().getUTCFullYear();
+    const created = await withTenant(request.tenantId, async (tx) => {
+      // `prospectId` vient du client : il se contrôle contre CE tenant avant
+      // d'être écrit. La clé étrangère composite l'empêche désormais en base,
+      // mais un identifiant étranger doit produire un refus clair, pas une
+      // erreur d'intégrité.
+      if (body.data.prospectId) {
+        const prospect = await tx.prospect.findUnique({
+          where: { id: body.data.prospectId },
+          select: { id: true },
+        });
+        if (!prospect) return null;
+      }
+      // La référence est réservée DANS la transaction de création : une
+      // création qui échoue rend son numéro, deux créations simultanées n'ont
+      // jamais la même.
+      const reference = await nextAffaireReference(tx, request.tenantId, year);
+      return tx.affaire.create({
+        data: {
+          tenantId: request.tenantId,
+          reference,
+          ...toPrismaData(body.data),
+          label: body.data.label,
+        },
+      });
+    });
+    if (!created) return reply.code(404).send({ error: "prospect inconnu" });
+    void reply.header("cache-control", "private, no-store");
+    return reply.code(201).send(serializeAffaire(created));
+  });
+
+  app.get("/affaires/:id", { preHandler: businessRoute }, async (request, reply) => {
+    void reply.header("cache-control", "private, no-store");
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid id" });
+
+    const isOwner = request.membershipRole === "owner";
+    const result = await withTenant(request.tenantId, async (tx) => {
+      const affaire = await tx.affaire.findUnique({ where: { id: params.data.id } });
+      if (!affaire) return null;
+      const profile = await tx.tenantProfile.findUnique({
+        where: { tenantId: request.tenantId },
+      });
+      const imputations = await tx.affaireImputation.findMany({
+        where: { affaireId: affaire.id, revokedAt: null },
+        orderBy: [{ createdAt: "desc" }],
+      });
+      const documents = await tx.classeurDocument.findMany({
+        where: { affaireId: affaire.id },
+        select: { id: true, fileName: true, docType: true, status: true, createdAt: true },
+        orderBy: [{ createdAt: "desc" }],
+      });
+      const margin = await loadAffaireMargin(tx, affaire.id, profile?.hourlyCostCents ?? null);
+      return { affaire, imputations, documents, margin, profile };
+    });
+
+    if (!result) return reply.code(404).send({ error: "affaire inconnue" });
+
+    return {
+      affaire: isOwner
+        ? serializeAffaire(result.affaire)
+        : {
+            ...serializeAffaire(result.affaire),
+            quotedAmountCents: null,
+            estimatedMaterialCents: null,
+            depositsCents: null,
+          },
+      vertical: result.profile?.vertical ?? null,
+      amountsVisible: isOwner,
+      // Le coût horaire manquant est la cause n°1 d'une marge en borne
+      // supérieure : l'écran doit pouvoir le DIRE et proposer de le saisir.
+      hourlyCostKnown: (result.profile?.hourlyCostCents ?? null) !== null,
+      imputations: result.imputations.map((imputation) => ({
+        id: imputation.id,
+        targetType: imputation.targetType,
+        targetId: imputation.targetId,
+        source: imputation.source,
+        subcontract: imputation.subcontract,
+        amountCents:
+          isOwner && imputation.amountCents !== null ? Number(imputation.amountCents) : null,
+        amountBasis: imputation.amountBasis,
+        createdAt: imputation.createdAt.toISOString(),
+      })),
+      documents: result.documents.map((document) => ({
+        ...document,
+        createdAt: document.createdAt.toISOString(),
+      })),
+      // Marge = donnée financière : owner uniquement, et le refus est MOTIVÉ.
+      marge: isOwner ? (result.margin?.margin ?? null) : null,
+      margeRefus: isOwner ? null : "réservé au dirigeant",
+      invoicedCents: isOwner ? (result.margin?.invoicedCents ?? 0) : null,
+    };
+  });
+
+  app.patch("/affaires/:id", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid id" });
+    const body = AffaireUpdateInput.safeParse(request.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: "invalid body" });
+
+    const updated = await withTenant(request.tenantId, async (tx) => {
+      const existing = await tx.affaire.findUnique({ where: { id: params.data.id } });
+      if (!existing) return null;
+      if (body.data.prospectId) {
+        const prospect = await tx.prospect.findUnique({
+          where: { id: body.data.prospectId },
+          select: { id: true },
+        });
+        if (!prospect) return null;
+      }
+      return tx.affaire.update({ where: { id: params.data.id }, data: toPrismaData(body.data) });
+    });
+    if (!updated) return reply.code(404).send({ error: "affaire ou prospect inconnu" });
+    // Ces réponses portent le nom du client et les montants : jamais en cache.
+    void reply.header("cache-control", "private, no-store");
+    return serializeAffaire(updated);
+  });
+
+  // PAS de DELETE : des pièces comptables sont rattachées à une affaire, et une
+  // suppression les orphelinerait ou, pire, les emporterait. Archiver la range
+  // sans rien détacher — c'est la seule sortie prévue.
+  app.post("/affaires/:id/archiver", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid id" });
+    const archived = await withTenant(request.tenantId, async (tx) => {
+      const existing = await tx.affaire.findUnique({ where: { id: params.data.id } });
+      if (!existing) return null;
+      return tx.affaire.update({ where: { id: params.data.id }, data: { status: "ARCHIVEE" } });
+    });
+    if (!archived) return reply.code(404).send({ error: "affaire inconnue" });
+    void reply.header("cache-control", "private, no-store");
+    return serializeAffaire(archived);
+  });
+
+  app.post("/affaires/:id/imputations", { preHandler: businessRoute }, async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid id" });
+    const body = AffaireImputeInput.safeParse(request.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: "invalid body" });
+    // Un montant sans base (HT/TTC) est un nombre dont on ignore ce qu'il
+    // mesure : refusé ici comme en base.
+    if (!imputationAmountIsCoherent(body.data)) {
+      return reply.code(400).send({ error: "montant sans base HT/TTC" });
+    }
+
+    const outcome = await withTenant(request.tenantId, async (tx) => {
+      const affaire = await tx.affaire.findUnique({ where: { id: params.data.id } });
+      if (!affaire) return { kind: "not-found" as const };
+      const active = await tx.affaireImputation.findFirst({
+        where: { targetType: body.data.targetType, targetId: body.data.targetId, revokedAt: null },
+      });
+      // Une même dépense dans deux chantiers, ce sont deux marges fausses —
+      // dans le sens flatteur, celui qu'on ne vérifie pas.
+      if (active) return { kind: "conflict" as const, affaireId: active.affaireId };
+
+      // La cible doit EXISTER, et sous RLS donc appartenir à ce tenant. Sans ce
+      // contrôle, un identifiant inexistant (ou d'un autre tenant, invisible
+      // ici) créait quand même l'imputation avec le montant fourni par
+      // l'appelant : un coût FABRIQUÉ entrait dans la marge du dirigeant, et la
+      // route répondait 201. Les transactions bancaires échappent au contrôle
+      // — elles ne sont pas stockées — et c'est dit dans la doc.
+      if (body.data.targetType === "classeur_document") {
+        const document = await tx.classeurDocument.findUnique({
+          where: { id: body.data.targetId },
+          select: { id: true },
+        });
+        if (!document) return { kind: "unknown-target" as const };
+      }
+      if (body.data.targetType === "facture") {
+        const invoice = await tx.fecInvoice.findUnique({
+          where: { id: body.data.targetId },
+          select: { id: true },
+        });
+        if (!invoice) return { kind: "unknown-target" as const };
+      }
+
+      const imputation = await tx.affaireImputation.create({
+        data: {
+          tenantId: request.tenantId,
+          affaireId: affaire.id,
+          targetType: body.data.targetType,
+          targetId: body.data.targetId,
+          source: body.data.source ?? "MANUELLE",
+          subcontract: body.data.subcontract ?? false,
+          amountCents:
+            body.data.amountCents === null || body.data.amountCents === undefined
+              ? null
+              : BigInt(body.data.amountCents),
+          amountBasis: body.data.amountBasis ?? null,
+          createdBy: request.authSession.user.id,
+        },
+      });
+      // Rattachement RÉTROACTIF : la pièce existante porte aussi le lien, pour
+      // que l'écran classeur le montre sans jointure supplémentaire. PAS de
+      // `.catch` muet : un échec ici doit annuler la transaction, sinon
+      // l'imputation existerait sans que la pièce le sache.
+      if (body.data.targetType === "classeur_document") {
+        await tx.classeurDocument.update({
+          where: { id: body.data.targetId },
+          data: { affaireId: affaire.id },
+        });
+      }
+      if (body.data.targetType === "facture") {
+        await tx.fecInvoice.update({
+          where: { id: body.data.targetId },
+          data: { affaireId: affaire.id },
+        });
+      }
+      return { kind: "ok" as const, imputation };
+    });
+
+    if (outcome.kind === "not-found") return reply.code(404).send({ error: "affaire inconnue" });
+    if (outcome.kind === "unknown-target") {
+      return reply.code(404).send({ error: "pièce inconnue" });
+    }
+    if (outcome.kind === "conflict") {
+      return reply.code(409).send({ error: "pièce déjà imputée", affaireId: outcome.affaireId });
+    }
+    return reply.code(201).send({ id: outcome.imputation.id });
+  });
+
+  app.delete(
+    "/affaires/:id/imputations/:imputationId",
+    { preHandler: businessRoute },
+    async (request, reply) => {
+      const params = z
+        .object({ id: z.string().uuid(), imputationId: z.string().uuid() })
+        .safeParse(request.params);
+      if (!params.success) return reply.code(400).send({ error: "invalid id" });
+
+      const revoked = await withTenant(request.tenantId, async (tx) => {
+        const imputation = await tx.affaireImputation.findUnique({
+          where: { id: params.data.imputationId },
+        });
+        if (!imputation || imputation.affaireId !== params.data.id) return null;
+        if (imputation.revokedAt !== null) return imputation;
+        // RÉVOQUER, pas supprimer : la ligne explique un chiffre a posteriori
+        // et nourrira l'apprentissage de l'imputation automatique (F2).
+        const updated = await tx.affaireImputation.update({
+          where: { id: imputation.id },
+          data: { revokedAt: new Date(), revokedBy: request.authSession.user.id },
+        });
+        // Le document a pu être supprimé entre-temps (droit à l'effacement) :
+        // `updateMany` ne jette pas sur zéro ligne, là où `update` annulerait la
+        // révocation. On détache ce qui existe encore, sans mentir sur le reste.
+        if (imputation.targetType === "classeur_document") {
+          await tx.classeurDocument.updateMany({
+            where: { id: imputation.targetId },
+            data: { affaireId: null },
+          });
+        }
+        if (imputation.targetType === "facture") {
+          await tx.fecInvoice.updateMany({
+            where: { id: imputation.targetId },
+            data: { affaireId: null },
+          });
+        }
+        return updated;
+      });
+      if (!revoked) return reply.code(404).send({ error: "imputation inconnue" });
+      return { revoked: true };
+    },
+  );
 
   return app;
 }
