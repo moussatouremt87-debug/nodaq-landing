@@ -26,6 +26,10 @@ micro-entrepreneurs, PME de 20+ déjà sous ERP.
    **Tout rattachement est NULLABLE, sans exception** — une pièce sans affaire (frais
    généraux, essence, assurance) est le cas majoritaire au démarrage, et l'existant
    doit continuer de fonctionner sans connaître les affaires.
+   Le rattachement passe par `affaire_imputations` (polymorphe) : les transactions
+   bancaires ne sont **pas** stockées et les lignes de temps n'existent pas, donc une
+   colonne `affaireId` ne vit que là où une table existe. **Aucune suppression** :
+   statut `ARCHIVEE`, qui ne détache rien.
 2. **Un vertical = un fichier de données, jamais une ligne de code métier.** Le
    vocabulaire et les réglages viennent du pack. Un `if (vertical === 'btp')` dans une
    feature transforme un produit en cinq produits à maintenir : si un pack semble
@@ -124,6 +128,7 @@ Le détail vit dans `docs/` — **lis le doc du domaine avant d'y toucher**.
 | Domaine | Où | Doc |
 |---|---|---|
 | Socle : auth, RLS, classifier, LLM, agent-runtime, file de validation | `packages/*`, `apps/agent-runtime` | ADR-006 |
+| **Affaires** (pivot) : imputations, marge déterministe, vocabulaire | `apps/api/src/affaires.ts`, `packages/shared/src/affaireMargin.ts` | `affaires.md` |
 | Classeur photo + mémoire tenant | `apps/api/src/classeur*.ts` | `classeur.md` |
 | Équipe, plannings, performance horaire (**PII, owner-only**) | `apps/api/src` | `plannings-rh.md`, `performance-horaire.md` |
 | Import FEC (source de données) | `packages/fec` | `fec-import.md` |

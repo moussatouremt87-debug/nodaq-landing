@@ -24,7 +24,7 @@
  */
 
 /** Bump à chaque ajout de vue ou d'événement. */
-export const FRESHNESS_RULES_VERSION = "2026-08-02";
+export const FRESHNESS_RULES_VERSION = "2026-08-03";
 
 /** Vues de données rafraîchissables. */
 export const VIEW_KEYS = [
@@ -42,6 +42,7 @@ export const VIEW_KEYS = [
   "avis",
   "factures",
   "echeancier",
+  "affaires",
   "nav",
 ] as const;
 export type ViewKey = (typeof VIEW_KEYS)[number];
@@ -68,7 +69,9 @@ export type DomainEvent =
   | "immobilisation.modifiee"
   | "cout.modifie"
   | "avis.modifie"
-  | "echeance.modifiee";
+  | "echeance.modifiee"
+  | "affaire.modifiee"
+  | "affaire.imputee";
 
 /**
  * Quelles vues chaque événement périme.
@@ -152,6 +155,12 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   "avis.modifie": ["avis"],
   // Le cockpit affiche la prochaine échéance fiscale (owner).
   "echeance.modifiee": ["echeancier", "cockpit"],
+  // Création, modification, archivage d'une affaire (4.1).
+  "affaire.modifiee": ["affaires"],
+  // Rattacher une pièce touche AUSSI le classeur : le document y affiche son
+  // affaire. Le cockpit ne montre pas encore de marge par affaire (F4) — le
+  // jour où il le fera, c'est cette ligne qui bougera, pas dix écrans.
+  "affaire.imputee": ["affaires", "classeur"],
 };
 
 export function viewsFor(event: DomainEvent): readonly ViewKey[] {
@@ -246,6 +255,12 @@ export const MUTATION_EFFECTS: Readonly<Record<string, MutationEffect>> = {
   draftReviewReply: ["action.preparee"],
   draftQuoteFromEmail: ["action.preparee"],
   proposeEReporting: ["action.preparee"],
+  // Affaires (4.1) — le pivot du produit
+  createAffaire: ["affaire.modifiee"],
+  updateAffaire: ["affaire.modifiee"],
+  archiveAffaire: ["affaire.modifiee"],
+  imputeToAffaire: ["affaire.imputee"],
+  removeImputation: ["affaire.imputee"],
   // Modules (pivot ADR-007)
   setModule: ["module.bascule"],
   // Le cockpit conversationnel passe par la MÊME boucle que le chat : il peut
