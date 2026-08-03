@@ -33,8 +33,6 @@ export interface PendingActionGroup {
   readonly id: string;
   /** Français, prêt à afficher. */
   readonly label: string;
-  /** Forme courte pour les puces. */
-  readonly shortLabel: string;
   readonly types: readonly string[];
   /**
    * Module 3.11 qui porte ce groupe. `null` = SOCLE : la file de validation
@@ -55,56 +53,48 @@ export const PENDING_ACTION_GROUPS: readonly PendingActionGroup[] = [
   {
     id: "relances",
     label: "Relances",
-    shortLabel: "Relance",
     types: ["send_dunning"],
     module: null,
   },
   {
     id: "devis",
     label: "Devis",
-    shortLabel: "Devis",
     types: ["create_quote"],
     module: null,
   },
   {
     id: "ecritures",
     label: "Écritures",
-    shortLabel: "Écriture",
     types: ["submit_reconciliation", "book_invoice"],
     module: null,
   },
   {
     id: "prospection",
     label: "Prospection",
-    shortLabel: "Prospect",
     types: ["record_prospect_contact"],
     module: null,
   },
   {
     id: "stocks",
     label: "Stocks",
-    shortLabel: "Stock",
     types: ["adjust_stock"],
     module: "stocks",
   },
   {
     id: "immobilisations",
     label: "Immobilisations",
-    shortLabel: "Immo",
     types: ["create_fixed_asset"],
     module: "immobilisations",
   },
   {
     id: "avis",
     label: "Avis clients",
-    shortLabel: "Avis",
     types: ["record_review_reply"],
     module: "avis",
   },
   {
     id: "facturation_electronique",
     label: "Factures électroniques",
-    shortLabel: "Facture",
     types: ["submit_einvoice", "report_einvoice_transactions"],
     module: "facturation_electronique",
   },
@@ -114,25 +104,9 @@ export const PENDING_ACTION_GROUPS: readonly PendingActionGroup[] = [
 const UNCATALOGUED: PendingActionGroup = {
   id: "autres",
   label: "Autres",
-  shortLabel: "Autre",
   types: [],
   module: null,
 };
-
-const MODULE_BY_TYPE = new Map<string, string | null>(
-  PENDING_ACTION_GROUPS.flatMap((group) => group.types.map((type) => [type, group.module])),
-);
-
-/**
- * Module portant un type d'action, ou `null` s'il relève du socle.
- *
- * Un type INCONNU rend `null`, et c'est délibéré : un outil livré avant sa
- * ligne de catalogue doit rester décidable. Le défaut penche du côté visible —
- * mal rangée, une action reste une action ; masquée, elle est perdue.
- */
-export function moduleOfPendingAction(type: string): string | null {
-  return MODULE_BY_TYPE.get(type) ?? null;
-}
 
 export interface ResolvedPendingActionGroup extends PendingActionGroup {
   /** Actions EN ATTENTE de ce groupe. */

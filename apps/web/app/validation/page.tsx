@@ -623,6 +623,19 @@ export default function ValidationPage() {
                     }
                   >
                     <option value="">Aucun — frais généraux</option>
+                    {/* Le chantier RATTACHÉ figure toujours, même absent de la
+                        liste — une affaire archivée n'apparaît plus dans
+                        /affaires, mais archiver ne détache rien. Sans cette
+                        option, la carte de gauche affichait le chantier
+                        pendant que le sélecteur se rendait vide. */}
+                    {selectedSummary?.affaire &&
+                      selectedSummary.affaireId !== null &&
+                      !affaires.some((a) => a.id === selectedSummary.affaireId) && (
+                        <option value={selectedSummary.affaireId}>
+                          {selectedSummary.affaire.reference} — {selectedSummary.affaire.label}
+                          {selectedSummary.affaire.status === "ARCHIVEE" && " (archivée)"}
+                        </option>
+                      )}
                     {affaires.map((affaire) => (
                       <option key={affaire.id} value={affaire.id}>
                         {affaire.reference} — {affaire.label}

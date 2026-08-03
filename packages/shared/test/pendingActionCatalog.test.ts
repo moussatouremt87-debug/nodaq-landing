@@ -3,7 +3,6 @@ import {
   MODULES,
   PENDING_ACTION_CATALOG_VERSION,
   PENDING_ACTION_GROUPS,
-  moduleOfPendingAction,
   resolvePendingActionGroups,
 } from "../src/index.js";
 
@@ -41,12 +40,6 @@ describe("config versionnée", () => {
 });
 
 describe("un type inconnu n'est pas un type caché", () => {
-  it("un outil ajouté demain sort en socle, jamais masqué", () => {
-    // Le défaut penche du côté visible : un outil livré avant sa ligne de
-    // catalogue doit rester décidable, quitte à être mal rangé.
-    expect(moduleOfPendingAction("un_outil_de_demain")).toBeNull();
-  });
-
   it("un type inconnu produit quand même un groupe visible", () => {
     const groups = resolvePendingActionGroups(["un_outil_de_demain"], []);
     expect(groups.some((group) => group.count === 1)).toBe(true);

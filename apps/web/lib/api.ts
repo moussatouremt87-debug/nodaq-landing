@@ -1694,6 +1694,10 @@ const AffaireDetail = z.object({
   actionsAValider: z.array(
     z.object({ id: z.string(), type: z.string(), createdAt: z.string() }),
   ),
+  /** Total RÉEL — la liste ci-dessus est bornée. */
+  actionsAValiderTotal: z.number(),
+  /** Refus MOTIVÉ pour un membre, jamais une liste vide muette. */
+  actionsAValiderRefus: z.string().nullable(),
   marge: AffaireMarge.nullable(),
   margeRefus: z.string().nullable(),
   invoicedCents: z.number().nullable(),

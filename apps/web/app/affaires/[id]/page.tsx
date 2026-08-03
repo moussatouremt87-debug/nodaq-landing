@@ -301,8 +301,16 @@ export default function AffairePage() {
           {detail.actionsAValider.length > 0 && (
             <div className="card" style={{ marginTop: 14 }}>
               <span className="overline">
-                À valider sur {words.definite} ({detail.actionsAValider.length})
+                À valider sur {words.definite} ({detail.actionsAValiderTotal})
               </span>
+              {/* Une liste tronquée qui affiche son total sans le dire ferait
+                  croire qu'on voit tout. */}
+              {detail.actionsAValiderTotal > detail.actionsAValider.length && (
+                <p className="hint">
+                  {detail.actionsAValider.length} affichées sur{" "}
+                  {detail.actionsAValiderTotal} — les autres sont dans la file.
+                </p>
+              )}
               <ul className="device-list">
                 {detail.actionsAValider.map((action) => (
                   <li key={action.id} className="device-row">

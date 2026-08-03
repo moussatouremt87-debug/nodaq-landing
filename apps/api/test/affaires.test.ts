@@ -1352,6 +1352,39 @@ describe("F6 — la file de validation recentrée sur l'affaire", () => {
     expect(res.statusCode).toBe(409);
   });
 
+  it("un MEMBRE ne voit PAS quel chantier porte une décision", async () => {
+    // L'association fuit ce que le montant fuirait : « une relance dort sur le
+    // chantier Bardin » se lit « Bardin ne paie pas ». Réserver l'ÉCRITURE au
+    // dirigeant tout en ouvrant la LECTURE à tous n'aurait eu aucun sens.
+    const affaireId = await createAffaire({ label: "Chantier discret" });
+    const actionId = await createPendingAction();
+    await app.inject({
+      method: "PATCH",
+      url: `/pending-actions/${actionId}/affaire`,
+      headers: { cookie: ownerCookie },
+      payload: { affaireId },
+    });
+
+    const asMember = await app.inject({
+      method: "GET",
+      url: "/pending-actions",
+      headers: { cookie: memberCookie },
+    });
+    const line = asMember.json().find((a: { id: string }) => a.id === actionId);
+    expect(line).toBeDefined();
+    expect(line.affaireId).toBeUndefined();
+    expect(line.affaire).toBeUndefined();
+
+    // Et sur la fiche : une liste vide AVEC son motif, jamais un vide muet.
+    const fiche = await app.inject({
+      method: "GET",
+      url: `/affaires/${affaireId}`,
+      headers: { cookie: memberCookie },
+    });
+    expect(fiche.json().actionsAValider).toHaveLength(0);
+    expect(fiche.json().actionsAValiderRefus).toBe("réservé au dirigeant");
+  });
+
   it("la fiche du chantier montre ce qui attend une décision", async () => {
     const affaireId = await createAffaire({ label: "Avec décisions" });
     const actionId = await createPendingAction();
@@ -1371,6 +1404,49 @@ describe("F6 — la file de validation recentrée sur l'affaire", () => {
     expect(actions[0].type).toBe("send_dunning");
     // Métadonnées SEULEMENT : le brouillon reste derrière son endpoint owner.
     expect(actions[0].payload).toBeUndefined();
+    // Le total est compté à part : afficher la longueur d'une liste bornée
+    // comme un compte exact serait un chiffre faux sur un écran qui compte.
+    expect(res.json().actionsAValiderTotal).toBe(1);
+    expect(res.json().actionsAValiderRefus).toBeNull();
+  });
+
+  it("une action en attente ne sort JAMAIS de la file, même noyée dans l'historique", async () => {
+    /*
+     * La borne de lecture portait sur TOUS les statuts, tri par date : une
+     * vieille action en attente sortait de la file dès qu'assez d'actions plus
+     * récentes — décidées comprises — existaient. Elle sortait aussi du badge
+     * de la nav, qui dérive de la même requête : indécidable, et en silence.
+     * C'est exactement ce que ce ticket dit interdire.
+     */
+    const ancienne = await createPendingAction();
+    await withTenant(orgA, (tx) =>
+      tx.pendingAction.update({
+        where: { id: ancienne },
+        data: { createdAt: new Date("2020-01-01") },
+      }),
+    );
+    // 120 décisions PLUS RÉCENTES — au-delà de l'ancienne borne unique de 100,
+    // et c'est ce nombre qui rend ce test probant : sous l'ancien code, les
+    // 100 lignes rendues étaient toutes des décisions, et l'action de 2020
+    // n'apparaissait nulle part.
+    await withTenant(orgA, (tx) =>
+      tx.pendingAction.createMany({
+        data: Array.from({ length: 120 }, () => ({
+          tenantId: orgA,
+          type: "book_invoice",
+          payload: {},
+          status: "executed",
+        })),
+      }),
+    );
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/pending-actions",
+      headers: { cookie: ownerCookie },
+    });
+    const ids = res.json().map((a: { id: string }) => a.id);
+    expect(ids).toContain(ancienne);
   });
 
   it("le rattachement d'une action ne bouge PAS la marge", async () => {

@@ -26,11 +26,19 @@ seule `affaire_imputations` porte de l'argent. Si rattacher une relance changeai
 la marge d'un chantier, le chiffre le plus regardé du produit deviendrait faux au
 premier classement — un test le vérifie explicitement.
 
-**Owner-only, et pas par frilosité.** Le payload d'une action est owner-gated
-(1.5) : un membre ne peut pas *voir* ce que l'action contient. Lui demander de la
-classer serait lui demander de classer à l'aveugle. C'est l'inverse exact de
-l'imputation d'une pièce (4.1), ouverte à tous parce que l'employé de terrain,
-lui, a la facture sous les yeux.
+**Owner-only, en lecture comme en écriture.** Le payload d'une action est
+owner-gated (1.5) : un membre ne peut pas *voir* ce que l'action contient. Lui
+demander de la classer serait lui demander de classer à l'aveugle — c'est
+l'inverse exact de l'imputation d'une pièce (4.1), ouverte à tous parce que
+l'employé de terrain, lui, a la facture sous les yeux.
+
+La **lecture** du lien est gated pour une raison distincte, et la première
+version de ce ticket l'avait manquée : la référence d'un chantier n'est pas
+secrète (tout membre lit déjà `/affaires`), mais **l'association l'est**. « Une
+relance dort sur le chantier Bardin » se lit « Bardin ne paie pas » — soit
+exactement ce que le montant aurait révélé. Réserver l'écriture au dirigeant
+tout en ouvrant la lecture à tous, dans le même diff, n'avait aucun sens. Un
+membre reçoit donc une liste vide **avec son motif**, jamais un vide muet.
 
 **Modifiable tant que l'action est en attente**, comme le brouillon : après
 décision, la ligne est une trace, et une trace ne se réécrit pas.
@@ -43,7 +51,34 @@ c'est un oracle d'existence sur les affaires du voisin.
 
 Le lien se lit **dans les deux sens** : la fiche du chantier compte ce qui attend
 une décision dessus. Une marge qui dérive pendant que trois relances dorment dans
-la file, c'est deux écrans qui savent chacun la moitié de l'histoire.
+la file, c'est deux écrans qui savent chacun la moitié de l'histoire. La liste
+affichée est bornée, mais le **total est compté à part** — afficher la longueur
+d'une liste tronquée comme un compte exact serait un chiffre faux sur un écran
+dont le seul travail est de compter.
+
+**Le rattachement ne laisse pas de trace attribuée**, contrairement à l'édition
+du brouillon (`draftEdits`), et c'est délibéré : le brouillon est un texte qui
+**part chez un client**, donc qui l'a écrit doit être prouvable. Un rattachement
+de chantier ne quitte jamais le système et se corrige d'un clic — lui coller une
+piste d'audit serait de la machinerie sans risque à couvrir.
+
+### Un piège Postgres que la revue a trouvé
+
+`ON DELETE SET NULL` sur une clé **composite** annule **toutes** les colonnes
+référençantes, `tenant_id` compris — lequel est `NOT NULL` partout. Écrite sans
+liste de colonnes, la contrainte ne détachait donc pas : elle levait un `23502`,
+soit un `RESTRICT` déguisé en erreur 500, pendant que le commentaire de la
+migration affirmait l'inverse.
+
+L'enjeu n'est pas théorique : la cascade `tenants → affaires` d'un **effacement
+RGPD** pouvait échouer là-dessus. Un droit à l'effacement qui plante n'est pas un
+refus motivé, c'est une obligation légale non tenue. La liste de colonnes
+(`ON DELETE SET NULL ("affaire_id")`, PostgreSQL 15+) dit ce qu'on voulait dire.
+
+La contrainte **jumelle de 4.1** — le prospect d'une affaire — portait le même
+défaut, jamais déclenché parce que rien ne supprime encore de prospect. Elle est
+corrigée dans la même migration : la laisser en connaissance de cause aurait été
+choisir le moment où elle exploserait.
 
 ## 2. Recentrée sur le socle
 
@@ -79,6 +114,21 @@ Un type d'action **inconnu** du catalogue tombe dans « Autres » et reste visib
 Le défaut penche du côté visible, délibérément : un outil livré avant sa ligne de
 catalogue doit rester décidable. Mal rangée, une action reste une action ;
 masquée, elle est perdue.
+
+### La même règle, côté lecture
+
+L'onglet n'était que la moitié du problème. La file lisait **100 lignes tous
+statuts confondus**, triées par date : une vieille action en attente sortait de
+la fenêtre dès que 100 actions plus récentes — décidées comprises — existaient.
+Elle sortait aussi du badge de navigation, qui dérive de la même requête. Donc :
+invisible, non comptée, indécidable, et en silence — précisément le scénario que
+cette page déclare interdit, écrit à deux fichiers de distance.
+
+Les actions en attente ont désormais **leur propre budget de lecture**,
+indépendant de l'historique décidé (borné, lui, parce qu'il ne fait que
+grandir). La borne des actions en attente est haute et **elle est écrite dans le
+code** plutôt que promise absente : au-delà, la file tronquerait encore, et ce
+serait la file qu'il faudrait repenser, pas la borne qu'il faudrait monter.
 
 ## Ce que F6 ne change pas
 
