@@ -1338,8 +1338,22 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       where: { ...where, status: "pending" },
       data: { status: "rejected", payload: reducedPayload },
     });
+    /*
+     * AUCUN filtre de statut ici, et c'est la correction d'un trou béant.
+     *
+     * La version précédente excluait `status: "rejected"` pour ne pas repasser
+     * sur les lignes que l'appel ci-dessus venait de rejeter. Elle excluait du
+     * même coup les propositions rejetées AVANT la purge — c'est-à-dire l'état
+     * décidé le plus fréquent, puisque l'écran de validation dit lui-même
+     * « Catégorie ou durée à ajuster ? Rejetez, puis saisissez manuellement ».
+     * Le cas majoritaire échappait donc entièrement à l'effacement.
+     *
+     * Le filtre juste n'est pas le statut mais le PAYLOAD : une ligne déjà
+     * réduite n'a plus de `sourceRef`, donc elle ne correspond plus à `where`.
+     * Le premier appel se retire du lot de lui-même.
+     */
     const reduced = await tx.pendingAction.updateMany({
-      where: { ...where, status: { not: "rejected" } },
+      where,
       data: { payload: reducedPayload },
     });
     return { rejected: rejected.count, reduced: reduced.count };
@@ -1351,22 +1365,49 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     "/connectors/fec",
     { preHandler: [...businessRoute, requireRole(["owner"])] },
     async (request, reply) => {
-      const removed = await withTenant(request.tenantId, async (tx) => {
+      const outcome = await withTenant(request.tenantId, async (tx) => {
+        // Contrôle d'existence AVANT d'écrire : un 404 ne doit rien avoir
+        // effacé au passage.
+        const imports = await tx.fecImport.count();
+        if (imports === 0) return null;
+
         const { count } = await tx.fecImport.deleteMany({
           where: { tenantId: request.tenantId },
         });
         // DANS LA MÊME TRANSACTION : une purge partiellement appliquée serait
         // le pire des deux mondes — la source effacée, les dérivés restants,
         // et plus rien pour les relier à quoi que ce soit.
-        await reduceDerivedProposals(tx, {
+        const proposals = await reduceDerivedProposals(tx, {
           label: "source effacée (purge FEC)",
           sourceRefPrefix: "fec:",
         });
+        /*
+         * Les AGRÉGATS DE CHARGES dérivés du journal (2.x) — oubliés de la
+         * première version, et l'import lui-même prouve qu'ils lui
+         * appartiennent : il les efface et les réécrit à chaque passage
+         * (`costEntry.deleteMany({ source: "fec" })`). Les laisser, c'est
+         * servir dans la marge, le cockpit et le brief des charges tirées d'un
+         * journal qu'on affirme avoir effacé.
+         *
+         * Les saisies HUMAINES (`source: "saisi"`) ne sont pas touchées : ce
+         * ne sont pas des dérivés, ce sont les chiffres du patron.
+         */
+        const charges = await tx.costEntry.deleteMany({
+          where: { tenantId: request.tenantId, source: "fec" },
+        });
         await tx.connector.deleteMany({ where: { type: FEC_CONNECTOR_TYPE } });
-        return count;
+        return { imports: count, proposals, charges: charges.count };
       });
-      if (removed === 0) return reply.code(404).send({ error: "no fec import" });
-      return reply.code(204).send();
+      if (outcome === null) return reply.code(404).send({ error: "no fec import" });
+      // Une purge qui rejette 200 propositions sans un mot contredirait le
+      // principe même de ce ticket : ce qui est fait est DIT.
+      return reply.send({
+        purged: true,
+        imports: outcome.imports,
+        propositionsRejetees: outcome.proposals.rejected,
+        propositionsReduites: outcome.proposals.reduced,
+        chargesDerivees: outcome.charges,
+      });
     },
   );
 
@@ -1868,7 +1909,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     { preHandler: [...businessRoute, requireRole(["owner"])] },
     async (request, reply) => {
       const { id } = z.object({ id: Uuid }).parse(request.params);
-      const { count } = await withTenant(request.tenantId, async (tx) => {
+      const outcome = await withTenant(request.tenantId, async (tx) => {
+        // Existence d'abord : un 404 ne doit pas laisser derrière lui des
+        // propositions rejetées pour une pièce qui n'existait pas.
+        const document = await tx.classeurDocument.findUnique({
+          where: { id },
+          select: { id: true },
+        });
+        if (document === null) return null;
         // Effacer la pièce (art. 17) doit RÉVOQUER son imputation : sinon la
         // fiche d'affaire continue d'afficher « Document du classeur — 450 € »
         // pour une pièce disparue, donc un coût que plus personne ne peut
@@ -1881,13 +1929,20 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         // pièce a fait naître une proposition d'immobilisation dont le libellé
         // porte un nom de FOURNISSEUR. Effacer la photo en la laissant, c'est
         // un effacement partiel qui se croit complet.
+        // Compteurs VOLONTAIREMENT ignorés ici, à la différence de la purge
+        // FEC : une pièce fait naître AU PLUS une proposition, et l'écran de
+        // validation se rafraîchit tout seul (`document.modifie` périme
+        // `validation` et `nav`). Casser le 204 de cette route pour annoncer
+        // « 1 » serait du bruit contractuel. La purge FEC, elle, peut en
+        // rejeter deux cents d'un coup : là, le silence serait une faute.
         await reduceDerivedProposals(tx, {
           label: "pièce effacée du classeur",
           sourceRefPrefix: `classeur:${id}`,
         });
-        return tx.classeurDocument.deleteMany({ where: { id, tenantId: request.tenantId } });
+        await tx.classeurDocument.deleteMany({ where: { id, tenantId: request.tenantId } });
+        return { deleted: true };
       });
-      if (count === 0) return reply.code(404).send({ error: "not found" });
+      if (outcome === null) return reply.code(404).send({ error: "not found" });
       return reply.code(204).send();
     },
   );
@@ -5053,7 +5108,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         await rejectProspectDrafts(tx, params.data.id);
 
         /*
-         * L'identité RECOPIÉE sur les affaires (4.1) — et c'est la limite que
+         * L'identité RECOPIÉE sur les affaires (4.1) — la limite que
          * `docs/affaires.md` annonçait sans la traiter.
          *
          * `client_name`, `address` et les coordonnées GPS sont une copie
@@ -5062,27 +5117,70 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
          * elle, survivait intacte. Effacer la fiche en gardant l'adresse, ce
          * n'est pas un effacement.
          *
-         * MAIS on n'efface pas tout : une affaire ACCEPTEE, EN_COURS ou
-         * TERMINEE a été (ou est) un CONTRAT, et son exécution fonde la
-         * conservation de ces données — les effacer détruirait la preuve d'un
-         * travail réellement effectué. Une affaire restée PROSPECT,
-         * DEVIS_ENVOYE ou PERDUE n'a jamais rien fondé.
+         * LE STATUT NE SUFFIT PAS À DÉCIDER, et la première version de ce
+         * ticket le croyait. `PERDUE` semblait signifier « jamais contractée »,
+         * mais `EN_COURS -> PERDUE` est un chemin banal : chantier commencé
+         * puis abandonné, client défaillant. Anonymiser sur ce seul mot
+         * détruisait la preuve d'un travail réellement effectué — exactement
+         * l'erreur pour laquelle `ARCHIVEE` était déjà épargnée. Le
+         * raisonnement valait pour une famille et pas pour l'autre.
          *
-         * ARCHIVEE ne dit PAS si un contrat a existé : l'archivage est la
-         * sortie commune des affaires gagnées et perdues. Trancher au hasard
-         * détruirait de la donnée contractuelle une fois sur deux, alors on ne
-         * tranche pas — on RAPPORTE, et l'owner décide affaire par affaire.
+         * On regarde donc les TRACES D'EXÉCUTION, qui sont des faits et non un
+         * libellé : pièces imputées non révoquées, factures rattachées,
+         * acomptes encaissés, heures pointées, date de fin réelle. Une seule
+         * suffit à conserver.
          */
-        const anonymisables = ["PROSPECT", "DEVIS_ENVOYE", "PERDUE"];
+        const affaires = await tx.affaire.findMany({
+          where: { prospectId: params.data.id },
+          select: {
+            id: true,
+            reference: true,
+            label: true,
+            status: true,
+            depositsCents: true,
+            hoursWorked: true,
+            actualEndDate: true,
+            _count: {
+              select: {
+                imputations: { where: { revokedAt: null } },
+                fecInvoices: true,
+              },
+            },
+          },
+        });
+
+        const anonymisables: readonly (typeof AFFAIRE_STATUSES)[number][] = [
+          "PROSPECT",
+          "DEVIS_ENVOYE",
+          "PERDUE",
+        ];
+        /** Motif de CONSERVATION, ou `null` quand rien ne fonde de garder. */
+        const motifDeConservation = (affaire: (typeof affaires)[number]): string | null => {
+          if (!anonymisables.includes(affaire.status as (typeof AFFAIRE_STATUSES)[number])) {
+            return affaire.status === "ARCHIVEE"
+              ? "archivée — le statut ne dit pas si un contrat a existé, à vérifier"
+              : "exécution du contrat";
+          }
+          // Statut « jamais contractée », mais les faits disent le contraire.
+          if (affaire._count.imputations > 0) return "des dépenses y sont imputées, à vérifier";
+          if (affaire._count.fecInvoices > 0) return "des factures y sont rattachées, à vérifier";
+          if ((affaire.depositsCents ?? 0) > 0) return "un acompte a été encaissé, à vérifier";
+          if ((affaire.hoursWorked ?? 0) > 0) return "des heures y ont été pointées, à vérifier";
+          if (affaire.actualEndDate !== null) return "une date de fin réelle est saisie, à vérifier";
+          return null;
+        };
+
+        const aAnonymiser = affaires.filter((affaire) => motifDeConservation(affaire) === null);
         const { count: anonymisees } = await tx.affaire.updateMany({
-          where: { prospectId: params.data.id, status: { in: anonymisables } },
+          where: { id: { in: aAnonymiser.map((affaire) => affaire.id) } },
           data: { clientName: null, address: null, latitude: null, longitude: null },
         });
         // Ce qui RESTE, et pourquoi — jamais une conservation muette.
-        const conservees = await tx.affaire.findMany({
-          where: { prospectId: params.data.id, status: { notIn: anonymisables } },
-          select: { id: true, reference: true, label: true, status: true },
-        });
+        const conservees = affaires
+          .map((affaire) => ({ affaire, motif: motifDeConservation(affaire) }))
+          .filter((row): row is { affaire: (typeof affaires)[number]; motif: string } =>
+            row.motif !== null,
+          );
 
         const deleted = await tx.prospect.deleteMany({ where: { id: params.data.id } });
         return { count: deleted.count, anonymisees, conservees };
@@ -5093,12 +5191,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         affairesAnonymisees: outcome.anonymisees,
         // Un effacement qui laisse des données DOIT dire lesquelles : c'est ce
         // qui permet à l'owner de terminer le travail à la main.
-        affairesConservees: outcome.conservees.map((affaire) => ({
-          ...affaire,
-          motif:
-            affaire.status === "ARCHIVEE"
-              ? "archivée — le statut ne dit pas si un contrat a existé, à vérifier"
-              : "exécution du contrat",
+        affairesConservees: outcome.conservees.map(({ affaire, motif }) => ({
+          id: affaire.id,
+          reference: affaire.reference,
+          label: affaire.label,
+          status: affaire.status,
+          motif,
         })),
       };
     },

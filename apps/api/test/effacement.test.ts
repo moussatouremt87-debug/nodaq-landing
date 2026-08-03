@@ -1,8 +1,7 @@
+import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { PrismaClient } from "@prisma/client";
 import { prisma, withTenant } from "@nodaq/db";
-import { createAdminClient } from "@nodaq/db/admin";
 import { buildApp } from "../src/app.js";
 
 /*
@@ -22,7 +21,6 @@ import { buildApp } from "../src/app.js";
  */
 
 let app: FastifyInstance;
-let admin: PrismaClient;
 let ownerCookie: string;
 let orgA: string;
 
@@ -35,7 +33,6 @@ function cookiesOf(res: { headers: Record<string, unknown> }): string {
 }
 
 beforeAll(async () => {
-  admin = createAdminClient();
   app = buildApp();
   await app.ready();
 
@@ -60,7 +57,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.close();
-  await admin.$disconnect();
   await prisma.$disconnect();
 });
 
@@ -122,7 +118,10 @@ describe("purge FEC — les dérivés partent avec la source", () => {
       url: "/connectors/fec",
       headers: { cookie: ownerCookie },
     });
-    expect(res.statusCode).toBe(204);
+    // La purge DIT ce qu'elle a fait : rejeter 200 propositions en silence
+    // contredirait le principe même de ce ticket.
+    expect(res.statusCode).toBe(200);
+    expect(res.json().propositionsRejetees).toBeGreaterThanOrEqual(1);
 
     const row = await withTenant(orgA, (tx) =>
       tx.pendingAction.findUniqueOrThrow({ where: { id: proposalId } }),
@@ -135,6 +134,43 @@ describe("purge FEC — les dérivés partent avec la source", () => {
     expect(payload.baseCents).toBeUndefined();
     expect(payload.priorDepreciationCents).toBeUndefined();
     expect(payload.warnings).toBeUndefined();
+  });
+
+  it("une proposition DÉJÀ REJETÉE perd ses dérivés — le cas majoritaire", async () => {
+    /*
+     * Le trou que la revue a trouvé. Filtrer « tout sauf rejected » pour ne pas
+     * repasser sur ce qu'on vient de rejeter excluait aussi les propositions
+     * rejetées AVANT la purge — c'est-à-dire l'état décidé le plus fréquent,
+     * puisque l'écran de validation dit lui-même « Catégorie ou durée à
+     * ajuster ? Rejetez, puis saisissez manuellement ». Le cas le plus courant
+     * échappait entièrement à l'effacement.
+     */
+    await withTenant(orgA, (tx) =>
+      tx.fecImport.create({
+        data: {
+          tenantId: orgA,
+          fileHash: `hash-rejete-${RUN}`,
+          entryCount: 1,
+          customerCount: 0,
+          invoiceCount: 0,
+          overdueCount: 0,
+          overdueCents: 0,
+          warnings: [],
+        },
+      }),
+    );
+    const proposalId = await seedProposal(`fec:2184-${RUN}`, "rejected");
+
+    await app.inject({
+      method: "DELETE",
+      url: "/connectors/fec",
+      headers: { cookie: ownerCookie },
+    });
+
+    const payload = await payloadOf(proposalId);
+    expect(payload.reduced).toBe(true);
+    expect(payload.label).toBeUndefined();
+    expect(payload.sourceRef).toBeUndefined();
   });
 
   it("une proposition DÉJÀ DÉCIDÉE garde sa trace, mais perd ses dérivés", async () => {
@@ -243,7 +279,76 @@ describe("classeur — effacer la pièce efface ce qui en dérive", () => {
     });
 
     expect((await payloadOf(condamnee)).reduced).toBe(true);
+    // L'assertion DISCRIMINANTE : sans le préfixe par pièce, celle-ci tombait
+    // aussi. Vérifier seulement que la condamnée est réduite passerait contre
+    // un no-op comme contre un effacement trop large.
     expect((await payloadOf(survivante)).label).toBe("Camionnette — SARL Dupont");
+    expect((await payloadOf(survivante)).reduced).toBeUndefined();
+  });
+
+  it("les deux sources ne se marchent pas dessus", async () => {
+    // `fec:` et `classeur:<id>` doivent se borner l'un l'autre : une purge FEC
+    // qui réduirait les propositions du classeur (ou l'inverse) effacerait des
+    // données que personne n'a demandé d'effacer.
+    const document = await withTenant(orgA, (tx) =>
+      tx.classeurDocument.create({
+        data: {
+          tenantId: orgA,
+          fileName: "croisee.jpg",
+          mimeType: "image/jpeg",
+          byteSize: 10,
+          photo: Buffer.from("c"),
+          sha256: `sha-${RUN}-croisee`,
+          status: "a_verifier",
+        },
+      }),
+    );
+    const duClasseur = await seedProposal(`classeur:${document.id}`);
+    await withTenant(orgA, (tx) =>
+      tx.fecImport.create({
+        data: {
+          tenantId: orgA,
+          fileHash: `hash-croise-${RUN}`,
+          entryCount: 1,
+          customerCount: 0,
+          invoiceCount: 0,
+          overdueCount: 0,
+          overdueCents: 0,
+          warnings: [],
+        },
+      }),
+    );
+    const duFec = await seedProposal(`fec:2185-${RUN}`);
+
+    // Purge FEC : elle ne doit toucher QUE la proposition du journal.
+    await app.inject({
+      method: "DELETE",
+      url: "/connectors/fec",
+      headers: { cookie: ownerCookie },
+    });
+    expect((await payloadOf(duFec)).reduced).toBe(true);
+    expect((await payloadOf(duClasseur)).label).toBe("Camionnette — SARL Dupont");
+  });
+});
+
+describe("les préfixes viennent des VRAIS producteurs", () => {
+  it("le code qui crée les propositions et celui qui les efface s'accordent", () => {
+    /*
+     * Les tests ci-dessus fabriquent leurs payloads à la main. Si un
+     * producteur renommait son préfixe (`fec:` -> `journal:`), l'effacement
+     * cesserait de mordre et toute la suite resterait verte.
+     *
+     * Cette garde lit le CODE SOURCE : les préfixes passés à
+     * `reduceDerivedProposals` doivent être exactement ceux que les
+     * producteurs écrivent dans `sourceRef`.
+     */
+    const source = readFileSync(new URL("../src/app.ts", import.meta.url), "utf8");
+    // Producteurs (import FEC, extraction classeur).
+    expect(source).toContain("const sourceRef = `fec:${proposal.accountNum}`");
+    expect(source).toContain("sourceRef: `classeur:${document.id}`");
+    // Effaceurs.
+    expect(source).toContain('sourceRefPrefix: "fec:"');
+    expect(source).toContain("sourceRefPrefix: `classeur:${id}`");
   });
 });
 
@@ -302,6 +407,38 @@ describe("prospect — l'identité recopiée sur les affaires", () => {
     // L'affaire SURVIT : c'est un effacement de données personnelles, pas la
     // destruction d'un historique de chantiers.
     expect(after.label).toBe("Chantier PERDUE");
+  });
+
+  it("PERDUE avec des TRACES d'exécution est conservée — le statut ne suffit pas", async () => {
+    /*
+     * `EN_COURS -> PERDUE` est un chemin banal : chantier commencé puis
+     * abandonné, client défaillant. Anonymiser sur le seul mot « PERDUE »
+     * détruisait la preuve d'un travail réellement effectué — l'erreur exacte
+     * pour laquelle ARCHIVEE était déjà épargnée, appliquée à une famille et
+     * pas à l'autre.
+     */
+    const prospectId = await seedProspect();
+    const perdue = await seedAffaire(prospectId, "PERDUE");
+    // Un fait, pas un libellé : des heures ont été pointées.
+    await app.inject({
+      method: "PATCH",
+      url: `/affaires/${perdue}`,
+      headers: { cookie: ownerCookie },
+      payload: { hoursWorked: 12 },
+    });
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/prospects/${prospectId}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.json().affairesAnonymisees).toBe(0);
+    expect(res.json().affairesConservees[0].motif).toContain("heures");
+
+    const after = await withTenant(orgA, (tx) =>
+      tx.affaire.findUniqueOrThrow({ where: { id: perdue } }),
+    );
+    expect(after.clientName).toBe("Jean Dupont");
   });
 
   it("une affaire EN COURS garde ses données — l'exécution du contrat les fonde", async () => {
