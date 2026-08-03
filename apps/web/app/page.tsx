@@ -6,6 +6,7 @@ import { emitDomainEvent, eventForTool, type DomainEvent } from "../lib/freshnes
 import { useFreshness } from "../lib/useFreshness";
 import {
   askCockpit,
+  getAffairesMargesIfOwner,
   formatEuroCents,
   getKpis,
   getMe,
@@ -15,7 +16,14 @@ import {
   listConnectors,
   listPendingActions,
 } from "../lib/api";
-import type { CockpitKpis, PendingActionDetail, PendingActionSummary } from "../lib/api";
+import type {
+  AffaireMarginRow,
+  AffairesMarges,
+  CockpitKpis,
+  PendingActionDetail,
+  PendingActionSummary,
+} from "../lib/api";
+import { affaireWords } from "@nodaq/shared";
 import { actionChipLabel, actionTypeLabel } from "../lib/labels";
 
 /*
@@ -35,6 +43,35 @@ const asNumber = (value: unknown): number | null => (typeof value === "number" ?
 
 const CHART_BARS = 22;
 const HORIZON_DAYS = 90;
+
+/** « marge X » pour un chiffre exact, « au mieux X » pour un plafond. Le mot
+ *  compte : un plafond n'est pas un résultat. */
+function marginLabel(row: AffaireMarginRow): string {
+  if (row.margin.kind === "marge") return `marge ${formatEuroCents(row.margin.marginCents)}`;
+  if (row.margin.kind === "marge_borne_superieure") {
+    return `au mieux ${formatEuroCents(row.margin.upperBoundCents)}`;
+  }
+  return "marge non calculable";
+}
+
+/** La cause RÉELLE du refus, ligne par ligne. Accoler « coût horaire non
+ *  renseigné » à toutes les affaires sans marge était faux : un coût horaire
+ *  manquant produit un PLAFOND, jamais une absence de calcul. */
+function missingLabel(row: AffaireMarginRow): string {
+  const missing = "missing" in row.margin ? row.margin.missing : [];
+  const labels: Record<string, string> = {
+    couts: "aucune dépense rattachée",
+    aucune_piece_rattachee: "aucune pièce rattachée",
+    heures: "heures passées non renseignées",
+    cout_horaire: "coût horaire chargé non renseigné",
+    pieces_ttc: "des pièces sont en TTC",
+    montants_inconnus: "des pièces sans montant",
+    facture_base_ttc: "facturé en TTC, devis en HT",
+  };
+  if (row.margin.kind === "couts_seuls") return "pas de montant devisé";
+  const named = missing.map((item) => labels[item] ?? item);
+  return named.length > 0 ? named.join(" · ") : "raison inconnue";
+}
 
 /** Card line for one pending action, from its (owner-gated) payload. */
 function actionLine(action: PendingActionSummary, detail: PendingActionDetail | undefined) {
@@ -105,6 +142,9 @@ export default function CockpitPage() {
     plannedOutflowCents: number;
   } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // F4 — marge par affaire. Owner-only et module-gated côté API : un 403 ou un
+  // 409 laisse la carte muette, jamais une erreur à l'écran.
+  const [marges, setMarges] = useState<AffairesMarges | null>(null);
   // Cockpit conversationnel (2.5) : la question passe par la MÊME boucle que
   // le chat — mêmes outils, mêmes gardes de rôle.
   const [question, setQuestion] = useState("");
@@ -140,6 +180,15 @@ export default function CockpitPage() {
         // présenté comme une vraie connexion.
         setDemoMode(connectors.some((connector) => connector.status === "demo"));
       }),
+      // La marge par chantier fait partie du CHARGEUR : une carte chargée une
+      // seule fois au montage resterait figée pendant que l'écran se dit
+      // « à jour » — la leçon du ticket 2.21 A.
+      //
+      // PAS de `.catch()` : il ferait résoudre `load()` et l'écran
+      // s'horodaterait « à jour » alors que cette carte a échoué. Le helper
+      // rend `null` pour les cas LÉGITIMES (non-owner, module éteint) et laisse
+      // les vraies pannes remonter.
+      getAffairesMargesIfOwner().then(setMarges),
       listPendingActions().then((actions) => {
         const waiting = actions.filter((a) => a.status === "pending");
         setPending(waiting);
@@ -380,6 +429,130 @@ export default function CockpitPage() {
           </div>
         )}
       </div>
+
+      {marges !== null &&
+        (marges.aSurveiller.length > 0 ||
+          marges.chiffrables.length > 0 ||
+          marges.sousReserve.length > 0 ||
+          marges.nonChiffrables.length > 0) && (
+          <div className="card" style={{ marginBottom: 18 }}>
+            <div className="card-header">
+              <div className="titles">
+                <div className="title">
+                  Marge par {affaireWords(marges.vertical).singular}
+                </div>
+                <div className="sub">
+                  {/* Le périmètre est DIT : « 3 dans le vert » se lirait
+                      sinon « tous mes chantiers ». */}
+                  {affaireWords(marges.vertical).plural} en cours et acceptés — pendant que le
+                  travail se fait, pas au bilan.
+                </div>
+              </div>
+            </div>
+
+            {marges.aSurveiller.length > 0 && (
+              <>
+                <span className="overline">À surveiller</span>
+                <ul className="device-list">
+                  {marges.aSurveiller.slice(0, 5).map((row) => (
+                    <li key={row.id} className="device-row">
+                      <div>
+                        <Link href={`/affaires/${row.id}`}>
+                          <strong>
+                            {row.reference} · {row.label}
+                          </strong>
+                        </Link>
+                        <br />
+                        <span className="hint">
+                          {marginLabel(row)}
+                          {(row.margin.kind === "marge" ||
+                            row.margin.kind === "marge_borne_superieure") &&
+                            row.margin.budgetGap !== null &&
+                            row.margin.budgetGap.deltaCents > 0 &&
+                            ` · budget matière dépassé de ${formatEuroCents(row.margin.budgetGap.deltaCents)}`}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                {marges.aSurveiller.length > 5 && (
+                  <p className="hint">
+                    et {marges.aSurveiller.length - 5} autre(s) — voir la page{" "}
+                    {affaireWords(marges.vertical).plural}.
+                  </p>
+                )}
+              </>
+            )}
+
+            {marges.sousReserve.length > 0 && (
+              <>
+                {/* Un plafond n'est PAS une marge : ces chantiers ont leur
+                    propre bloc, jamais le compteur « dans le vert ». */}
+                <span className="overline">Sous réserve — marge réelle inconnue</span>
+                <ul className="device-list">
+                  {marges.sousReserve.slice(0, 3).map((row) => (
+                    <li key={row.id} className="device-row">
+                      <div>
+                        <Link href={`/affaires/${row.id}`}>
+                          <strong>
+                            {row.reference} · {row.label}
+                          </strong>
+                        </Link>
+                        <br />
+                        <span className="hint">
+                          {marginLabel(row)} · {missingLabel(row)}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                {marges.sousReserve.length > 3 && (
+                  <p className="hint">et {marges.sousReserve.length - 3} autre(s).</p>
+                )}
+              </>
+            )}
+
+            {marges.chiffrables.length > 0 && (
+              <p className="hint">
+                {marges.chiffrables.length} {affaireWords(marges.vertical).singular}(s) avec une
+                marge exacte et positive.
+              </p>
+            )}
+
+            {/* Une affaire dont on ne sait rien n'est PAS une affaire qui va
+                bien : nommée, et avec SA cause — pas une cause générique. */}
+            {marges.nonChiffrables.length > 0 && (
+              <>
+                <span className="overline">Sans marge calculable</span>
+                <ul className="device-list">
+                  {marges.nonChiffrables.slice(0, 3).map((row) => (
+                    <li key={row.id} className="device-row">
+                      <div>
+                        <Link href={`/affaires/${row.id}`}>
+                          <strong>
+                            {row.reference} · {row.label}
+                          </strong>
+                        </Link>
+                        <br />
+                        <span className="hint">{missingLabel(row)}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                {marges.nonChiffrables.length > 3 && (
+                  <p className="hint">et {marges.nonChiffrables.length - 3} autre(s).</p>
+                )}
+              </>
+            )}
+
+            {marges.ignorees > 0 && (
+              <p className="hint">
+                {marges.ignorees} {affaireWords(marges.vertical).singular}(s) ouverts de plus ne
+                sont pas comptés ici — les plus anciens, donc ceux qui traînent.
+              </p>
+            )}
+          </div>
+        )}
 
       <div className="cockpit-cols">
         <div className="card">

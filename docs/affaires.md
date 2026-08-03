@@ -162,6 +162,45 @@ Effacer une pièce du classeur **révoque** son imputation : sans cela, la fiche
 continuerait d'afficher un coût pour une pièce disparue, que plus personne ne
 peut vérifier.
 
+## F4 — la marge de chaque chantier dans le cockpit
+
+`GET /affaires/marges` (owner-only, module-gated) rend **trois groupes séparés**,
+jamais un classement unique :
+
+| Groupe | Contenu |
+|---|---|
+| `aSurveiller` | marge connue **négative**, ou budget matière dépassé — le pire en tête |
+| `chiffrables` | marge **EXACTE** et positive — rien d'autre n'est « dans le vert » |
+| `sousReserve` | plafond positif : « au mieux X », marge réelle **inconnue** |
+| `nonChiffrables` | ni marge ni plafond — **nommées**, avec leur cause |
+
+Le quatrième groupe existe parce que ranger un plafond positif avec les
+rentables était une faute — et c'est le **flux nominal** : coût horaire non
+renseigné, heures inconnues ou pièces en TTC suffisent à produire un plafond
+proche du devis entier, pendant que la marge réelle est négative. Compté avec
+les saines, ça donnait « 3 chantiers dans le vert » sur trois chantiers dont on
+ne sait rien. La carte écrit **« au mieux X »**, jamais « marge X ».
+
+Chaque ligne non chiffrable porte **sa** cause, dérivée de son `missing` : un
+coût horaire manquant produit un *plafond*, jamais une absence de calcul —
+l'accoler à toutes les affaires sans marge attribuait une cause fausse.
+
+Le périmètre est dit à l'écran (`EN_COURS` + `ACCEPTEE`), et `ignorees` compte
+les affaires ouvertes au-delà de la borne de lecture (100). La troncature garde
+les plus **récentes** : les écartées sont donc les plus anciennes encore
+ouvertes — celles qui traînent, statistiquement les plus à risque. C'est dit
+sur la carte plutôt que masqué par un simple compteur.
+
+Le coût est **borné et indépendant du nombre d'affaires** : quatre requêtes
+(compte, affaires, imputations, factures), jamais une par chantier. Et **un seul
+moteur** : la marge du cockpit et celle de la fiche viennent du même
+`computeAffaireMargin`, avec un test qui échoue si les deux divergent.
+
+> **Limite** : le dépassement de budget matière ne peut pas se déclencher sur une
+> affaire sans devis — le moteur rend `couts_seuls` avant de calculer l'écart.
+> Ces affaires sont nommées dans `nonChiffrables`, mais leur dérive de budget
+> n'est pas détectée.
+
 ## Ce que 4.1 ne livre pas
 
 Dictée → devis (F1), suggestion automatique d'imputation (F2), marge dans le
