@@ -5157,16 +5157,25 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         where: { tenantId: request.tenantId },
       });
       const margins = await loadAffairesMargins(tx, profile?.hourlyCostCents ?? null);
-      return { margins, hourlyCostKnown: (profile?.hourlyCostCents ?? null) !== null };
+      return {
+        margins,
+        hourlyCostKnown: (profile?.hourlyCostCents ?? null) !== null,
+        vertical: profile?.vertical ?? null,
+      };
     });
     return {
       aSurveiller: view.margins.aSurveiller,
       chiffrables: view.margins.chiffrables,
+      // « Au mieux X » : à part, jamais compté avec les rentables.
+      sousReserve: view.margins.sousReserve,
       // Comptées et NOMMÉES : une affaire dont on ne sait rien n'est pas une
       // affaire qui va bien.
       nonChiffrables: view.margins.nonChiffrables,
       ignorees: view.margins.ignorees,
       hourlyCostKnown: view.hourlyCostKnown,
+      // Rendu ici pour que le cockpit n'ait pas à lire toute la table des
+      // affaires juste pour connaître le mot à afficher.
+      vertical: view.vertical,
     };
   });
 

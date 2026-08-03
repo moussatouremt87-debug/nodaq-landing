@@ -889,6 +889,97 @@ describe("F4 — la marge de chaque chantier dans le cockpit", () => {
     expect(fiche.json().marge.marginCents).toBe(sample.margin.marginCents);
   });
 
+  it("un PLAFOND positif n'est jamais « dans le vert »", async () => {
+    // Le trou trouvé en revue, et c'est le flux NOMINAL : sans coût horaire,
+    // sans heures, ou avec des pièces en TTC, le plafond vaut presque le devis
+    // entier — pendant que la marge réelle peut être négative. Le compter avec
+    // les rentables affichait « N chantiers dans le vert » sur des chantiers
+    // dont on ne sait rien.
+    const doute = await createAffaire({
+      label: "Marge incertaine",
+      status: "EN_COURS",
+      quotedAmountCents: 1_000_000,
+      // Heures NON renseignées => borne supérieure.
+    });
+    await app.inject({
+      method: "POST",
+      url: `/affaires/${doute}/imputations`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        targetType: "transaction_bancaire",
+        targetId: `tx-f4-doute-${RUN}`,
+        amountCents: 50_000,
+        amountBasis: "ht",
+      },
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/affaires/marges",
+      headers: { cookie: ownerCookie },
+    });
+    const body = res.json();
+    expect(body.sousReserve.some((r: { id: string }) => r.id === doute)).toBe(true);
+    expect(body.chiffrables.some((r: { id: string }) => r.id === doute)).toBe(false);
+    // Et tout ce qui est « dans le vert » a une marge EXACTE.
+    expect(
+      body.chiffrables.every((r: { margin: { kind: string } }) => r.margin.kind === "marge"),
+    ).toBe(true);
+  });
+
+  it("une affaire sans devis sort en non-chiffrable, avec SA cause", async () => {
+    const sansDevis = await createAffaire({ label: "Sans devis", status: "EN_COURS" });
+    await app.inject({
+      method: "POST",
+      url: `/affaires/${sansDevis}/imputations`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        targetType: "transaction_bancaire",
+        targetId: `tx-f4-nodevis-${RUN}`,
+        amountCents: 30_000,
+        amountBasis: "ht",
+      },
+    });
+    const res = await app.inject({
+      method: "GET",
+      url: "/affaires/marges",
+      headers: { cookie: ownerCookie },
+    });
+    const row = res
+      .json()
+      .nonChiffrables.find((r: { id: string }) => r.id === sansDevis) as
+      | { margin: { kind: string } }
+      | undefined;
+    expect(row?.margin.kind).toBe("couts_seuls");
+  });
+
+  it("module `affaires` éteint : la carte disparaît (409), elle ne ment pas", async () => {
+    await app.inject({
+      method: "PUT",
+      url: "/modules/affaires",
+      headers: { cookie: ownerCookie },
+      payload: { active: false },
+    });
+    const off = await app.inject({
+      method: "GET",
+      url: "/affaires/marges",
+      headers: { cookie: ownerCookie },
+    });
+    expect(off.statusCode).toBe(409);
+    await app.inject({
+      method: "PUT",
+      url: "/modules/affaires",
+      headers: { cookie: ownerCookie },
+      payload: { active: true },
+    });
+    const on = await app.inject({
+      method: "GET",
+      url: "/affaires/marges",
+      headers: { cookie: ownerCookie },
+    });
+    expect(on.statusCode).toBe(200);
+  });
+
   it("réservée au dirigeant", async () => {
     const res = await app.inject({
       method: "GET",

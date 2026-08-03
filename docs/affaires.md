@@ -170,21 +170,36 @@ jamais un classement unique :
 | Groupe | Contenu |
 |---|---|
 | `aSurveiller` | marge connue **négative**, ou budget matière dépassé — le pire en tête |
-| `chiffrables` | marge connue et positive |
-| `nonChiffrables` | ni marge ni plafond — **comptées et nommées** |
+| `chiffrables` | marge **EXACTE** et positive — rien d'autre n'est « dans le vert » |
+| `sousReserve` | plafond positif : « au mieux X », marge réelle **inconnue** |
+| `nonChiffrables` | ni marge ni plafond — **nommées**, avec leur cause |
 
-Mélanger les trois dans un seul tri ferait passer « inconnu » pour « va bien ».
-Une affaire dont on ne sait rien n'est pas une affaire saine, et un plafond
-n'est pas une marge : la carte écrit « au mieux X » et non « marge X ».
+Le quatrième groupe existe parce que ranger un plafond positif avec les
+rentables était une faute — et c'est le **flux nominal** : coût horaire non
+renseigné, heures inconnues ou pièces en TTC suffisent à produire un plafond
+proche du devis entier, pendant que la marge réelle est négative. Compté avec
+les saines, ça donnait « 3 chantiers dans le vert » sur trois chantiers dont on
+ne sait rien. La carte écrit **« au mieux X »**, jamais « marge X ».
 
-`ignorees` compte les affaires ouvertes au-delà de la borne de lecture (100) :
-une troncature silencieuse ferait disparaître des chantiers d'un écran censé
-les surveiller.
+Chaque ligne non chiffrable porte **sa** cause, dérivée de son `missing` : un
+coût horaire manquant produit un *plafond*, jamais une absence de calcul —
+l'accoler à toutes les affaires sans marge attribuait une cause fausse.
 
-Trois requêtes au total quel que soit le nombre d'affaires (affaires,
-imputations, factures) — jamais une requête par chantier. Et **un seul moteur** :
-la marge du cockpit et celle de la fiche viennent du même `computeAffaireMargin`,
-avec un test qui échoue si les deux divergent.
+Le périmètre est dit à l'écran (`EN_COURS` + `ACCEPTEE`), et `ignorees` compte
+les affaires ouvertes au-delà de la borne de lecture (100). La troncature garde
+les plus **récentes** : les écartées sont donc les plus anciennes encore
+ouvertes — celles qui traînent, statistiquement les plus à risque. C'est dit
+sur la carte plutôt que masqué par un simple compteur.
+
+Le coût est **borné et indépendant du nombre d'affaires** : quatre requêtes
+(compte, affaires, imputations, factures), jamais une par chantier. Et **un seul
+moteur** : la marge du cockpit et celle de la fiche viennent du même
+`computeAffaireMargin`, avec un test qui échoue si les deux divergent.
+
+> **Limite** : le dépassement de budget matière ne peut pas se déclencher sur une
+> affaire sans devis — le moteur rend `couts_seuls` avant de calculer l'écart.
+> Ces affaires sont nommées dans `nonChiffrables`, mais leur dérive de budget
+> n'est pas détectée.
 
 ## Ce que 4.1 ne livre pas
 

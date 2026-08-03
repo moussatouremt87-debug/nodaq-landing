@@ -24,7 +24,7 @@
  */
 
 /** Bump à chaque ajout de vue ou d'événement. */
-export const FRESHNESS_RULES_VERSION = "2026-08-04";
+export const FRESHNESS_RULES_VERSION = "2026-08-03";
 
 /** Vues de données rafraîchissables. */
 export const VIEW_KEYS = [

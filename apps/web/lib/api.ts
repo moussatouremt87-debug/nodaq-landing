@@ -1742,14 +1742,36 @@ export type AffaireMarginRow = z.infer<typeof AffaireMarginRow>;
 const AffairesMarges = z.object({
   aSurveiller: z.array(AffaireMarginRow),
   chiffrables: z.array(AffaireMarginRow),
+  /** Plafond positif : « au mieux », jamais « dans le vert ». */
+  sousReserve: z.array(AffaireMarginRow),
   nonChiffrables: z.array(AffaireMarginRow),
   ignorees: z.number(),
   hourlyCostKnown: z.boolean(),
+  vertical: z.string().nullable(),
 });
 export type AffairesMarges = z.infer<typeof AffairesMarges>;
 
-export const getAffairesMarges = (): Promise<AffairesMarges> =>
-  call(AffairesMarges, "/affaires/marges");
+/**
+ * Marges par affaire — `null` quand la carte n'a pas lieu d'être (non-owner,
+ * module éteint), et REJETTE sur une vraie panne.
+ *
+ * Le rôle est vérifié AVANT l'appel : sans ça, chaque ouverture du cockpit par
+ * un membre produisait un 403 dans les logs du serveur. Et un `.catch()` global
+ * ferait pire — il laisserait `load()` réussir, donc l'écran s'horodater
+ * « à jour » alors que la carte a échoué.
+ */
+export const getAffairesMargesIfOwner = async (): Promise<AffairesMarges | null> => {
+  const session = await getMe();
+  const active = session.memberships.find((m) => m.tenantId === session.activeOrganizationId);
+  if (active?.role !== "owner") return null;
+  try {
+    return await call(AffairesMarges, "/affaires/marges");
+  } catch (error) {
+    // 409 = module `affaires` éteint : ce n'est pas une panne, c'est un choix.
+    if (error instanceof ApiError && error.status === 409) return null;
+    throw error;
+  }
+};
 
 /*
  * F2 — suggestion d'affaire pour une pièce photographiée.

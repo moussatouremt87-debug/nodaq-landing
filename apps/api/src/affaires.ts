@@ -268,8 +268,19 @@ export interface AffaireMarginRow {
 export interface AffairesMarginsView {
   /** Marge connue (exacte ou plafond) et NÉGATIVE, ou budget matière dépassé. */
   readonly aSurveiller: readonly AffaireMarginRow[];
-  /** Marge connue et positive. */
+  /** Marge EXACTE et positive. Rien d'autre n'a le droit d'être « dans le vert ». */
   readonly chiffrables: readonly AffaireMarginRow[];
+  /**
+   * Plafond positif : « au mieux X », marge réelle INCONNUE.
+   *
+   * Ce groupe existe parce que le ranger avec les saines était une faute — et
+   * c'est le flux NOMINAL du produit : coût horaire non renseigné, heures
+   * inconnues ou pièces en TTC suffisent à produire un plafond proche du devis
+   * entier, pendant que la marge réelle est négative. Compté avec les
+   * rentables, ça donnait « 3 chantiers dans le vert » sur trois chantiers dont
+   * on ne sait rien.
+   */
+  readonly sousReserve: readonly AffaireMarginRow[];
   /** Ni marge ni plafond : comptées et NOMMÉES, jamais classées comme saines. */
   readonly nonChiffrables: readonly AffaireMarginRow[];
   /** Affaires ouvertes au-delà de la borne de lecture — dit, jamais tu. */
@@ -285,6 +296,14 @@ function comparableMargin(margin: AffaireMargin): number | null {
   return null;
 }
 
+/**
+ * Un chantier sur lequel il faut regarder maintenant.
+ *
+ * LIMITE : le dépassement de budget matière ne peut PAS se déclencher sur une
+ * affaire sans devis (`couts_seuls`), le moteur rendant avant d'avoir calculé
+ * l'écart. Ces affaires sortent en `nonChiffrables`, où elles sont nommées —
+ * mais leur dérive de budget, elle, n'est pas détectée.
+ */
 function needsAttention(margin: AffaireMargin): boolean {
   const value = comparableMargin(margin);
   if (value !== null && value < 0) return true;
@@ -313,7 +332,7 @@ export async function loadAffairesMargins(
     where: { status: { in: openStatuses } },
   });
   if (affaires.length === 0) {
-    return { aSurveiller: [], chiffrables: [], nonChiffrables: [], ignorees: 0 };
+    return { aSurveiller: [], chiffrables: [], sousReserve: [], nonChiffrables: [], ignorees: 0 };
   }
 
   const ids = affaires.map((affaire) => affaire.id);
@@ -358,14 +377,21 @@ export async function loadAffairesMargins(
     .filter((row) => needsAttention(row.margin))
     // Le pire en premier : c'est celui sur lequel on peut encore agir.
     .sort((a, b) => (comparableMargin(a.margin) ?? 0) - (comparableMargin(b.margin) ?? 0));
+  // « Dans le vert » exige une marge EXACTE. Un plafond positif ne dit rien de
+  // la réalité — le commentaire de `comparableMargin` le disait déjà, le tri ne
+  // le respectait pas.
   const chiffrables = rows
-    .filter((row) => !needsAttention(row.margin) && comparableMargin(row.margin) !== null)
+    .filter((row) => !needsAttention(row.margin) && row.margin.kind === "marge")
+    .sort((a, b) => (comparableMargin(a.margin) ?? 0) - (comparableMargin(b.margin) ?? 0));
+  const sousReserve = rows
+    .filter((row) => !needsAttention(row.margin) && row.margin.kind === "marge_borne_superieure")
     .sort((a, b) => (comparableMargin(a.margin) ?? 0) - (comparableMargin(b.margin) ?? 0));
   const nonChiffrables = rows.filter((row) => comparableMargin(row.margin) === null);
 
   return {
     aSurveiller,
     chiffrables,
+    sousReserve,
     nonChiffrables,
     // Une troncature silencieuse ferait disparaître des chantiers d'un écran
     // censé les surveiller.
