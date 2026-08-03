@@ -31,6 +31,24 @@ model_list:
   #     model: mistral/mistral-small-latest
   #     api_key: os.environ/MISTRAL_API_KEY
 
+  # ── Transcription audio (spike F1) ───────────────────────────────────────────
+  # Scaleway expose /v1/audio/transcriptions, compatible OpenAI, avec
+  # whisper-large-v3 — donc SUR LE MÊME tier souverain que le reste, sans
+  # nouveau fournisseur ni nouveau contrat.
+  # Facturation à la SECONDE d'audio (et non au token) : une dictée de devis de
+  # trois minutes coûte trois minutes.
+  # Doc : https://www.scaleway.com/en/docs/generative-apis/how-to/query-audio-models/
+  #
+  # `mode: audio_transcription` est ce qui permet à LiteLLM de router ce nom
+  # logique vers /audio/transcriptions et non vers /chat/completions.
+  - model_name: transcription
+    litellm_params:
+      model: openai/whisper-large-v3        # <- confirmer le nom exact en console
+      api_base: https://api.scaleway.ai/v1
+      api_key: os.environ/SCW_GENERATIVE_API_KEY
+    model_info:
+      mode: audio_transcription
+
   # ── Embeddings multilingues (souverains) ─────────────────────────────────────
   - model_name: embeddings
     litellm_params:

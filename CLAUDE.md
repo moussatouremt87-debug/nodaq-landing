@@ -43,6 +43,8 @@ micro-entrepreneurs, PME de 20+ déjà sous ERP.
    Tout appel modèle passe par **`packages/llm.route()`** / `routeChat()` (classify →
    policy → garde dure → LiteLLM → audit hashé) — jamais LiteLLM ni un SDK fournisseur
    en direct depuis le métier. Embeddings : `embed()` (toujours souverain).
+   Audio : `transcribe()` — catégorie FIXÉE à `confidentiel` (on ne classifie pas ce
+   qu'on n'a pas encore lu) et aucun paramètre de tier (`spike-transcription-souveraine.md`).
 2. **Isolation multi-tenant (2 couches, toujours les deux)** :
    - **DB** : Row-Level Security active. Le seul accès aux données métier est
      `withTenant(tenantId, fn)` (transaction + `set_config('app.current_tenant_id', …, true)`).

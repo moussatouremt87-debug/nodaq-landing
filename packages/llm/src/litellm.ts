@@ -167,3 +167,40 @@ export async function embeddings(texts: string[]): Promise<number[][]> {
   }
   return vectors as number[][];
 }
+
+/**
+ * Transcription audio — TOUJOURS souveraine (spike F1).
+ *
+ * Une dictée est de la parole de client, de prix, d'adresses de chantier :
+ * `confidentiel` par construction. Le nom logique `transcription` est résolu
+ * par LiteLLM vers un fournisseur souverain — il n'existe volontairement AUCUN
+ * paramètre de groupe ici, pour qu'aucun appelant ne puisse demander autre
+ * chose.
+ */
+export async function transcribeAudio(
+  audio: Uint8Array,
+  fileName: string,
+  language?: string,
+): Promise<string> {
+  const { baseUrl, masterKey } = config();
+  const form = new FormData();
+  // Le nom de fichier ne porte AUCUNE donnée métier : l'appelant passe un nom
+  // neutre, jamais « devis-madame-martin.wav ».
+  form.append("file", new Blob([Buffer.from(audio)]), fileName);
+  form.append("model", "transcription");
+  if (language) form.append("language", language);
+
+  const response = await fetch(`${baseUrl}/v1/audio/transcriptions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${masterKey}` },
+    body: form,
+  });
+  if (!response.ok) {
+    throw new Error(`LiteLLM transcription failed: HTTP ${response.status}`);
+  }
+  const body = (await response.json()) as { text?: unknown };
+  if (typeof body.text !== "string") {
+    throw new Error("LiteLLM returned a malformed transcription");
+  }
+  return body.text;
+}
