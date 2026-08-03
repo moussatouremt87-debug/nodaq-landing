@@ -13,6 +13,11 @@ import {
   withTenant,
 } from "@nodaq/db";
 import {
+  AFFAIRE_SUGGESTION_RULES_VERSION,
+  buildSupplierHistory,
+  suggestAffaires,
+} from "./affaireSuggestion.js";
+import {
   AFFAIRE_STATUSES,
   AffaireCreateInput,
   AffaireImputeInput,
@@ -204,6 +209,20 @@ async function requireMembership(request: FastifyRequest, reply: FastifyReply): 
     return;
   }
   request.membershipRole = membership.role;
+}
+
+/** Bornes de lecture de la suggestion F2 — même doctrine que `MEMORY_WINDOW`
+ *  du classeur : une dérivation à la lecture doit avoir un coût borné. */
+const AFFAIRE_SUGGESTION_HISTORY_WINDOW = 300;
+const AFFAIRE_SUGGESTION_MAX_AFFAIRES = 200;
+
+/** Champ texte d'une extraction JSON — `null` dès que ce n'est pas exploitable. */
+function extractionField(extraction: unknown, field: "supplierName" | "docDate"): string | null {
+  if (extraction === null || typeof extraction !== "object" || Array.isArray(extraction)) {
+    return null;
+  }
+  const value = (extraction as Record<string, unknown>)[field];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 const businessRoute = [requireAuth, resolveTenant, requireMembership];
@@ -5223,6 +5242,117 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return serializeAffaire(archived);
   });
 
+  /*
+   * F2 — photo → imputation. SUGGESTION, jamais écriture.
+   *
+   * Cette route ne crée rien : elle propose. Une imputation posée
+   * automatiquement entrerait dans le calcul de marge sans qu'aucun humain
+   * l'ait validée — un coût inventé décidant d'un chiffre montré au patron.
+   * L'acceptation passe par la route d'imputation normale, en `CONFIRMEE` :
+   * l'écart entre CONFIRMEE et MANUELLE est la mesure de F2.
+   */
+  app.get(
+    "/classeur/documents/:id/affaires-suggerees",
+    { preHandler: businessRoute },
+    async (request, reply) => {
+      void reply.header("cache-control", "private, no-store");
+      const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+      if (!params.success) return reply.code(400).send({ error: "invalid id" });
+
+      const outcome = await withTenant(request.tenantId, async (tx) => {
+        const document = await tx.classeurDocument.findUnique({
+          where: { id: params.data.id },
+          select: { id: true, extraction: true, affaireId: true },
+        });
+        if (!document) return null;
+
+        const affaires = await tx.affaire.findMany({
+          take: AFFAIRE_SUGGESTION_MAX_AFFAIRES,
+          orderBy: [{ createdAt: "desc" }],
+          where: { status: { notIn: ["ARCHIVEE", "PERDUE", "TERMINEE"] } },
+          select: {
+            id: true,
+            reference: true,
+            label: true,
+            status: true,
+            startDate: true,
+            plannedEndDate: true,
+            actualEndDate: true,
+          },
+        });
+
+        // Aucune affaire ouverte : inutile de payer la lecture de l'historique
+        // pour répondre « rien à proposer ». C'est le cas de tout tenant qui
+        // n'utilise pas encore les affaires, donc le cas le plus fréquent.
+        if (affaires.length === 0) {
+          return { alreadyImputed: false, result: suggestAffaires({ supplierName: null, docDate: null }, [], []) };
+        }
+
+        // Historique : ce que CE tenant a rattaché lui-même. Dérivé à la
+        // lecture, jamais stocké, jamais partagé — la mémoire d'un tenant ne
+        // sort pas de son tenant (règle 7).
+        //
+        // BORNÉ, comme la mémoire fournisseur du classeur (`MEMORY_WINDOW`) :
+        // sans `take`, un tenant à 10 000 imputations désérialiserait 10 000
+        // extractions JSON à chaque clic, et un `IN` de cette taille finit par
+        // dépasser la limite de paramètres de Postgres. Les rattachements
+        // récents sont aussi les plus informatifs.
+        const imputations = await tx.affaireImputation.findMany({
+          take: AFFAIRE_SUGGESTION_HISTORY_WINDOW,
+          orderBy: [{ createdAt: "desc" }],
+          where: { targetType: "classeur_document", revokedAt: null },
+          select: { targetId: true, affaireId: true },
+        });
+        const documents =
+          imputations.length === 0
+            ? []
+            : await tx.classeurDocument.findMany({
+                where: { id: { in: imputations.map((row) => row.targetId) } },
+                select: { id: true, extraction: true },
+              });
+        const supplierOf = new Map(
+          documents.map((row) => [row.id, extractionField(row.extraction, "supplierName")]),
+        );
+
+        const day = (date: Date | null): string | null =>
+          date === null ? null : date.toISOString().slice(0, 10);
+
+        return {
+          alreadyImputed: document.affaireId !== null,
+          result: suggestAffaires(
+            {
+              supplierName: extractionField(document.extraction, "supplierName"),
+              docDate: extractionField(document.extraction, "docDate"),
+            },
+            affaires.map((affaire) => ({
+              id: affaire.id,
+              reference: affaire.reference,
+              label: affaire.label,
+              status: affaire.status,
+              startDate: day(affaire.startDate),
+              plannedEndDate: day(affaire.plannedEndDate),
+              actualEndDate: day(affaire.actualEndDate),
+            })),
+            buildSupplierHistory(
+              imputations.map((row) => ({
+                supplierName: supplierOf.get(row.targetId) ?? null,
+                affaireId: row.affaireId,
+              })),
+            ),
+          ),
+        };
+      });
+
+      if (!outcome) return reply.code(404).send({ error: "document inconnu" });
+      // Une pièce déjà rattachée n'a pas besoin d'être suggérée : proposer de
+      // la rattacher ailleurs inviterait à une double imputation.
+      if (outcome.alreadyImputed) {
+        return { kind: "abstention", why: "deja_rattachee", version: AFFAIRE_SUGGESTION_RULES_VERSION };
+      }
+      return { ...outcome.result, version: AFFAIRE_SUGGESTION_RULES_VERSION };
+    },
+  );
+
   app.post("/affaires/:id/imputations", { preHandler: businessRoute }, async (request, reply) => {
     const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: "invalid id" });
@@ -5232,6 +5362,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     // mesure : refusé ici comme en base.
     if (!imputationAmountIsCoherent(body.data)) {
       return reply.code(400).send({ error: "montant sans base HT/TTC" });
+    }
+    // `AUTO` = imputation posée sans validation humaine. Rien n'a le droit d'en
+    // écrire une : elle entrerait dans le calcul de marge, et un coût que
+    // personne n'a validé déciderait d'un chiffre montré au patron. La doc de
+    // F2 le PROMET — le refus le rend vrai.
+    if (body.data.source === "AUTO") {
+      return reply.code(400).send({ error: "imputation automatique interdite sans validation" });
     }
 
     const outcome = await withTenant(request.tenantId, async (tx) => {

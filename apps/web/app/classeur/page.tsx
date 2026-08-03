@@ -6,6 +6,7 @@ import {
   classeurPhotoUrl,
   correctClasseurDocument,
   deleteClasseurDocument,
+  getAffaireSuggestions,
   getClasseurCandidates,
   getClasseurMemory,
   imputeToAffaire,
@@ -17,6 +18,7 @@ import {
 import { emitDomainEvent } from "../../lib/freshness";
 import type {
   Affaire,
+  AffaireSuggestions,
   ClasseurCorrection,
   ClasseurDocument,
   ClasseurMemory,
@@ -36,6 +38,16 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   recu: "Reçu",
   note_de_frais: "Note de frais",
   autre: "Autre",
+};
+
+/** Pourquoi aucune suggestion — en français, jamais un code brut. */
+const ABSTENTION_LABELS: Record<string, string> = {
+  aucune_affaire_ouverte: "Aucune affaire en cours : une pièce sans affaire est normale.",
+  piece_illisible: "Ni fournisseur ni date lisibles sur la photo — rien à proposer.",
+  signaux_partages:
+    "Plusieurs affaires en cours couvrent cette date : à vous de trancher, la date ne suffit pas.",
+  aucun_signal: "Rien ne relie cette pièce à une affaire en cours.",
+  deja_rattachee: "Pièce déjà rattachée.",
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -95,12 +107,23 @@ export default function ClasseurPage() {
   // vide et inoffensive si le module est éteint ou s'il n'y a aucune affaire :
   // le classeur fonctionne exactement comme avant.
   const [affaires, setAffaires] = useState<Affaire[]>([]);
+  // Suggestion F2 : proposée à la sélection, jamais appliquée d'office.
+  const [suggestions, setSuggestions] = useState<AffaireSuggestions | null>(null);
+  const [suggestionError, setSuggestionError] = useState(false);
 
   const selected = documents.find((d) => d.id === selectedId) ?? null;
 
   const refresh = useCallback(() => {
-    listAffaires({ statut: "EN_COURS" })
-      .then((state) => setAffaires(state.affaires))
+    // Mêmes statuts que le moteur de suggestion : sinon il peut proposer une
+    // affaire que l'utilisateur ne peut pas choisir lui-même.
+    listAffaires()
+      .then((state) =>
+        setAffaires(
+          state.affaires.filter((affaire) =>
+            ["EN_COURS", "ACCEPTEE", "DEVIS_ENVOYE"].includes(affaire.status),
+          ),
+        ),
+      )
       .catch(() => setAffaires([]));
     getClasseurMemory()
       .then(setMemory)
@@ -120,6 +143,19 @@ export default function ClasseurPage() {
     setForm(formFrom(document));
     setCandidates(null);
     setNotice(null);
+    setSuggestions(null);
+    setSuggestionError(false);
+    getAffaireSuggestions(document.id)
+      .then((result) => {
+        if (selectedRef.current !== document.id) return;
+        setSuggestions(result);
+      })
+      .catch(() => {
+        if (selectedRef.current !== document.id) return;
+        // Une panne n'est PAS une abstention : la confondre laisserait la
+        // feature morte en production sans que rien ne le dise.
+        setSuggestionError(true);
+      });
     getClasseurCandidates(document.id)
       .then((result) => {
         if (selectedRef.current !== document.id) return;
@@ -209,13 +245,16 @@ export default function ClasseurPage() {
     }
   }
 
-  async function imputer(affaireId: string): Promise<void> {
+  async function imputer(affaireId: string, fromSuggestion = false): Promise<void> {
     if (!selected) return;
     setBusy(true);
     try {
       await imputeToAffaire(affaireId, {
         targetType: "classeur_document",
         targetId: selected.id,
+        // CONFIRMEE = l'humain a validé une proposition ; MANUELLE = il a choisi
+        // seul. L'écart entre les deux est la seule mesure honnête de F2.
+        ...(fromSuggestion ? { source: "CONFIRMEE" as const } : {}),
         // Le classeur ne connaît que le TTC : on le DIT au lieu de le convertir
         // en HT avec un taux supposé — le calcul de marge tient les deux à part.
         ...(selected.extraction?.totalInclTax !== null &&
@@ -469,6 +508,90 @@ export default function ClasseurPage() {
                 <p className="hint">
                   Rattachée —{" "}
                   <a href={`/affaires/${selected.affaireId}`}>ouvrir la fiche</a> pour la détacher.
+                </p>
+              ) : suggestions?.kind === "suggestions" ? (
+                <>
+                  <p className="hint" style={{ margin: "4px 0 8px" }}>
+                    {/* Une proposition qu'on ne peut pas contester est une
+                        proposition qu'on valide par réflexe : le motif est
+                        affiché avec elle, pas caché derrière un score. */}
+                    Proposition — vérifiez avant de valider :
+                  </p>
+                  {suggestions.items.map((item) => (
+                    <div key={item.affaireId} style={{ marginBottom: 10 }}>
+                      <strong>
+                        {item.reference} · {item.label}
+                      </strong>
+                      <br />
+                      <span className="hint">
+                        {item.reasons
+                          .map((reason) =>
+                            reason.kind === "historique_fournisseur"
+                              ? `déjà rattaché ${reason.count} fois à ce fournisseur`
+                              : reason.kind === "dans_la_periode"
+                                ? "la date tombe dans la période"
+                                : "seule affaire en cours",
+                          )
+                          .join(" · ")}
+                      </span>
+                      <br />
+                      <button
+                        className="primary"
+                        disabled={busy}
+                        onClick={() => void imputer(item.affaireId, true)}
+                      >
+                        Rattacher ici
+                      </button>
+                    </div>
+                  ))}
+                  <p className="hint">Ou choisissez vous-même :</p>
+                  <select
+                    disabled={busy}
+                    defaultValue=""
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      event.target.value = "";
+                      if (value) void imputer(value);
+                    }}
+                  >
+                    <option value="">Une autre affaire…</option>
+                    {affaires.map((affaire) => (
+                      <option key={affaire.id} value={affaire.id}>
+                        {affaire.reference} · {affaire.label}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              ) : suggestions?.kind === "abstention" ? (
+                <>
+                  {/* Un refus est une RÉPONSE motivée : sans le motif,
+                      l'utilisateur ne sait pas si le produit a réfléchi ou
+                      s'il est en panne. */}
+                  <p className="hint" style={{ margin: "4px 0 8px" }}>
+                    {ABSTENTION_LABELS[suggestions.why] ?? "aucune suggestion"}
+                  </p>
+                  {affaires.length > 0 && (
+                    <select
+                      disabled={busy}
+                      defaultValue=""
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        event.target.value = "";
+                        if (value) void imputer(value);
+                      }}
+                    >
+                      <option value="">Choisir une affaire…</option>
+                      {affaires.map((affaire) => (
+                        <option key={affaire.id} value={affaire.id}>
+                          {affaire.reference} · {affaire.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </>
+              ) : suggestionError ? (
+                <p className="hint">
+                  Suggestion indisponible — vous pouvez rattacher à la main.
                 </p>
               ) : affaires.length === 0 ? (
                 <p className="hint">
