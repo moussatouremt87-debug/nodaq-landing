@@ -133,6 +133,7 @@ Le détail vit dans `docs/` — **lis le doc du domaine avant d'y toucher**.
 | **Affaires** (pivot) : imputations, marge déterministe, vocabulaire | `apps/api/src/affaires.ts`, `packages/shared/src/affaireMargin.ts` | `affaires.md` |
 | **Packs verticaux** : métiers, libellés, vocabulaire accordé (un vertical = une DONNÉE) | `packages/shared/src/verticalPacks.ts` | `packs-verticaux.md` |
 | **Contrats récurrents** : moteur de dates pur, matérialisation validée, jamais auto | `packages/shared/src/recurrence.ts`, `apps/api/src/contrats.ts` | `contrats-recurrents.md` |
+| **Encaissé ≠ acquis** : quatre chiffres jamais fondus, deux bases jamais soustraites | `packages/shared/src/revenusAcquis.ts` | `encaisse-acquis.md` |
 | Imputation suggérée (photo → affaire, **jamais écrite d'office**) | `apps/api/src/affaireSuggestion.ts` | `imputation-suggeree.md` |
 | Brief du matin (assemblage déterministe, angles morts DITS) | `apps/api/src/briefMatin.ts` | `brief-matin.md` |
 | File de validation (affaire + socle ; une action ne se masque jamais) | `apps/api/src/app.ts`, `packages/shared/src/pendingActionCatalog.ts` | `file-validation.md` |

@@ -7,6 +7,7 @@ import { useFreshness } from "../lib/useFreshness";
 import {
   askCockpit,
   getAffairesMargesIfOwner,
+  getRevenusIfOwner,
   formatEuroCents,
   getKpis,
   getMe,
@@ -22,6 +23,7 @@ import type {
   CockpitKpis,
   PendingActionDetail,
   PendingActionSummary,
+  RevenusSplit,
 } from "../lib/api";
 import { affaireWords } from "@nodaq/shared";
 import { actionChipLabel, actionTypeLabel } from "../lib/labels";
@@ -145,6 +147,7 @@ export default function CockpitPage() {
   // F4 — marge par affaire. Owner-only et module-gated côté API : un 403 ou un
   // 409 laisse la carte muette, jamais une erreur à l'écran.
   const [marges, setMarges] = useState<AffairesMarges | null>(null);
+  const [revenus, setRevenus] = useState<RevenusSplit | null>(null);
   // Cockpit conversationnel (2.5) : la question passe par la MÊME boucle que
   // le chat — mêmes outils, mêmes gardes de rôle.
   const [question, setQuestion] = useState("");
@@ -189,6 +192,7 @@ export default function CockpitPage() {
       // rend `null` pour les cas LÉGITIMES (non-owner, module éteint) et laisse
       // les vraies pannes remonter.
       getAffairesMargesIfOwner().then(setMarges),
+      getRevenusIfOwner().then(setRevenus),
       listPendingActions().then((actions) => {
         const waiting = actions.filter((a) => a.status === "pending");
         setPending(waiting);
@@ -429,6 +433,78 @@ export default function CockpitPage() {
           </div>
         )}
       </div>
+
+      {/* ENCAISSÉ ≠ ACQUIS (4.2 bloc 3) — trois chiffres, jamais un seul.
+          Beaucoup de patrons jugent leur santé au solde du compte : l'acompte
+          reçu et le devis signé y ressemblent à du résultat, et n'en sont pas.
+          Les bases sont affichées (HT / TTC) parce qu'elles ne se soustraient
+          pas — leur différence vaudrait à peu près la TVA. */}
+      {revenus !== null && (
+        <div className="card" style={{ marginBottom: 18 }}>
+          <div className="card-header">
+            <div className="titles">
+              <div className="title">Ce qui est gagné, vendu, encaissé</div>
+              <div className="sub">
+                Le solde du compte n&apos;est pas du résultat — et ces chiffres ne
+                s&apos;additionnent pas entre eux.
+              </div>
+            </div>
+          </div>
+          <div className="kpi-row">
+            <div className="kpi">
+              <span className="overline">Acquis — travail livré</span>
+              <div className="value">{formatEuroCents(revenus.acquisCents)}</div>
+              <div className="ameta">HT · chantiers terminés</div>
+            </div>
+            <div className="kpi">
+              <span className="overline">Engagé — vendu, pas livré</span>
+              <div className="value">{formatEuroCents(revenus.engageCents)}</div>
+              <div className="ameta">HT · accepté ou en cours</div>
+            </div>
+            {/* DEUX chiffres, jamais additionnés : une facture d'acompte est à
+                la fois une pièce du FEC réglée et un acompte déclaré sur la
+                fiche. Les sommer doublerait le montant, dans la direction
+                flatteuse. Rien ne permet de les rapprocher. */}
+            <div className="kpi">
+              <span className="overline">Encaissé — factures réglées</span>
+              {/* `null` ≠ 0 : sans FEC importé, « 0 € » se lirait « rien n'est
+                  rentré » à côté d'un acquis non nul. On dit l'absence de
+                  source plutôt qu'un chiffre. */}
+              <div className="value">
+                {revenus.encaisseFactureCents === null
+                  ? "—"
+                  : formatEuroCents(revenus.encaisseFactureCents)}
+              </div>
+              <div className="ameta">
+                {revenus.encaisseFactureCents === null
+                  ? "aucun FEC importé"
+                  : "TTC · retenue encore détenue exclue"}
+              </div>
+            </div>
+            <div className="kpi">
+              <span className="overline">Acomptes déclarés</span>
+              <div className="value">{formatEuroCents(revenus.encaisseDeclareCents)}</div>
+              <div className="ameta">
+                TTC · peut recouper les factures réglées — non additionné
+              </div>
+            </div>
+          </div>
+          {/* Ce qui n'est pas calculé est DIT : sans ces deux lignes, un acquis
+              sous-estimé passerait pour exact. */}
+          {revenus.sansDevis > 0 && (
+            <p className="warn">
+              {revenus.sansDevis} {affaireWords(marges?.vertical ?? null).singular}(s) sans devis :
+              leur valeur n&apos;entre dans aucun de ces chiffres.
+            </p>
+          )}
+          {revenus.ignorees > 0 && (
+            <p className="warn">
+              {revenus.ignorees} {affaireWords(marges?.vertical ?? null).plural} au-delà de la
+              borne de lecture ne sont pas comptés.
+            </p>
+          )}
+        </div>
+      )}
 
       {marges !== null &&
         (marges.aSurveiller.length > 0 ||

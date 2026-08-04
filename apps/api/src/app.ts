@@ -47,6 +47,7 @@ import {
   imputationAmountIsCoherent,
   loadAffaireMargin,
   loadAffairesMargins,
+  loadRevenusSplit,
   serializeAffaire,
   toPrismaData,
 } from "./affaires.js";
@@ -6121,6 +6122,27 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
    * que la prévision de trésorerie et la page marge. Module `affaires` éteint
    * => la carte disparaît, comme les alertes de stock.
    */
+  /*
+   * ENCAISSÉ ≠ ACQUIS (4.2, bloc 3).
+   *
+   * Trois chiffres qui se ressemblent sur un relevé bancaire et qui ne disent
+   * pas la même chose : ce qui est sur le compte, ce qui est vendu, ce qui est
+   * livré. Le moteur (`splitRevenus`) refuse de les fondre, et cette route
+   * refuse de rendre un écart entre l'encaissé (TTC) et l'acquis (HT) — leur
+   * différence vaudrait à peu près la TVA, qui n'appartient pas à
+   * l'entreprise.
+   *
+   * OWNER seulement, comme toute donnée financière agrégée du tenant.
+   */
+  app.get("/affaires/revenus", { preHandler: ownerRoute }, async (request, reply) => {
+    void reply.header("cache-control", "private, no-store");
+    if (!(await isModuleActive(request.tenantId, "affaires"))) {
+      return reply.code(409).send({ error: "module désactivé" });
+    }
+    const split = await withTenant(request.tenantId, (tx) => loadRevenusSplit(tx));
+    return split;
+  });
+
   app.get("/affaires/marges", { preHandler: ownerRoute }, async (request, reply) => {
     void reply.header("cache-control", "private, no-store");
     if (!(await isModuleActive(request.tenantId, "affaires"))) {

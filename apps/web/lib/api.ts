@@ -1245,6 +1245,38 @@ export const materialiserContrat = (
     { method: "POST" },
   );
 
+/* Encaissé ≠ acquis (4.2 bloc 3). Les DEUX bases voyagent avec les chiffres :
+ * un écran qui soustrairait l'encaissé (TTC) de l'acquis (HT) obtiendrait
+ * approximativement la TVA, c'est-à-dire de l'argent qui n'est pas à
+ * l'entreprise. Le type le rend visible plutôt que de l'espérer. */
+export const RevenusSplit = z.object({
+  acquisCents: z.number(),
+  acquisBasis: z.literal("ht"),
+  engageCents: z.number(),
+  engageBasis: z.literal("ht"),
+  encaisseDeclareCents: z.number(),
+  encaisseFactureCents: z.number().nullable(),
+  encaisseBasis: z.literal("ttc"),
+  sansDevis: z.number(),
+  exact: z.boolean(),
+  ignorees: z.number(),
+});
+export type RevenusSplit = z.infer<typeof RevenusSplit>;
+
+/** Owner seulement, et silencieux si le module est éteint — même patron que
+ *  les marges : un 409 est un choix, pas une panne. */
+export const getRevenusIfOwner = async (): Promise<RevenusSplit | null> => {
+  const session = await getMe();
+  const active = session.memberships.find((m) => m.tenantId === session.activeOrganizationId);
+  if (active?.role !== "owner") return null;
+  try {
+    return await call(RevenusSplit, "/affaires/revenus");
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) return null;
+    throw error;
+  }
+};
+
 export const getComplianceProfile = (): Promise<ComplianceProfile> =>
   call(ComplianceProfile, "/reglementaire/profil");
 
