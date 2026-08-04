@@ -40,6 +40,7 @@ import {
   serializeAffaire,
   toPrismaData,
 } from "./affaires.js";
+import { sniffAudioFormat, transcribe, TRANSCRIPTION_MAX_BYTES } from "@nodaq/llm";
 import { deriveCharges, deriveFixedAssets, deriveReceivables, parseFec } from "@nodaq/fec";
 import {
   aggregateEReporting,
@@ -271,9 +272,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.setErrorHandler((error: unknown, request, reply) => {
     request.log.error(error);
     const statusCode =
-      error && typeof error === "object" && "statusCode" in error
-        ? Number(error.statusCode)
-        : NaN;
+      error && typeof error === "object" && "statusCode" in error ? Number(error.statusCode) : NaN;
     void reply
       .code(Number.isInteger(statusCode) && statusCode >= 400 ? statusCode : 500)
       .send({ error: error instanceof Error ? error.name : "InternalServerError" });
@@ -546,8 +545,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     },
   );
 
-  const decide = (decision: "approved" | "rejected") =>
-    async (request: FastifyRequest, reply: FastifyReply) => {
+  const decide =
+    (decision: "approved" | "rejected") => async (request: FastifyRequest, reply: FastifyReply) => {
       const params = z.object({ id: Uuid }).safeParse(request.params);
       if (!params.success) {
         return reply.code(400).send({ error: "invalid pending action id" });
@@ -1077,7 +1076,17 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         }
         const warnings = [...parsed.warnings, ...derivation.warnings, ...chargeWarnings];
         type Outcome =
-          | { kind: "already"; existing: { entryCount: number; customerCount: number; invoiceCount: number; overdueCount: number; overdueCents: bigint; warnings: unknown } }
+          | {
+              kind: "already";
+              existing: {
+                entryCount: number;
+                customerCount: number;
+                invoiceCount: number;
+                overdueCount: number;
+                overdueCents: bigint;
+                warnings: unknown;
+              };
+            }
           | { kind: "created" };
         let outcome: Outcome;
         try {
@@ -1220,48 +1229,52 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         }
         try {
           if (proposals.length > 0) {
-            assetProposals = await withTenant(request.tenantId, async (tx) => {
-              let count = 0;
-              for (const proposal of proposals) {
-              const sourceRef = `fec:${proposal.accountNum}`;
-              const existingAsset = await tx.fixedAsset.findFirst({
-                where: { source: "FEC", sourceRef },
-                select: { id: true },
-              });
-              if (existingAsset) continue;
-              const pendingProposal = await tx.pendingAction.findFirst({
-                where: {
-                  type: "create_fixed_asset",
-                  status: "pending",
-                  payload: { path: ["sourceRef"], equals: sourceRef },
-                },
-                select: { id: true },
-              });
-              if (pendingProposal) continue;
-              await tx.pendingAction.create({
-                data: {
-                  tenantId: request.tenantId,
-                  type: "create_fixed_asset",
-                  requestedBy: request.authSession.user.id,
-                  employee: "compta",
-                  payload: {
-                    label: proposal.label,
-                    category: proposal.category,
-                    inServiceDate: proposal.inServiceDate,
-                    baseCents: proposal.baseCents,
-                    durationMonths: ASSET_CATEGORIES[proposal.category].defaultMonths,
-                    method: "LINEAIRE",
-                    source: "FEC",
-                    sourceRef,
-                    priorDepreciationCents: proposal.priorDepreciationCents,
-                    warnings: proposal.warnings,
-                  },
-                },
-              });
-              count += 1;
-            }
-            return count;
-          }, { timeoutMs: 30_000 });
+            assetProposals = await withTenant(
+              request.tenantId,
+              async (tx) => {
+                let count = 0;
+                for (const proposal of proposals) {
+                  const sourceRef = `fec:${proposal.accountNum}`;
+                  const existingAsset = await tx.fixedAsset.findFirst({
+                    where: { source: "FEC", sourceRef },
+                    select: { id: true },
+                  });
+                  if (existingAsset) continue;
+                  const pendingProposal = await tx.pendingAction.findFirst({
+                    where: {
+                      type: "create_fixed_asset",
+                      status: "pending",
+                      payload: { path: ["sourceRef"], equals: sourceRef },
+                    },
+                    select: { id: true },
+                  });
+                  if (pendingProposal) continue;
+                  await tx.pendingAction.create({
+                    data: {
+                      tenantId: request.tenantId,
+                      type: "create_fixed_asset",
+                      requestedBy: request.authSession.user.id,
+                      employee: "compta",
+                      payload: {
+                        label: proposal.label,
+                        category: proposal.category,
+                        inServiceDate: proposal.inServiceDate,
+                        baseCents: proposal.baseCents,
+                        durationMonths: ASSET_CATEGORIES[proposal.category].defaultMonths,
+                        method: "LINEAIRE",
+                        source: "FEC",
+                        sourceRef,
+                        priorDepreciationCents: proposal.priorDepreciationCents,
+                        warnings: proposal.warnings,
+                      },
+                    },
+                  });
+                  count += 1;
+                }
+                return count;
+              },
+              { timeoutMs: 30_000 },
+            );
             if (assetProposals > 0) {
               void notifyPendingAction(request.tenantId).catch(() => undefined);
             }
@@ -1659,8 +1672,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
                       ? `Équipement ${extraction.supplierName}`
                       : "Équipement (facture photographiée)",
                     category: "materiel",
-                    inServiceDate:
-                      extraction.docDate ?? new Date().toISOString().slice(0, 10),
+                    inServiceDate: extraction.docDate ?? new Date().toISOString().slice(0, 10),
                     baseCents: htCents,
                     durationMonths: ASSET_CATEGORIES.materiel.defaultMonths,
                     method: "LINEAIRE",
@@ -1787,7 +1799,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
               (entry) =>
                 typeof entry !== "object" ||
                 entry === null ||
-                !((entry as { field?: unknown }).field as string in fields),
+                !(((entry as { field?: unknown }).field as string) in fields),
             )
           : document.learned;
         return tx.classeurDocument.update({
@@ -1831,7 +1843,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       );
       if (!document) return reply.code(404).send({ error: "not found" });
       const extraction = z
-        .object({ totalInclTax: z.number().nullable().catch(null), docDate: z.string().nullable().catch(null) })
+        .object({
+          totalInclTax: z.number().nullable().catch(null),
+          docDate: z.string().nullable().catch(null),
+        })
         .catch({ totalInclTax: null, docDate: null })
         .parse(document.extraction ?? {});
 
@@ -1862,9 +1877,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     },
   );
 
-  const MatchBody = z
-    .object({ transactionId: z.string().min(1).max(200).nullable() })
-    .strict();
+  const MatchBody = z.object({ transactionId: z.string().min(1).max(200).nullable() }).strict();
 
   app.post(
     "/classeur/documents/:id/match",
@@ -2230,8 +2243,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     // en SQL direct, il ne passe pas par le toolset qui filtre les outils.
     const stocksOn = await isModuleActive(request.tenantId, "stocks");
     const stockAlertRows = stocksOn
-      ? await withTenant(request.tenantId, (tx) =>
-          tx.$queryRaw<{ count: number }[]>`
+      ? await withTenant(
+          request.tenantId,
+          (tx) =>
+            tx.$queryRaw<{ count: number }[]>`
         SELECT count(*)::int AS count FROM stock_items
         WHERE alert_threshold > 0 AND quantity <= alert_threshold`,
         )
@@ -2475,10 +2490,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // Marquage explicite « j'ai vu » (le web l'appelle à l'ouverture de la file
   // de validation) — GET /pending-actions et /cockpit/kpis le font déjà.
   app.post("/push/seen", { preHandler: businessRoute }, async (request, reply) => {
-    const parsed = z
-      .object({ category: PushCategorySchema })
-      .strict()
-      .safeParse(request.body);
+    const parsed = z.object({ category: PushCategorySchema }).strict().safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
     await markPushSeen(request.tenantId, request.authSession.user.id, parsed.data.category);
     return { seen: true };
@@ -2574,9 +2586,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       if (!params.success) return reply.code(400).send({ error: "invalid id" });
       if (!supportStorage) return reply.code(503).send({ error: "stockage non configuré" });
       const ticket = await withOps((tx) =>
-        tx.supportTicket.findUnique({ where: { id: params.data.id }, select: { objectKeys: true } }),
+        tx.supportTicket.findUnique({
+          where: { id: params.data.id },
+          select: { objectKeys: true },
+        }),
       );
-      const keys = z.array(z.string()).catch([]).parse(ticket?.objectKeys ?? []);
+      const keys = z
+        .array(z.string())
+        .catch([])
+        .parse(ticket?.objectKeys ?? []);
       const bodyKey = keys.find((key) => key.endsWith("/body.txt"));
       if (!bodyKey) return reply.code(404).send({ error: "no body" });
       const object = await supportStorage.get(bodyKey);
@@ -2740,11 +2758,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   );
 
   app.get("/ops/support/stats", { preHandler: operatorRoute }, async () => {
-    const [byStatus, byLevel, issues] = await withOps(async (tx) => [
-      await tx.supportTicket.groupBy({ by: ["status"], _count: { _all: true } }),
-      await tx.supportTicket.groupBy({ by: ["level"], _count: { _all: true } }),
-      await tx.supportIssue.count({ where: { validated: true } }),
-    ] as const);
+    const [byStatus, byLevel, issues] = await withOps(
+      async (tx) =>
+        [
+          await tx.supportTicket.groupBy({ by: ["status"], _count: { _all: true } }),
+          await tx.supportTicket.groupBy({ by: ["level"], _count: { _all: true } }),
+          await tx.supportIssue.count({ where: { validated: true } }),
+        ] as const,
+    );
     return {
       byStatus: Object.fromEntries(byStatus.map((row) => [row.status, row._count._all])),
       byLevel: Object.fromEntries(byLevel.map((row) => [row.level ?? "?", row._count._all])),
@@ -2842,7 +2863,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const FixedAssetBody = z
     .object({
       label: z.string().min(1).max(200),
-      category: z.enum(["informatique", "logiciel", "vehicule", "materiel", "mobilier", "agencement"]),
+      category: z.enum([
+        "informatique",
+        "logiciel",
+        "vehicule",
+        "materiel",
+        "mobilier",
+        "agencement",
+      ]),
       inServiceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       baseCents: z.number().int().min(1).max(10_000_000_000),
       durationMonths: z.number().int().min(1).max(600),
@@ -2881,7 +2909,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     .object({
       renewalCostCents: z.number().int().min(0).max(10_000_000_000).nullable().optional(),
       status: z.enum(["ACTIF", "CEDE", "SORTI"]).optional(),
-      disposedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+      disposedAt: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .nullable()
+        .optional(),
     })
     .strict()
     .refine((b) => Object.keys(b).length > 0, { message: "empty patch" })
@@ -3005,10 +3037,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const IsoDay = z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .refine((value) => {
-      const date = new Date(`${value}T00:00:00Z`);
-      return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
-    }, { message: "invalid calendar date" });
+    .refine(
+      (value) => {
+        const date = new Date(`${value}T00:00:00Z`);
+        return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+      },
+      { message: "invalid calendar date" },
+    );
 
   const AbsenceBody = z
     .object({
@@ -3020,10 +3055,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     .strict()
     .refine((body) => body.endDate >= body.startDate, { message: "endDate before startDate" })
     // Amplitude bornée : une absence > 1 an est une erreur de saisie.
-    .refine(
-      (body) => Date.parse(body.endDate) - Date.parse(body.startDate) <= 366 * 86_400_000,
-      { message: "absence longer than a year" },
-    );
+    .refine((body) => Date.parse(body.endDate) - Date.parse(body.startDate) <= 366 * 86_400_000, {
+      message: "absence longer than a year",
+    });
 
   app.post("/rh/absences", { preHandler: ownerRoute }, async (request, reply) => {
     const parsed = AbsenceBody.safeParse(request.body);
@@ -3143,7 +3177,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.get("/rapports/mensuel", { preHandler: ownerRoute }, async (request, reply) => {
     void reply.header("cache-control", "private, no-store");
     const query = z
-      .object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() })
+      .object({
+        month: z
+          .string()
+          .regex(/^\d{4}-(0[1-9]|1[0-2])$/)
+          .optional(),
+      })
       .safeParse(request.query ?? {});
     if (!query.success) return reply.code(400).send({ error: "invalid query" });
     let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
@@ -3180,7 +3219,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.get("/marge", { preHandler: ownerRoute }, async (request, reply) => {
     void reply.header("cache-control", "private, no-store");
     const query = z
-      .object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() })
+      .object({
+        month: z
+          .string()
+          .regex(/^\d{4}-(0[1-9]|1[0-2])$/)
+          .optional(),
+      })
       .safeParse(request.query ?? {});
     if (!query.success) return reply.code(400).send({ error: "invalid query" });
     let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
@@ -3420,6 +3464,135 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     } finally {
       await toolset?.close().catch(() => undefined);
     }
+  });
+
+  /*
+   * Devis DICTÉ — « il dicte, il photographie, il valide ». Le premier verbe
+   * de la promesse produit, et le dernier à être livré.
+   *
+   * Corps BRUT (`application/octet-stream`), comme la photo du classeur, et
+   * `onRequest` plutôt que `preHandler` : l'authentification est vérifiée
+   * AVANT que Fastify ne bufferise, sinon un anonyme coûte 25 Mo d'allocation.
+   *
+   * L'AUDIO N'EST PAS STOCKÉ. Il est transcrit puis relâché. Le produit n'en a
+   * plus besoin après extraction, et une voix est une donnée personnelle d'un
+   * autre ordre que le texte qu'elle porte. Ce qui est conservé, c'est la
+   * TRANSCRIPTION, dans la proposition — et c'est elle qui rend la relecture
+   * possible : sans l'audio, c'est le seul moyen pour le dirigeant de vérifier
+   * que « 2,5 » n'est pas devenu « 25 » (le risque nommé par le spike F1).
+   */
+  // Parser binaire CANTONNÉ à cette route (plugin encapsulé), comme le
+  // classeur et l'import FEC : le reste de l'API n'accepte pas d'octet-stream.
+  void app.register(async (dictee) => {
+    dictee.addContentTypeParser(
+      "application/octet-stream",
+      { parseAs: "buffer" },
+      (_request, body, done) => done(null, body),
+    );
+
+    dictee.post(
+      "/devis/dictee",
+      { onRequest: businessRoute, bodyLimit: TRANSCRIPTION_MAX_BYTES },
+      async (request, reply) => {
+        const body = request.body;
+        if (!Buffer.isBuffer(body) || body.length === 0) {
+          return reply.code(400).send({ error: "audio attendu (corps application/octet-stream)" });
+        }
+
+        // Format reconnu par ses OCTETS, jamais par ce que le client déclare :
+        // envoyer une image à un moteur de transcription coûterait un appel
+        // facturé pour rien. Refus AVANT toute sortie réseau.
+        const format = sniffAudioFormat(body);
+        if (format === null) {
+          return reply.code(415).send({
+            error: "format audio non reconnu (WAV, MP3, OGG, FLAC, WebM ou MP4)",
+          });
+        }
+
+        // Même plafond que le cockpit conversationnel : deux appels modèle par
+        // requête (transcription + extraction), sur une route pilotée depuis un
+        // écran. La transcription est facturée à la SECONDE d'audio — sans
+        // plafond, une boucle coûte vite.
+        if (!askLimiter.take(`${request.tenantId}:${request.authSession.user.id}`)) {
+          return reply.code(429).send({ error: "trop de demandes — patientez une minute" });
+        }
+
+        let transcript: string;
+        try {
+          const result = await transcribe({
+            audio: new Uint8Array(body),
+            // Nom NEUTRE : surtout pas « devis-mme-martin.wav ». Il part chez le
+            // fournisseur, et un nom de fichier est une donnée comme une autre.
+            fileName: `dictee.${format.id}`,
+            language: "fr",
+            tenantId: request.tenantId,
+            requestId: `dictee-${randomUUID()}`,
+          });
+          transcript = result.text.trim();
+        } catch (error) {
+          // NOM d'erreur seulement : le message pourrait citer l'audio ou son
+          // contenu. Et le refus est MOTIVÉ côté client, jamais un 500 muet.
+          request.log.warn(
+            { err: error instanceof Error ? error.name : "Error", format: format.id },
+            "dictation transcription failed",
+          );
+          return reply.code(502).send({
+            error: format.providerConfirmed
+              ? "transcription indisponible — réessayez dans un instant"
+              : // Ce format n'est pas garanti par le fournisseur (voir
+                // `audioFormat.ts`) : le dire vaut mieux que laisser croire à une
+                // panne passagère, parce que le remède n'est pas le même.
+                `transcription indisponible pour le format ${format.id}, non garanti par le fournisseur — réessayez depuis un autre navigateur`,
+          });
+        }
+
+        if (transcript.length < 10) {
+          // Une dictée vide ou inaudible n'est pas une erreur technique : c'est
+          // un résultat, et il se dit. Enchaîner sur l'extraction produirait une
+          // proposition vide que personne ne saurait interpréter.
+          return reply
+            .code(422)
+            .send({ error: "rien d'exploitable n'a été entendu — reprenez l'enregistrement" });
+        }
+
+        let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
+        try {
+          toolset = await buildToolset({
+            ...agentContext,
+            tenantId: request.tenantId,
+            role: request.membershipRole,
+            requestedBy: request.authSession.user.id,
+            employee: "commercial",
+            onPendingAction: () => {
+              void notifyPendingAction(request.tenantId).catch((error: unknown) => {
+                request.log.warn(
+                  { err: error instanceof Error ? error.name : "Error" },
+                  "push record failed",
+                );
+              });
+            },
+          });
+          const result = await toolset.execute("draft_quote_from_dictation", { transcript });
+          void reply.header("cache-control", "private, no-store");
+          return reply.code(202).send({
+            ...(JSON.parse(result) as Record<string, unknown>),
+            // Rendu à l'écran pour la relecture immédiate, avant même d'ouvrir
+            // la file : ce que la machine a ENTENDU, mot pour mot.
+            transcript,
+            formatProviderConfirmed: format.providerConfirmed,
+          });
+        } catch (error) {
+          if (isUnknownTool(error)) return reply.code(409).send({ error: "module désactivé" });
+          request.log.warn(
+            { err: error instanceof Error ? error.name : "Error" },
+            "dictation quote draft failed",
+          );
+          return reply.code(422).send({ error: "dictée non exploitable en devis" });
+        } finally {
+          await toolset?.close().catch(() => undefined);
+        }
+      },
+    );
   });
 
   // --- Échéancier fiscal & social (2.9) -----------------------------------
@@ -3882,10 +4055,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       };
     } catch (error) {
       // Jamais un détail fournisseur ni un nom de salarié dans la réponse.
-      request.log.warn(
-        { err: error instanceof Error ? error.name : "Error" },
-        "silae sync failed",
-      );
+      request.log.warn({ err: error instanceof Error ? error.name : "Error" }, "silae sync failed");
       return reply.code(503).send({ error: "synchronisation indisponible" });
     }
   });
@@ -3902,63 +4072,60 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     "/factures/facturx",
     { preHandler: ownerRoute, bodyLimit: 12 * 1024 * 1024 },
     async (request, reply) => {
-    const body = z
-      .object({
-        invoice: z.unknown(),
-        profile: z.enum(["MINIMUM", "BASIC_WL", "BASIC", "EN16931"]).default("EN16931"),
-        /** PDF existant du tenant (base64) : on attache, on ne redessine pas. */
-        basePdfBase64: z.string().max(12_000_000).optional(),
-      })
-      .strict()
-      .safeParse(request.body);
-    if (!body.success) return reply.code(400).send({ error: "invalid payload" });
+      const body = z
+        .object({
+          invoice: z.unknown(),
+          profile: z.enum(["MINIMUM", "BASIC_WL", "BASIC", "EN16931"]).default("EN16931"),
+          /** PDF existant du tenant (base64) : on attache, on ne redessine pas. */
+          basePdfBase64: z.string().max(12_000_000).optional(),
+        })
+        .strict()
+        .safeParse(request.body);
+      if (!body.success) return reply.code(400).send({ error: "invalid payload" });
 
-    const invoice = FacturXInvoice.safeParse(body.data.invoice);
-    if (!invoice.success) {
-      // Jamais l'erreur Zod telle quelle : elle citerait les valeurs reçues
-      // (nom du client, montants) dans la réponse et les logs.
-      return reply.code(400).send({ error: "facture invalide" });
-    }
+      const invoice = FacturXInvoice.safeParse(body.data.invoice);
+      if (!invoice.success) {
+        // Jamais l'erreur Zod telle quelle : elle citerait les valeurs reçues
+        // (nom du client, montants) dans la réponse et les logs.
+        return reply.code(400).send({ error: "facture invalide" });
+      }
 
-    const audit = auditInvoice(invoice.data);
-    if (!audit.issuable) {
-      // 422 + le détail des BLOQUANTS : l'owner doit savoir quoi corriger.
-      return reply.code(422).send({ error: "facture non conforme", audit });
-    }
+      const audit = auditInvoice(invoice.data);
+      if (!audit.issuable) {
+        // 422 + le détail des BLOQUANTS : l'owner doit savoir quoi corriger.
+        return reply.code(422).send({ error: "facture non conforme", audit });
+      }
 
-    try {
-      const xml = buildCiiXml(invoice.data, body.data.profile);
-      const pdf = await buildFacturXPdf(
-        invoice.data,
-        xml,
-        body.data.profile,
-        body.data.basePdfBase64
-          ? new Uint8Array(Buffer.from(body.data.basePdfBase64, "base64"))
-          : undefined,
-      );
-      // Données client (nom, adresse, SIRET, montants) : jamais mises en
-      // cache par un intermédiaire — même doctrine que la photo du classeur.
-      void reply.header("cache-control", "private, no-store");
-      return {
-        profile: body.data.profile,
-        rulesVersion: audit.rulesVersion,
-        audit,
-        fileName: `facture-${invoice.data.number || "sans-numero"}.pdf`.replace(
-          /[^\w.-]/g,
-          "-",
-        ),
-        pdfBase64: Buffer.from(pdf).toString("base64"),
-        xml,
-      };
-    } catch (error) {
-      // Nom d'erreur seulement : le message pourrait citer la facture.
-      request.log.warn(
-        { err: error instanceof Error ? error.name : "Error" },
-        "facturx generation failed",
-      );
-      // Un PDF de base illisible/chiffré est une erreur d'ENTRÉE : un 503
-      // ferait chercher une panne serveur là où il faut corriger le fichier.
-      return reply.code(422).send({ error: "PDF de base illisible ou facture non générable" });
+      try {
+        const xml = buildCiiXml(invoice.data, body.data.profile);
+        const pdf = await buildFacturXPdf(
+          invoice.data,
+          xml,
+          body.data.profile,
+          body.data.basePdfBase64
+            ? new Uint8Array(Buffer.from(body.data.basePdfBase64, "base64"))
+            : undefined,
+        );
+        // Données client (nom, adresse, SIRET, montants) : jamais mises en
+        // cache par un intermédiaire — même doctrine que la photo du classeur.
+        void reply.header("cache-control", "private, no-store");
+        return {
+          profile: body.data.profile,
+          rulesVersion: audit.rulesVersion,
+          audit,
+          fileName: `facture-${invoice.data.number || "sans-numero"}.pdf`.replace(/[^\w.-]/g, "-"),
+          pdfBase64: Buffer.from(pdf).toString("base64"),
+          xml,
+        };
+      } catch (error) {
+        // Nom d'erreur seulement : le message pourrait citer la facture.
+        request.log.warn(
+          { err: error instanceof Error ? error.name : "Error" },
+          "facturx generation failed",
+        );
+        // Un PDF de base illisible/chiffré est une erreur d'ENTRÉE : un 503
+        // ferait chercher une panne serveur là où il faut corriger le fichier.
+        return reply.code(422).send({ error: "PDF de base illisible ou facture non générable" });
       }
     },
   );
@@ -3968,22 +4135,24 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     "/factures/facturx/lire",
     { preHandler: businessRoute, bodyLimit: 12 * 1024 * 1024 },
     async (request, reply) => {
-    const body = z
-      .object({ pdfBase64: z.string().min(1).max(12_000_000) })
-      .strict()
-      .safeParse(request.body);
-    if (!body.success) return reply.code(400).send({ error: "invalid payload" });
-    try {
-      const xml = await extractFacturXXml(new Uint8Array(Buffer.from(body.data.pdfBase64, "base64")));
-      if (!xml) return reply.code(422).send({ error: "aucune donnée Factur-X dans ce PDF" });
-      void reply.header("cache-control", "private, no-store");
-      return { xml };
-    } catch (error) {
-      request.log.warn(
-        { err: error instanceof Error ? error.name : "Error" },
-        "facturx read failed",
-      );
-      return reply.code(422).send({ error: "PDF illisible" });
+      const body = z
+        .object({ pdfBase64: z.string().min(1).max(12_000_000) })
+        .strict()
+        .safeParse(request.body);
+      if (!body.success) return reply.code(400).send({ error: "invalid payload" });
+      try {
+        const xml = await extractFacturXXml(
+          new Uint8Array(Buffer.from(body.data.pdfBase64, "base64")),
+        );
+        if (!xml) return reply.code(422).send({ error: "aucune donnée Factur-X dans ce PDF" });
+        void reply.header("cache-control", "private, no-store");
+        return { xml };
+      } catch (error) {
+        request.log.warn(
+          { err: error instanceof Error ? error.name : "Error" },
+          "facturx read failed",
+        );
+        return reply.code(422).send({ error: "PDF illisible" });
       }
     },
   );
@@ -4131,7 +4300,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         role: request.membershipRole,
       });
       const raw = JSON.parse(await toolset.execute("pennylane_get_invoices", { limit: 100 })) as {
-        items?: { amount?: string | number | null; date?: string | null; currency?: string | null }[];
+        items?: {
+          amount?: string | number | null;
+          date?: string | null;
+          currency?: string | null;
+        }[];
       };
       const ledger = (raw.items ?? []).map((invoice) => {
         const value = typeof invoice.amount === "string" ? Number(invoice.amount) : invoice.amount;
@@ -4305,18 +4478,22 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return { endpoints };
   });
 
-  app.delete("/webhooks/endpoints/:provider", { preHandler: ownerRoute }, async (request, reply) => {
-    const params = z
-      .object({ provider: z.enum(WEBHOOK_PROVIDERS) })
-      .safeParse(request.params);
-    if (!params.success) return reply.code(400).send({ error: "invalid payload" });
-    const deleted = await withTenant(request.tenantId, (tx) =>
-      tx.webhookEndpoint.deleteMany({ where: { provider: params.data.provider } }),
-    );
-    if (deleted.count === 0) return reply.code(404).send({ error: "unknown endpoint" });
-    await vault.delete(webhookSecretName(request.tenantId, params.data.provider)).catch(() => undefined);
-    return { deleted: true };
-  });
+  app.delete(
+    "/webhooks/endpoints/:provider",
+    { preHandler: ownerRoute },
+    async (request, reply) => {
+      const params = z.object({ provider: z.enum(WEBHOOK_PROVIDERS) }).safeParse(request.params);
+      if (!params.success) return reply.code(400).send({ error: "invalid payload" });
+      const deleted = await withTenant(request.tenantId, (tx) =>
+        tx.webhookEndpoint.deleteMany({ where: { provider: params.data.provider } }),
+      );
+      if (deleted.count === 0) return reply.code(404).send({ error: "unknown endpoint" });
+      await vault
+        .delete(webhookSecretName(request.tenantId, params.data.provider))
+        .catch(() => undefined);
+      return { deleted: true };
+    },
+  );
 
   // Journal des réceptions : métadonnées de traitement UNIQUEMENT — le
   // payload fournisseur (données métier) ne ressort pas par cette route.
@@ -4460,7 +4637,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         });
         if (!verdict.ok) {
           // La RAISON reste côté serveur (ops), jamais dans la réponse.
-          request.log.warn({ reason: verdict.reason, provider: endpoint.provider }, "webhook rejected");
+          request.log.warn(
+            { reason: verdict.reason, provider: endpoint.provider },
+            "webhook rejected",
+          );
           return refuse();
         }
 
@@ -4514,7 +4694,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         }
 
         if (stored) {
-          const event = { ...envelope, id: stored.id, tenantId: endpoint.tenantId, provider: endpoint.provider, payload };
+          const event = {
+            ...envelope,
+            id: stored.id,
+            tenantId: endpoint.tenantId,
+            provider: endpoint.provider,
+            payload,
+          };
           void processWebhookEvent(event).catch((error: unknown) => {
             request.log.warn(
               { err: error instanceof Error ? error.name : "Error" },
@@ -4535,7 +4721,6 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // surface produit, PAS une frontière de sécurité : les autorisations des
   // routes restent inchangées, seuls nav et outils agent suivent.
 
-
   app.get("/modules", { preHandler: businessRoute }, async (request) => {
     const { vertical, overrides } = await readModuleState(request.tenantId);
     // Le vertical est une donnée stratégique OWNER-ONLY (3.7) : la nav des
@@ -4545,19 +4730,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return {
       version: MODULE_CATALOG_VERSION,
       ...(isOwner ? { vertical } : {}),
-      modules: resolveModules(vertical, overrides).map(
-        ({ tools: _tools, source, ...module }) => ({
-          ...module,
-          ...(isOwner ? { source } : {}),
-        }),
-      ),
+      modules: resolveModules(vertical, overrides).map(({ tools: _tools, source, ...module }) => ({
+        ...module,
+        ...(isOwner ? { source } : {}),
+      })),
     };
   });
 
   app.put("/modules/:id", { preHandler: ownerRoute }, async (request, reply) => {
-    const params = z
-      .object({ id: z.string().min(1).max(50) })
-      .safeParse(request.params);
+    const params = z.object({ id: z.string().min(1).max(50) }).safeParse(request.params);
     const body = z.object({ active: z.boolean() }).strict().safeParse(request.body);
     if (!params.success || !body.success) {
       return reply.code(400).send({ error: "invalid payload" });
@@ -4690,9 +4871,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   // Ajout 1-clic depuis un modèle CNIL du catalogue versionné.
   app.post("/rgpd/modele/:templateId", { preHandler: ownerRoute }, async (request, reply) => {
-    const params = z
-      .object({ templateId: z.string().min(1).max(50) })
-      .safeParse(request.params);
+    const params = z.object({ templateId: z.string().min(1).max(50) }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: "invalid payload" });
     const template = PROCESSING_TEMPLATES.find((t) => t.id === params.data.templateId);
     if (!template) return reply.code(404).send({ error: "unknown template" });
@@ -5166,7 +5345,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           if (affaire._count.fecInvoices > 0) return "des factures y sont rattachées, à vérifier";
           if ((affaire.depositsCents ?? 0) > 0) return "un acompte a été encaissé, à vérifier";
           if ((affaire.hoursWorked ?? 0) > 0) return "des heures y ont été pointées, à vérifier";
-          if (affaire.actualEndDate !== null) return "une date de fin réelle est saisie, à vérifier";
+          if (affaire.actualEndDate !== null)
+            return "une date de fin réelle est saisie, à vérifier";
           return null;
         };
 
@@ -5178,8 +5358,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         // Ce qui RESTE, et pourquoi — jamais une conservation muette.
         const conservees = affaires
           .map((affaire) => ({ affaire, motif: motifDeConservation(affaire) }))
-          .filter((row): row is { affaire: (typeof affaires)[number]; motif: string } =>
-            row.motif !== null,
+          .filter(
+            (row): row is { affaire: (typeof affaires)[number]; motif: string } =>
+              row.motif !== null,
           );
 
         const deleted = await tx.prospect.deleteMany({ where: { id: params.data.id } });
@@ -5255,7 +5436,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const parsed = ReviewBody.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid payload" });
     const reviewedAt = new Date(`${parsed.data.reviewedAt}T00:00:00Z`);
-    if (Number.isNaN(reviewedAt.getTime()) || reviewedAt.toISOString().slice(0, 10) !== parsed.data.reviewedAt) {
+    if (
+      Number.isNaN(reviewedAt.getTime()) ||
+      reviewedAt.toISOString().slice(0, 10) !== parsed.data.reviewedAt
+    ) {
       return reply.code(400).send({ error: "invalid payload" });
     }
     try {
@@ -5284,9 +5468,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     }
   });
 
-  const ImportReviewsBody = z
-    .object({ reviews: z.array(ReviewBody).min(1).max(500) })
-    .strict();
+  const ImportReviewsBody = z.object({ reviews: z.array(ReviewBody).min(1).max(500) }).strict();
 
   app.post("/avis/import", { preHandler: ownerRoute }, async (request, reply) => {
     const parsed = ImportReviewsBody.safeParse(request.body);
@@ -5498,19 +5680,17 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       });
       const schedule = applyTaxOverrides(
         buildTaxSchedule(resolveTaxProfile(stored, activeStaff), windowFrom, windowTo),
-        overrides.map(
-          (row): TaxDeadlineOverride => ({
-            obligationId: row.obligationId,
-            dueDate: row.dueDate.toISOString().slice(0, 10),
-            amountCents: row.amountCents,
-            // Frontière typée, même sur une lecture : un statut inattendu
-            // sortirait l'occurrence de `stillDue`, donc du brief, en silence.
-            // `prevu` est le défaut du calendrier — on n'invente rien en y
-            // retombant, on refuse juste de disparaître.
-            status: DeadlineStatus.catch("prevu").parse(row.status),
-            note: row.note,
-          }),
-        ),
+        overrides.map((row): TaxDeadlineOverride => ({
+          obligationId: row.obligationId,
+          dueDate: row.dueDate.toISOString().slice(0, 10),
+          amountCents: row.amountCents,
+          // Frontière typée, même sur une lecture : un statut inattendu
+          // sortirait l'occurrence de `stillDue`, donc du brief, en silence.
+          // `prevu` est le défaut du calendrier — on n'invente rien en y
+          // retombant, on refuse juste de disparaître.
+          status: DeadlineStatus.catch("prevu").parse(row.status),
+          note: row.note,
+        })),
       );
 
       return {
@@ -6013,7 +6193,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         // pour répondre « rien à proposer ». C'est le cas de tout tenant qui
         // n'utilise pas encore les affaires, donc le cas le plus fréquent.
         if (affaires.length === 0) {
-          return { alreadyImputed: false, result: suggestAffaires({ supplierName: null, docDate: null }, [], []) };
+          return {
+            alreadyImputed: false,
+            result: suggestAffaires({ supplierName: null, docDate: null }, [], []),
+          };
         }
 
         // Historique : ce que CE tenant a rattaché lui-même. Dérivé à la
@@ -6075,7 +6258,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       // Une pièce déjà rattachée n'a pas besoin d'être suggérée : proposer de
       // la rattacher ailleurs inviterait à une double imputation.
       if (outcome.alreadyImputed) {
-        return { kind: "abstention", why: "deja_rattachee", version: AFFAIRE_SUGGESTION_RULES_VERSION };
+        return {
+          kind: "abstention",
+          why: "deja_rattachee",
+          version: AFFAIRE_SUGGESTION_RULES_VERSION,
+        };
       }
       return { ...outcome.result, version: AFFAIRE_SUGGESTION_RULES_VERSION };
     },
