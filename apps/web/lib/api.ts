@@ -1582,6 +1582,38 @@ export const draftQuoteFromEmail = (
     body: JSON.stringify({ emailBody, ...(from ? { from } : {}) }),
   });
 
+/**
+ * Devis DICTÉ — la réponse porte la transcription, et ce n'est pas décoratif.
+ *
+ * L'audio n'étant pas conservé, c'est le SEUL moyen pour le dirigeant de
+ * confronter ce que la machine a structuré à ce qu'il a réellement dit. Le
+ * risque du moteur de transcription n'est pas d'échouer, c'est d'entendre
+ * « 25 » là où il a dit « 2,5 ».
+ */
+export const DictationDraftResult = QuoteDraftResult.extend({
+  transcript: z.string(),
+  /** `false` = format accepté par nous, non documenté par le fournisseur. */
+  formatProviderConfirmed: z.boolean(),
+});
+export type DictationDraftResult = z.infer<typeof DictationDraftResult>;
+
+export const draftQuoteFromDictation = async (
+  audio: Blob,
+): Promise<DictationDraftResult> => {
+  // `fetch` direct, comme la photo du classeur : le corps est binaire, pas du
+  // JSON, et il ne repasse jamais par `JSON.stringify`.
+  const response = await fetch("/backend/devis/dictee", {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: audio,
+  });
+  if (!response.ok) {
+    const detail = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiError(response.status, detail?.error ?? `HTTP ${response.status}`);
+  }
+  return DictationDraftResult.parse(await response.json());
+};
+
 /*
  * Affaires (4.1) — le pivot du produit.
  *

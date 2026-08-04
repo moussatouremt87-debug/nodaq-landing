@@ -219,6 +219,7 @@ export const WRITE_TOOL_EVENTS: Readonly<Record<string, DomainEvent>> = {
   draft_dunning: "action.preparee",
   ocr_and_book_invoice: "action.preparee",
   draft_quote_from_email: "action.preparee",
+  draft_quote_from_dictation: "action.preparee",
   draft_review_reply: "action.preparee",
   draft_prospect_email: "action.preparee",
   adjust_stock: "action.preparee",
@@ -297,6 +298,7 @@ export const MUTATION_EFFECTS: Readonly<Record<string, MutationEffect>> = {
   // C'est la file (et le badge de la nav) qu'ils périment, pas leur page.
   draftReviewReply: ["action.preparee"],
   draftQuoteFromEmail: ["action.preparee"],
+  draftQuoteFromDictation: ["action.preparee"],
   proposeEReporting: ["action.preparee"],
   // Affaires (4.1) — le pivot du produit
   createAffaire: ["affaire.modifiee"],

@@ -366,3 +366,10 @@ export async function routeChat(
 }
 export { transcribe, TranscribeTask, TRANSCRIPTION_MAX_BYTES } from "./transcribe.js";
 export type { TranscribeResult } from "./transcribe.js";
+export {
+  AUDIO_FORMATS,
+  AUDIO_FORMATS_VERSION,
+  PROVIDER_CONFIRMED_FORMATS,
+  sniffAudioFormat,
+} from "./audioFormat.js";
+export type { AudioFormat } from "./audioFormat.js";

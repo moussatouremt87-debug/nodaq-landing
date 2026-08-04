@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ApiError, draftQuoteFromEmail } from "../../lib/api";
 import { emitDomainEvent } from "../../lib/freshness";
 import type { QuoteDraftResult } from "../../lib/api";
+import { Dictaphone } from "./Dictaphone";
 
 /*
  * Devis depuis un e-mail (2.7). Le texte collé est écrit par un TIERS : il
@@ -46,6 +47,10 @@ export default function DevisPage() {
 
   return (
     <div className="page">
+      {/* La dictée d'abord : c'est le geste du terrain, l'e-mail est celui du
+          bureau. L'ordre de la page suit celui de la journée. */}
+      <Dictaphone />
+
       <section className="card">
         <h2>Devis depuis un e-mail</h2>
         <p className="muted">

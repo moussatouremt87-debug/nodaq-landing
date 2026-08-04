@@ -31,9 +31,12 @@ import { runDataQuery } from "./dataQuery.js";
 import {
   buildQuoteProposal,
   CATALOG_WINDOW,
+  DICTATION_EXTRACTION_PROMPT,
+  DICTATION_MAX,
   EMAIL_BODY_MAX,
   QUOTE_EXTRACTION_PROMPT,
   QuoteRequestExtraction,
+  wrapDictation,
   wrapEmailBody,
 } from "./quoteRequest.js";
 import type { CatalogItem } from "./quoteRequest.js";
@@ -132,6 +135,7 @@ export const TOOL_POLICIES = {
   analyze_reputation: { requiresValidation: false },
   draft_review_reply: { requiresValidation: true },
   draft_quote_from_email: { requiresValidation: true },
+  draft_quote_from_dictation: { requiresValidation: true },
   check_stock_alerts: { requiresValidation: false },
   adjust_stock: { requiresValidation: true },
   simulate_material_prices: { requiresValidation: false },
@@ -1053,6 +1057,135 @@ export function createActionsMcpServer(context: ActionsServerContext): McpServer
               // Expéditeur conservé pour que l'humain sache À QUI répondre —
               // borné, et jamais renvoyé au modèle.
               from: typeof from === "string" ? from.slice(0, 320) : null,
+              label: proposal.label,
+            } as unknown as Prisma.InputJsonValue,
+          },
+        }),
+      );
+      context.onPendingAction?.();
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              pendingActionId: pendingAction.id,
+              status: "pending_validation",
+              lines: proposal.lines.length,
+              unmatchedCount: proposal.unmatchedCount,
+              catalogTruncated: proposal.catalogTruncated,
+              pricing: "à fixer par le dirigeant",
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  /*
+   * Devis DICTÉ — la promesse du produit, prise au mot : « il dicte, il
+   * photographie, il valide ».
+   *
+   * Même moteur d'extraction que l'e-mail (2.7), et c'est délibéré : la charge
+   * de ce ticket n'a jamais été la transcription, c'est le passage du texte
+   * libre au devis structuré, qui existe déjà et qui est testé.
+   *
+   * Ce qui DIFFÈRE, et il ne fallait pas le recopier machinalement : la
+   * provenance. L'e-mail vient d'un inconnu, la dictée du patron lui-même.
+   * L'avertissement « écrit par un TIERS » serait faux ici — la garde
+   * structurelle, elle, reste (voir `DICTATION_EXTRACTION_PROMPT`).
+   *
+   * L'audio N'ARRIVE PAS jusqu'ici : il est transcrit en amont, dans l'API, et
+   * n'est jamais stocké. Cet outil ne voit que du texte — déjà classé
+   * `confidentiel` par construction, et propagé comme tel.
+   */
+  server.registerTool(
+    "draft_quote_from_dictation",
+    {
+      description:
+        "Prépare une PROPOSITION de devis à partir d'une note vocale déjà transcrite : " +
+        "le chantier est extrait, les articles rapprochés du référentiel, et la " +
+        "proposition déposée dans la file de validation. N'ENVOIE JAMAIS et NE FIXE " +
+        "AUCUN PRIX. N'invente aucune quantité qui n'a pas été dictée.",
+      inputSchema: {
+        transcript: z
+          .string()
+          .min(10)
+          .max(DICTATION_MAX)
+          .describe("Transcription de la note vocale (texte brut)"),
+      },
+      annotations,
+    },
+    async ({ transcript }) => {
+      const catalog = await withTenant(tenantId, (tx) =>
+        tx.stockItem.findMany({
+          select: { id: true, name: true, sku: true, unit: true },
+          orderBy: { name: "asc" },
+          take: CATALOG_WINDOW + 1,
+        }),
+      );
+      const catalogTruncated = catalog.length > CATALOG_WINDOW;
+
+      const answer = await route({
+        text: `${DICTATION_EXTRACTION_PROMPT}${wrapDictation(transcript)}`,
+        // PROPAGÉE depuis `transcribe()`, qui la fixe : le texte issu d'une
+        // dictée reste confidentiel et ne repart jamais vers un tier frontier
+        // à l'étape suivante. C'est la règle que le spike a écrite, et c'est
+        // ici qu'elle tient ou qu'elle ne tient pas.
+        category: "confidentiel",
+        tenantId,
+        requestId: `quote-dictation-${randomUUID()}`,
+      });
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(
+          answer.text
+            .trim()
+            .replace(/^```(?:json)?\s*/i, "")
+            .replace(/\s*```$/, ""),
+        );
+      } catch {
+        // Jamais la sortie du modèle dans l'erreur : elle contient la dictée.
+        throw new Error("dictation extraction returned non-JSON output");
+      }
+      const extraction = QuoteRequestExtraction.parse(parsed);
+      const proposal = buildQuoteProposal(
+        extraction,
+        catalog.slice(0, CATALOG_WINDOW).map(
+          (item): CatalogItem => ({
+            id: item.id,
+            name: item.name,
+            sku: item.sku,
+            unit: item.unit,
+          }),
+        ),
+        catalogTruncated,
+      );
+
+      const pendingAction = await withTenant(tenantId, (tx) =>
+        tx.pendingAction.create({
+          data: {
+            tenantId,
+            type: "create_quote",
+            requestedBy: context.requestedBy ?? null,
+            employee: context.employee ?? null,
+            payload: {
+              quote: {
+                customer: proposal.customerName,
+                label: proposal.summary,
+                deadline: proposal.deadline,
+                lines: proposal.lines,
+                unmatchedCount: proposal.unmatchedCount,
+                catalogTruncated: proposal.catalogTruncated,
+              },
+              source: "dictee",
+              // La TRANSCRIPTION est conservée dans la proposition, et c'est
+              // le cœur de la boucle de relecture : l'audio n'étant pas
+              // stocké, c'est le seul moyen pour le dirigeant de vérifier que
+              // « 2,5 » n'est pas devenu « 25 ». Sans elle, il validerait une
+              // structuration sans pouvoir la confronter à ce qu'il a dit.
+              transcript,
               label: proposal.label,
             } as unknown as Prisma.InputJsonValue,
           },

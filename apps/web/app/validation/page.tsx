@@ -202,6 +202,29 @@ function QuoteProposalDetail({ payload }: { payload: Dict }) {
           contenu écrit par un tiers, à relire.
         </p>
       )}
+      {/* DICTÉE : ce qui a été ENTENDU, mot pour mot, à côté de ce qu'on en a
+          tiré. L'audio n'est pas conservé — ce texte est donc le seul recours
+          pour vérifier que « 2,5 » n'est pas devenu « 25 ».
+          Sans ce bloc, la transcription était gardée en base pour une
+          relecture que cet écran ne rendait jamais : le dirigeant, seul à
+          pouvoir décider, ne la voyait pas. On conservait du verbatim pour une
+          finalité non réalisée, et la validation 1 clic restait aveugle. */}
+      {asString(payload.source) === "dictee" && (
+        <>
+          <p className="hint">
+            Devis dicté — l&apos;enregistrement n&apos;est pas conservé, seule la transcription
+            ci-dessous permet de vérifier ce qui a été compris.
+          </p>
+          {asString(payload.transcript) !== null && (
+            <>
+              <span className="overline">Ce qui a été entendu</span>
+              <blockquote className="email-preview">
+                <div className="body">{asString(payload.transcript)}</div>
+              </blockquote>
+            </>
+          )}
+        </>
+      )}
       {asString(quote?.deadline) && (
         <p className="hint">Échéance souhaitée : {asString(quote?.deadline)}</p>
       )}
