@@ -72,6 +72,19 @@ export const PendingActionSummary = z.object({
   affaire: z
     .object({ reference: z.string(), label: z.string(), status: z.string() })
     .nullable(),
+  /*
+   * MOTIF de réduction — owner seulement, et sur l'historique seulement (d'où
+   * `.optional()`, qui n'est pas ici une négligence).
+   *
+   * Ce n'est jamais un morceau de payload : l'API projette en SQL la seule
+   * phrase de motif, écrite côté serveur. Elle existe pour que l'historique
+   * cesse d'afficher « Rejetée » sur une ligne que personne n'a décidée.
+   *
+   * Pas de booléen `reduced` à côté : la première version en exposait un que
+   * l'écran ne lisait jamais — le « champ dont personne ne fait rien » que ce
+   * ticket refuse par ailleurs.
+   */
+  reducedReason: z.string().nullable().optional(),
 });
 export type PendingActionSummary = z.infer<typeof PendingActionSummary>;
 

@@ -371,9 +371,49 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       // et il aurait été incohérent de réserver l'écriture au dirigeant tout
       // en ouvrant la lecture à tous, dans le même diff.
       ...(isOwner
-        ? { affaireId: true, affaire: { select: { reference: true, label: true, status: true } } }
+        ? {
+            affaireId: true,
+            affaire: { select: { reference: true, label: true, status: true } },
+          }
         : {}),
+      // `payload` n'est JAMAIS sélectionné ici : voir `reducedReasons`.
     } as const;
+
+    /**
+     * Motif de réduction des lignes DÉCIDÉES, projeté en SQL.
+     *
+     * POURQUOI PAS `payload: true` DANS LE SELECT. Une première version le
+     * faisait, et rapatriait jusqu'à 550 payloads complets — brouillons
+     * nominatifs, factures clients, verbatims de dictée — à chaque
+     * chargement de la file, pour n'en lire qu'une phrase. C'est mot pour mot
+     * ce que le balayage de rétention refuse de faire (`retention.ts`), et
+     * l'argument ne vaut pas moins sur le chemin chaud de l'API : du contenu
+     * sensible manipulé sans finalité reste du contenu sensible manipulé sans
+     * finalité. Postgres extrait donc le seul champ utile, et le payload ne
+     * quitte jamais la base.
+     *
+     * Les motifs sont FIGÉS côté serveur (« source effacée (purge FEC) »,
+     * « sans décision ni reprise depuis N jours… ») : aucun contenu client ne
+     * transite par ce champ. `rejectProspectDrafts` (2.12) n'en écrit pas — la
+     * ligne est alors réduite sans motif, plutôt que de lui en inventer un.
+     *
+     * Owner seulement, et sur l'historique seulement : c'est le seul endroit
+     * qui l'affiche, une action en attente ouvrant son détail complet.
+     */
+    const reducedReasons = async (
+      tx: Prisma.TransactionClient,
+      ids: readonly string[],
+    ): Promise<Map<string, string>> => {
+      if (!isOwner || ids.length === 0) return new Map();
+      const rows = await tx.$queryRaw<{ id: string; reason: string | null }[]>`
+        SELECT id, payload->>'reducedReason' AS reason
+          FROM pending_actions
+         WHERE id IN (${Prisma.join(ids.map((id) => Prisma.sql`${id}::uuid`))})
+           AND (payload->'reduced') = 'true'::jsonb`;
+      return new Map(
+        rows.filter((row) => typeof row.reason === "string").map((row) => [row.id, row.reason!]),
+      );
+    };
 
     return withTenant(request.tenantId, async (tx) => {
       /*
@@ -402,7 +442,26 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         take: DECIDED_HISTORY_LIMIT,
         select,
       });
-      return [...pending, ...decided];
+      // L'historique est le seul endroit qui rend le motif : une action en
+      // attente ouvre son détail complet, elle n'en a pas besoin.
+      if (!isOwner) return [...pending, ...decided];
+      /*
+       * Le champ est ABSENT pour un non-owner, pas nul. `reducedReason: null`
+       * se lit « aucun motif, donc rien n'a été retiré » — une affirmation
+       * fausse là où la vraie réponse est « pas de votre ressort ». Un champ
+       * absent ne dit rien ; un champ nul dit quelque chose d'inexact.
+       */
+      const reasons = await reducedReasons(
+        tx,
+        decided.map((action) => action.id),
+      );
+      return [
+        ...pending,
+        ...decided.map((action) => ({
+          ...action,
+          reducedReason: reasons.get(action.id) ?? null,
+        })),
+      ];
     });
   });
 

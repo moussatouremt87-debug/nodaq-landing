@@ -65,6 +65,67 @@ if (pushSender) {
   app.log.info("push notifications not configured (no VAPID keys) — disabled");
 }
 
+/*
+ * Rétention de la file de validation (art. 5.1.e) — INCONDITIONNEL.
+ *
+ * À la différence du push, ce balayage n'a pas de « si configuré » : une
+ * obligation de conservation limitée ne dépend pas d'une clé VAPID. Une
+ * installation qui oublierait de le brancher garderait des brouillons
+ * nominatifs pour toujours sans que rien ne le signale.
+ */
+const { startRetentionSweep } = await import("./retention.js");
+const stopRetentionSweep = startRetentionSweep({
+  // Nom de l'erreur ET tenant concerné (un UUID opaque, pas une donnée) :
+  // sans le second, un tenant dont la rétention échoue à chaque passage reste
+  // introuvable, et donc jamais réparé.
+  onError: (name, tenantId) => app.log.warn({ err: name, tenantId }, "retention sweep failed"),
+  // Compteurs SEULEMENT — jamais un payload, jamais un nom de client. Sans
+  // cette ligne, un balayage qui rejette cent propositions serait
+  // indistinguable d'une perte de données.
+  onSweep: (result) => {
+    // Tronqué = des lignes n'ont PAS été examinées : ça se dit toujours, même
+    // quand le passage n'a rien modifié par ailleurs.
+    if (result.truncated) {
+      app.log.warn(
+        {
+          tenants: result.tenants,
+          scanned: result.scanned,
+          // NOMMÉS, même raison que le tenant d'une erreur : un tenant affamé
+          // seulement compté « quelque part » est signalé mais introuvable,
+          // donc jamais réparé.
+          truncatedTenants: result.truncatedTenants,
+        },
+        "retention sweep truncated — some actions were not examined",
+      );
+    }
+    // Un passage qui n'a RIEN fait ne se journalise pas… sauf s'il a échoué
+    // quelque part : un échec silencieux et un tenant propre se ressemblent
+    // trop pour qu'on les confonde.
+    if (
+      result.rejected === 0 &&
+      result.reduced === 0 &&
+      result.failed === 0 &&
+      result.unclassified.length === 0
+    ) {
+      return;
+    }
+    app.log.info(
+      {
+        tenants: result.tenants,
+        failed: result.failed,
+        scanned: result.scanned,
+        rejected: result.rejected,
+        reduced: result.reduced,
+        // Types d'action qu'aucun groupe ne réclame : ils ne sont PAS balayés,
+        // et le dire est la seule façon qu'ils finissent par l'être.
+        unclassified: result.unclassified,
+      },
+      "retention sweep",
+    );
+  },
+});
+app.addHook("onClose", async () => stopRetentionSweep());
+
 // Canal support (2.18) : polling IMAP -> Object Storage -> triage -> brouillons.
 // Tout est optionnel : boîte OU stockage absents = canal inactif, app intacte.
 const { createImapMailSource } = await import("./support/imap.js");

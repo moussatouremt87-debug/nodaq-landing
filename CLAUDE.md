@@ -138,6 +138,7 @@ Le détail vit dans `docs/` — **lis le doc du domaine avant d'y toucher**.
 | Équipe, plannings, performance horaire (**PII, owner-only**) | `apps/api/src` | `plannings-rh.md`, `performance-horaire.md` |
 | Import FEC (source de données) | `packages/fec` | `fec-import.md` |
 | **Effacement (art. 17)** : effacer une source efface ce qui en DÉRIVE | `apps/api/src/app.ts` | `effacement.md` |
+| **Rétention (art. 5.1.e)** : une proposition qui dort n'est plus une proposition | `apps/api/src/retention.ts` | `retention-file-validation.md` |
 | Marge, rapport mensuel, cockpit conversationnel, devis e-mail, prospection | `mcp-servers/actions/src` | `marge.md`, `rapport-mensuel.md`, `cockpit-conversationnel.md`, `devis-email.md`, `prospection.md` |
 | **Devis dicté** (audio jamais stocké ; la transcription EST la relecture) | `apps/api/src/app.ts`, `packages/llm/src/audioFormat.ts` | `dictee.md` |
 | Registre de modules (**frontière du produit**) | `packages/shared/src/moduleCatalog.ts` | `modules.md` |

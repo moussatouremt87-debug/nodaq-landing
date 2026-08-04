@@ -362,6 +362,12 @@ model PendingAction {
   @@index([tenantId])
   @@index([tenantId, status])
   @@index([tenantId, affaireId])
+  /// Chemin de lecture du balayage de rétention (art. 5.1.e) : il pagine par
+  /// curseur sur `(created_at, id)`. Sans cet index, chaque page retrie tout
+  /// l'historique du tenant — donc les plus gros arriérés, précisément ceux
+  /// qui ont le plus besoin d'être balayés, sont les premiers à dépasser le
+  /// délai de transaction.
+  @@index([tenantId, createdAt, id])
   @@map("pending_actions")
   @@schema("public")
 }
