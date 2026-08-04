@@ -503,6 +503,16 @@ export default function CockpitPage() {
               borne de lecture ne sont pas comptés.
             </p>
           )}
+          {/* Le montant, pas seulement le nombre : « 3 archivées » ne dit pas
+              de combien l'acquis est amputé, et c'est la seule question que le
+              patron se pose devant ce compteur. */}
+          {revenus.archiveesHorsAcquis > 0 && (
+            <p className="warn">
+              {revenus.archiveesHorsAcquis} {affaireWords(marges?.vertical ?? null).singular}(s)
+              archivé(e)s sans date de livraison :{" "}
+              {formatEuroCents(revenus.archiveesHorsAcquisCents)} hors de l&apos;acquis.
+            </p>
+          )}
         </div>
       )}
 

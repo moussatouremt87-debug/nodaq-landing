@@ -270,3 +270,63 @@ describe("archiver ne défait plus ce qui a été livré", () => {
     expect(res.engageCents).toBe(0);
   });
 });
+
+describe("ce qui sort de l'acquis faute de date est ANNONCÉ", () => {
+  it("une ARCHIVÉE devisée sans date de livraison est comptée, avec son montant", () => {
+    /*
+     * Sans ce compteur, une affaire réellement livrée puis archivée AVANT
+     * l'existence de `completedAt` sortait de l'acquis en silence. La colonne
+     * n'a pas été rétro-remplie — la déduire d'`actualEndDate` ou d'`updatedAt`
+     * serait l'inférence qu'elle remplace — donc le manque est dit, et chiffré.
+     */
+    const res = splitRevenus(
+      [
+        { ...AFFAIRE, status: "ARCHIVEE", quotedAmountCents: 42_000 },
+        { ...AFFAIRE, status: "ARCHIVEE", quotedAmountCents: 8_000 },
+      ],
+      null,
+    );
+    expect(res.acquisCents).toBe(0);
+    expect(res.archiveesHorsAcquis).toBe(2);
+    expect(res.archiveesHorsAcquisCents).toBe(50_000);
+  });
+
+  it("une ARCHIVÉE AVEC date de livraison n'y figure pas — elle est dans l'acquis", () => {
+    const res = splitRevenus(
+      [{ ...AFFAIRE, status: "ARCHIVEE", completedAt: "2026-03-14T10:00:00.000Z" }],
+      null,
+    );
+    expect(res.acquisCents).toBe(100_000);
+    expect(res.archiveesHorsAcquis).toBe(0);
+    expect(res.archiveesHorsAcquisCents).toBe(0);
+  });
+
+  it("une ARCHIVÉE SANS devis n'y figure pas non plus — il n'y a aucun montant à annoncer", () => {
+    // « 1 affaire, 0 € exclu » n'apprendrait rien et ferait douter d'un chiffre
+    // juste. Le compteur n'existe que pour porter un montant.
+    const res = splitRevenus(
+      [{ ...AFFAIRE, status: "ARCHIVEE", quotedAmountCents: null }],
+      null,
+    );
+    expect(res.archiveesHorsAcquis).toBe(0);
+  });
+
+  it("`exact` NE bascule PAS dessus — sinon l'indicateur ne dirait plus rien", () => {
+    /*
+     * Exclure une archivée sans date est une RÈGLE, pas un calcul raté. Chez
+     * un dirigeant qui archive ses devis perdus, faire tomber `exact` le
+     * rendrait faux en permanence — et masquerait les deux inexactitudes
+     * réelles : une valeur de travail inconnue, une lecture tronquée.
+     */
+    const res = splitRevenus(
+      [{ ...AFFAIRE, status: "ARCHIVEE", quotedAmountCents: 42_000 }],
+      null,
+    );
+    expect(res.archiveesHorsAcquis).toBe(1);
+    expect(res.exact).toBe(true);
+
+    // …alors qu'une valeur inconnue, elle, le fait bien tomber.
+    const inconnue = splitRevenus([{ ...AFFAIRE, quotedAmountCents: null }], null);
+    expect(inconnue.exact).toBe(false);
+  });
+});

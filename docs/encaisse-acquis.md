@@ -135,15 +135,45 @@ Le moteur, lui, ne rattrape que `ARCHIVEE` : c'est le **statut** qui décide, et
 `completedAt` ne fait que rendre `ARCHIVEE` lisible. Deux gardes plutôt qu'une —
 une seule suffirait à rendre un chiffre flatteur si l'autre cédait.
 
-**Jamais saisi par le client.** L'exposer en entrée rouvrirait exactement le
-défaut d'`actualEndDate`. Il est dérivé du statut, en sortie seulement.
+**Jamais saisi par le client, et refusé à DEUX endroits.** Le schéma d'entrée
+est `.strict()` — une tentative reçoit un 400 motivé, pas un 201 dont
+l'appelant croirait qu'il a posé la date. Et `toPrismaData` refuse les champs
+dérivés quoi qu'il arrive, pour le jour où quelqu'un ajouterait `completedAt`
+au schéma « pour corriger une date » : ce serait redevenu le champ libre
+qu'`actualEndDate` était.
+
+**Un seul endroit dérive la règle.** `POST /affaires/:id/archiver` écrivait
+`ARCHIVEE` en dur. Le résultat était juste, mais c'était le seul chemin
+d'écriture du statut hors de `nextCompletedAt` : le jour où la règle bouge, les
+tests unitaires seraient restés verts pendant que la route la plus utilisée pour
+archiver divergeait.
 
 **Aucun backfill, et c'est délibéré.** Les affaires archivées avant cette colonne
 ne portent aucune trace fiable de leur passage par `TERMINEE` — la déduire
 d'`actualEndDate` ou d'`updatedAt` serait précisément l'inférence que
-`completedAt` remplace. Elles restent hors de l'acquis. La sous-estimation
-persiste donc sur l'historique, et elle est dite ici plutôt que corrigée au
-jugé.
+`completedAt` remplace.
+
+Mais « dit dans le doc » n'est pas « dit au produit ». Une affaire réellement
+livrée puis archivée avant la migration sortait de l'acquis **en silence**, et
+*un compteur qui disparaît sans un mot est une donnée perdue*. La réponse porte
+donc `archiveesHorsAcquis` **et son montant** : « 3 affaires archivées sans date
+de livraison, 42 000 € hors de l'acquis ». Le nombre seul ne dirait pas de
+combien le chiffre est amputé — c'est pourtant la seule question qu'on se pose
+devant ce compteur.
+
+Deux populations s'y mélangent et rien ne permet de les distinguer : celles
+archivées avant la colonne, qui ont pu être livrées, et celles archivées depuis,
+dont on sait qu'elles ne l'ont pas été. Le compteur ne prétend donc pas mesurer
+une incertitude — il énonce un fait vérifiable : voilà ce qui est exclu, voilà
+combien.
+
+**`exact` ne bascule pas dessus**, et c'est un arbitrage. Exclure une archivée
+sans date de livraison est une **règle**, appliquée à l'identique à toutes — pas
+un calcul qui a échoué. Faire tomber `exact` la rendrait fausse en permanence
+chez tout dirigeant qui archive ses devis perdus, donc illisible : un indicateur
+toujours au rouge ne hiérarchise plus rien, et il masquerait les deux
+inexactitudes réelles — une valeur de travail inconnue, une lecture tronquée.
+Le montant exclu est rendu à côté ; il est dit, pas caché derrière un booléen.
 
 **L'encaissé déclaré, lui, est compté quel que soit le statut** : un acompte reçu sur
 une affaire finalement perdue est quand même sur le compte. C'est précisément

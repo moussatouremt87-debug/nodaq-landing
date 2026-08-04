@@ -1292,6 +1292,12 @@ export const RevenusSplit = z.object({
   encaisseFactureCents: z.number().nullable(),
   encaisseBasis: z.literal("ttc"),
   sansDevis: z.number(),
+  /* Ce qui sort de l'acquis faute de date de livraison, avec son montant. Une
+   * affaire livrée puis archivée avant l'existence de `completedAt` en fait
+   * partie : la colonne n'a pas été rétro-remplie, donc le manque est dit
+   * plutôt que deviné. */
+  archiveesHorsAcquis: z.number(),
+  archiveesHorsAcquisCents: z.number(),
   exact: z.boolean(),
   ignorees: z.number(),
 });

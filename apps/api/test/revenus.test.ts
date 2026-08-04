@@ -419,11 +419,16 @@ describe("archiver ne défait plus ce qui a été LIVRÉ", () => {
     expect(troisieme.json().completedAt).toBe(pose);
   });
 
-  it("`completedAt` n'est JAMAIS saisi par le client", async () => {
+  it("`completedAt` n'est JAMAIS saisi par le client — refus MOTIVÉ", async () => {
     /*
      * L'exposer en entrée rouvrirait exactement le défaut d'`actualEndDate` :
      * un champ libre posable sur une affaire jamais livrée, donc comptée à
-     * 100 % du devis en acquis. Le schéma est `.strict()` côté création.
+     * 100 % du devis en acquis.
+     *
+     * Le schéma est `.strict()` : un 400, pas un 201 dont l'appelant pourrait
+     * croire qu'il a posé la date. Et `toPrismaData` refuse le champ en second
+     * rideau, pour le jour où quelqu'un l'ajouterait au schéma « pour corriger
+     * une date » — c'est ce que la mutation ci-dessous vérifie.
      */
     const res = await app.inject({
       method: "POST",
@@ -436,15 +441,19 @@ describe("archiver ne défait plus ce qui a été LIVRÉ", () => {
         completedAt: "2026-01-01T00:00:00.000Z",
       },
     });
-    // Soit refusé, soit ignoré — jamais écrit.
-    if (res.statusCode === 201) {
-      const ligne = await withTenant(orgA, (tx) =>
-        tx.affaire.findUniqueOrThrow({ where: { id: res.json().id as string } }),
-      );
-      expect(ligne.completedAt).toBeNull();
-    } else {
-      expect(res.statusCode).toBe(400);
-    }
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("le convertisseur refuse le champ dérivé même si le schéma le laissait passer", async () => {
+    // Second rideau, testé directement : `toPrismaData` ne recopie jamais un
+    // champ dérivé, quelle que soit la porte d'entrée.
+    const { toPrismaData } = await import("../src/affaires.js");
+    const data = toPrismaData({
+      label: "x",
+      completedAt: "2026-01-01T00:00:00.000Z",
+    } as unknown as Parameters<typeof toPrismaData>[0]);
+    expect(data.completedAt).toBeUndefined();
+    expect(data.label).toBe("x");
   });
 });
 
@@ -456,11 +465,35 @@ describe("la troncature est DITE, et elle retire l'exactitude", () => {
      * un consommateur autre que l'écran aurait lu « exact » sur un chiffre
      * amputé.
      */
+    /*
+     * L'affaire lue est FIXÉE, pas laissée au hasard du tri.
+     *
+     * `loadRevenusSplit(tx, 1)` ne lit que la plus récente (`createdAt desc,
+     * id desc`), donc l'assertion `sansDevis === 0` dépendait de quelle affaire
+     * les tests précédents avaient créée en dernier — et le départage par UUID
+     * dès que deux lignes partagent la milliseconde. On force un `createdAt`
+     * futur : la ligne lue est celle qu'on a écrite, avec un devis explicite.
+     */
+    await withTenant(orgA, (tx) =>
+      tx.affaire.create({
+        data: {
+          tenantId: orgA,
+          reference: `${RUN}-tronc`,
+          label: "Affaire de troncature",
+          status: "TERMINEE",
+          quotedAmountCents: 12_345,
+          createdAt: new Date("2099-01-01T00:00:00.000Z"),
+        },
+      }),
+    );
+
     const { loadRevenusSplit } = await import("../src/affaires.js");
     const vue = await withTenant(orgA, (tx) => loadRevenusSplit(tx, 1));
     expect(vue.ignorees).toBeGreaterThan(0);
-    // Prouve que c'est bien la TRONCATURE qui fait tomber `exact` : sans cette
-    // ligne, une affaire sans devis dans le lot suffirait à expliquer le faux.
+    // La seule affaire lue est devisée : si `exact` tombe, c'est la TRONCATURE
+    // et rien d'autre. Sans cette ligne, une affaire sans devis tombée là par
+    // hasard expliquerait le faux tout aussi bien.
+    expect(vue.acquisCents).toBe(12_345);
     expect(vue.sansDevis).toBe(0);
     expect(vue.exact).toBe(false);
   });

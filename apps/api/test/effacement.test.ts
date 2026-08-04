@@ -885,3 +885,51 @@ describe("contrat — la source qui RÉÉCRIT le nom effacé", () => {
     expect(apres.clientName).toBe("Paul Tiers");
   });
 });
+
+describe("effacement — la livraison est un fait de CONSERVATION", () => {
+  it("une affaire livrée puis repassée en PERDUE n'est pas anonymisée à la légère", async () => {
+    /*
+     * `completedAt` atteste une transition RÉELLE vers `TERMINEE`, là où
+     * `actualEndDate` n'est qu'une saisie libre : c'est le fait le plus fort
+     * de la liste des motifs de conservation.
+     *
+     * Le cas est inatteignable par les routes — les statuts anonymisables
+     * effacent tous `completedAt` — mais cette cohérence ne tient qu'à
+     * `nextCompletedAt`. Faire dépendre une garde d'effacement d'une règle
+     * écrite dans un autre fichier, c'est la perdre au premier refactor.
+     */
+    const fiche = await app.inject({
+      method: "POST",
+      url: "/prospects",
+      headers: { cookie: ownerCookie },
+      payload: { name: `Alice Roux ${RUN}`, stage: "nouveau", source: "recommandation" },
+    });
+    expect(fiche.statusCode).toBe(201);
+    const prospectId = fiche.json().id as string;
+    const res = await app.inject({
+      method: "POST",
+      url: "/affaires",
+      headers: { cookie: ownerCookie },
+      payload: { label: `Livrée puis perdue ${RUN}`, prospectId, clientName: "Alice Roux" },
+    });
+    expect(res.statusCode).toBe(201);
+    const affaireId = res.json().id as string;
+    // On force l'état incohérent que les routes interdisent, pour vérifier que
+    // la garde d'effacement ne dépend pas d'elles.
+    await withTenant(orgA, (tx) =>
+      tx.affaire.update({
+        where: { id: affaireId },
+        data: { status: "PERDUE", completedAt: new Date("2026-05-01T09:00:00Z") },
+      }),
+    );
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/prospects/${prospectId}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(del.statusCode).toBe(200);
+    expect(del.json().affairesAnonymisees).toBe(0);
+    expect(del.json().affairesConservees[0].motif).toContain("livrée");
+  });
+});

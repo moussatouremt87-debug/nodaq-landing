@@ -81,7 +81,36 @@ export interface RevenusSplit {
    * sous-estimé et présenté comme exact, sans que personne sache de combien.
    */
   readonly sansDevis: number;
-  /** Rien d'inconnu n'a été laissé de côté. */
+  /**
+   * Affaires ARCHIVÉES devisées mais sans date de livraison — leur montant
+   * n'entre PAS dans l'acquis, et ce compteur le dit.
+   *
+   * Deux populations s'y mélangent, et rien ne permet de les distinguer :
+   *  - celles archivées AVANT l'existence de `completedAt`, qui ont pu être
+   *    livrées — la colonne n'a pas été rétro-remplie, parce que la déduire
+   *    d'`actualEndDate` ou d'`updatedAt` serait l'inférence qu'elle remplace ;
+   *  - celles archivées depuis, dont on sait qu'elles n'ont pas été livrées.
+   *
+   * Le compteur ne prétend donc PAS mesurer une incertitude : il énonce un
+   * fait vérifiable — voilà ce qui est exclu, et voilà combien. Sans lui, une
+   * affaire réellement livrée puis archivée avant la migration sortait de
+   * l'acquis en silence : « un compteur qui disparaît sans un mot est une
+   * donnée perdue. »
+   */
+  readonly archiveesHorsAcquis: number;
+  readonly archiveesHorsAcquisCents: number;
+  /**
+   * Rien d'inconnu n'a été laissé de côté.
+   *
+   * NE BASCULE PAS sur `archiveesHorsAcquis`, et c'est délibéré. Exclure une
+   * archivée sans date de livraison est une RÈGLE, appliquée à l'identique à
+   * toutes — pas un calcul qui a échoué. Faire tomber `exact` dessus le
+   * rendrait faux en permanence chez tout dirigeant qui archive ses devis
+   * perdus, donc illisible : un indicateur toujours au rouge ne hiérarchise
+   * plus rien, et il masquerait les deux inexactitudes réelles (une valeur de
+   * travail inconnue, une lecture tronquée). Le montant exclu est rendu à
+   * côté ; il est dit, pas caché derrière un booléen.
+   */
   readonly exact: boolean;
 }
 
@@ -127,7 +156,8 @@ const livreParArchivage = (affaire: RevenuAffaireInput): boolean =>
  *
  * `PROSPECT` et `DEVIS_ENVOYE` en sont exclus : rien n'est signé, et compter
  * dessus c'est compter sur un client qui n'a pas dit oui. `PERDUE` et
- * `ARCHIVEE` ne comptent nulle part.
+ * `ARCHIVEE` ne comptent pas comme du VENDU — une archivée porteuse d'un
+ * `completedAt` compte en revanche comme du LIVRÉ (voir `livreParArchivage`).
  */
 const VENDU = new Set(["ACCEPTEE", "EN_COURS"]);
 
@@ -154,6 +184,8 @@ export function splitRevenus(
   let engageCents = 0;
   let encaisseDeclareCents = 0;
   let sansDevis = 0;
+  let archiveesHorsAcquis = 0;
+  let archiveesHorsAcquisCents = 0;
 
   for (const affaire of affaires) {
     // L'argent reçu est un FAIT, indépendant du statut : un acompte encaissé
@@ -162,7 +194,19 @@ export function splitRevenus(
 
     const livre = LIVRE.has(affaire.status) || livreParArchivage(affaire);
     const vendu = VENDU.has(affaire.status);
-    if (!livre && !vendu) continue;
+    if (!livre && !vendu) {
+      // Ce qui sort de l'acquis faute de date de livraison est ANNONCÉ, avec
+      // son montant : c'est la seule façon de savoir de combien il manque.
+      if (
+        affaire.status === "ARCHIVEE" &&
+        affaire.completedAt === null &&
+        affaire.quotedAmountCents !== null
+      ) {
+        archiveesHorsAcquis += 1;
+        archiveesHorsAcquisCents += affaire.quotedAmountCents;
+      }
+      continue;
+    }
 
     if (affaire.quotedAmountCents === null) {
       // Signée mais sans devis : on ne sait pas ce que vaut ce travail.
@@ -182,6 +226,8 @@ export function splitRevenus(
     encaisseFactureCents,
     encaisseBasis: "ttc",
     sansDevis,
+    archiveesHorsAcquis,
+    archiveesHorsAcquisCents,
     exact: sansDevis === 0,
   };
 }
