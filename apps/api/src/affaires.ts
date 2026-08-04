@@ -57,7 +57,16 @@ export const AffaireCreateInput = z.object({
   startDate: isoDate.nullable().optional(),
   plannedEndDate: isoDate.nullable().optional(),
   actualEndDate: isoDate.nullable().optional(),
-});
+})
+  /*
+   * `.strict()` : une clé inconnue est REFUSÉE, pas retirée en silence.
+   *
+   * Un client qui tente `completedAt` doit recevoir un 400 motivé. Le retrait
+   * silencieux donnait un 201 dont l'appelant pouvait croire qu'il avait posé
+   * la date — et le prochain lecteur du code, ne voyant rien échouer, aurait
+   * pu conclure que le champ était accepté.
+   */
+  .strict();
 
 export const AffaireUpdateInput = AffaireCreateInput.partial();
 
@@ -187,6 +196,7 @@ export function serializeAffaire(affaire: {
   startDate: Date | null;
   plannedEndDate: Date | null;
   actualEndDate: Date | null;
+  completedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }) {
@@ -212,16 +222,69 @@ export function serializeAffaire(affaire: {
     startDate: day(affaire.startDate),
     plannedEndDate: day(affaire.plannedEndDate),
     actualEndDate: day(affaire.actualEndDate),
+    /* Un INSTANT, pas un jour : `completedAt` date une transition, pas une
+       journée de chantier. Le tronquer à la date perdrait l'ordre de deux
+       affaires terminées le même jour. */
+    completedAt: affaire.completedAt?.toISOString() ?? null,
     createdAt: affaire.createdAt.toISOString(),
     updatedAt: affaire.updatedAt.toISOString(),
   };
 }
+
+/**
+ * Ce que devient `completedAt` quand le statut change. PURE.
+ *
+ * `undefined` = ne pas toucher. C'est le cas le plus fréquent, et il est
+ * distinct de `null` : un `PATCH` qui ne parle pas du statut ne doit pas
+ * effacer une date de livraison, et un archivage doit la PRÉSERVER — c'est
+ * toute la raison d'être de la colonne.
+ *
+ * | Statut visé | Effet | Pourquoi |
+ * |---|---|---|
+ * | `TERMINEE` | posé (idempotent) | la transition EST le fait |
+ * | `ARCHIVEE` | préservé | ranger n'est pas défaire ; c'est ce qui lève la sous-estimation |
+ * | tout autre | effacé | une affaire reprise ou finalement perdue n'a pas été livrée |
+ *
+ * L'IDEMPOTENCE N'EST PAS UN DÉTAIL : re-poser la date à chaque `PATCH` d'une
+ * affaire déjà terminée ferait glisser la livraison vers la dernière
+ * correction de faute de frappe.
+ */
+export function nextCompletedAt(
+  /*
+   * L'UNION, pas `string` : un statut ajouté demain au tuple tomberait
+   * silencieusement dans la branche « efface », et une faute de frappe aussi.
+   * Typé ainsi, l'ajout est une erreur de compilation — pas une date perdue.
+   */
+  targetStatus: (typeof AFFAIRE_STATUSES)[number] | undefined,
+  current: Date | null,
+  now: Date,
+): Date | null | undefined {
+  if (targetStatus === undefined) return undefined;
+  if (targetStatus === "TERMINEE") return current ?? now;
+  if (targetStatus === "ARCHIVEE") return undefined;
+  // N'écrire que s'il y a quelque chose à effacer : un `update` inutile sur
+  // chaque changement de statut ferait bouger `updatedAt` pour rien.
+  return current === null ? undefined : null;
+}
+
+/**
+ * Champs DÉRIVÉS du statut : jamais recopiés depuis une entrée client, même
+ * si quelqu'un les ajoute un jour au schéma d'entrée.
+ *
+ * `completedAt` vaut sa valeur d'être un FAIT posé par la transition. Le jour
+ * où on l'exposerait « pour corriger une date », il redeviendrait le champ
+ * libre qu'`actualEndDate` était — posable sur une affaire jamais livrée, donc
+ * comptée à 100 % du devis en acquis. Ce refus est ici, dans le convertisseur,
+ * parce que c'est le seul point que TOUS les chemins d'écriture traversent.
+ */
+const DERIVED_FIELDS = new Set(["completedAt"]);
 
 /** Champs de date à convertir avant écriture Prisma. */
 export function toPrismaData(input: z.infer<typeof AffaireUpdateInput>): Record<string, unknown> {
   const data: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input)) {
     if (value === undefined) continue;
+    if (DERIVED_FIELDS.has(key)) continue;
     if (
       (key === "retentionReleaseDate" ||
         key === "startDate" ||
@@ -477,6 +540,7 @@ export async function loadRevenusSplit(
       status: true,
       quotedAmountCents: true,
       depositsCents: true,
+      completedAt: true,
     },
   });
 
@@ -525,6 +589,9 @@ export async function loadRevenusSplit(
       quotedAmountCents:
         affaire.quotedAmountCents === null ? null : Number(affaire.quotedAmountCents),
       depositsCents: Number(affaire.depositsCents ?? 0),
+      // Le FAIT qui permet à une affaire terminée PUIS archivée de rester dans
+      // l'acquis. Sans lui, le moteur ne voit qu'un statut `ARCHIVEE` muet.
+      completedAt: affaire.completedAt?.toISOString() ?? null,
     })),
     encaisseFactureCents,
   );

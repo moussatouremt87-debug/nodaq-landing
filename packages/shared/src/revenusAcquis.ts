@@ -30,7 +30,7 @@
  */
 
 /** Bump à chaque changement de règle de rattachement d'un statut. */
-export const REVENUS_VERSION = "2026-08-04";
+export const REVENUS_VERSION = "2026-08-04.1";
 
 export interface RevenuAffaireInput {
   /** Statut de l'affaire — c'est lui qui décide entre engagé et acquis. */
@@ -39,6 +39,15 @@ export interface RevenuAffaireInput {
   readonly quotedAmountCents: number | null;
   /** Acomptes DÉCLARÉS par le dirigeant. */
   readonly depositsCents: number;
+  /**
+   * Instant de la transition vers `TERMINEE`. `null` = jamais terminée.
+   *
+   * UN FAIT, PAS UNE DÉDUCTION : posé par la route au moment où le statut
+   * devient `TERMINEE`, effacé si l'affaire repart vers un statut vivant, et
+   * rien d'autre ne l'écrit. C'est ce qui le distingue d'`actualEndDate`, champ
+   * libre qu'un archivage d'affaire abandonnée pouvait porter.
+   */
+  readonly completedAt: string | null;
 }
 
 export interface RevenusSplit {
@@ -72,7 +81,36 @@ export interface RevenusSplit {
    * sous-estimé et présenté comme exact, sans que personne sache de combien.
    */
   readonly sansDevis: number;
-  /** Rien d'inconnu n'a été laissé de côté. */
+  /**
+   * Affaires ARCHIVÉES devisées mais sans date de livraison — leur montant
+   * n'entre PAS dans l'acquis, et ce compteur le dit.
+   *
+   * Deux populations s'y mélangent, et rien ne permet de les distinguer :
+   *  - celles archivées AVANT l'existence de `completedAt`, qui ont pu être
+   *    livrées — la colonne n'a pas été rétro-remplie, parce que la déduire
+   *    d'`actualEndDate` ou d'`updatedAt` serait l'inférence qu'elle remplace ;
+   *  - celles archivées depuis, dont on sait qu'elles n'ont pas été livrées.
+   *
+   * Le compteur ne prétend donc PAS mesurer une incertitude : il énonce un
+   * fait vérifiable — voilà ce qui est exclu, et voilà combien. Sans lui, une
+   * affaire réellement livrée puis archivée avant la migration sortait de
+   * l'acquis en silence : « un compteur qui disparaît sans un mot est une
+   * donnée perdue. »
+   */
+  readonly archiveesHorsAcquis: number;
+  readonly archiveesHorsAcquisCents: number;
+  /**
+   * Rien d'inconnu n'a été laissé de côté.
+   *
+   * NE BASCULE PAS sur `archiveesHorsAcquis`, et c'est délibéré. Exclure une
+   * archivée sans date de livraison est une RÈGLE, appliquée à l'identique à
+   * toutes — pas un calcul qui a échoué. Faire tomber `exact` dessus le
+   * rendrait faux en permanence chez tout dirigeant qui archive ses devis
+   * perdus, donc illisible : un indicateur toujours au rouge ne hiérarchise
+   * plus rien, et il masquerait les deux inexactitudes réelles (une valeur de
+   * travail inconnue, une lecture tronquée). Le montant exclu est rendu à
+   * côté ; il est dit, pas caché derrière un booléen.
+   */
   readonly exact: boolean;
 }
 
@@ -87,32 +125,39 @@ export interface RevenusSplit {
  */
 const LIVRE = new Set(["TERMINEE"]);
 
-/*
- * `ARCHIVEE` NE COMPTE PAS en acquis, et ce choix est le moins mauvais des
- * deux — pas le bon.
+/**
+ * `ARCHIVEE` compte en acquis SI, ET SEULEMENT SI, elle a été terminée.
  *
- * Le problème : `status` est une colonne unique, donc archiver une affaire
- * terminée écrase `TERMINEE`. Le chiffre acquis d'un exercice baisse quand le
- * patron range. C'est une SOUS-estimation, elle est visible, et elle est dite
- * plus bas.
+ * `status` est une colonne unique : archiver une affaire terminée écrase
+ * `TERMINEE`, et le chiffre acquis d'un exercice baissait donc quand le patron
+ * rangeait. Le bloc 3 assumait cette sous-estimation faute de mieux.
  *
- * La tentation était de rattraper avec `actualEndDate`. Elle a été essayée et
- * retirée : ce champ est libre, `POST /affaires/:id/archiver` accepte
- * n'importe quel statut de départ — `PERDUE` compris — et une affaire
- * abandonnée dont quelqu'un a saisi la date d'arrêt serait alors comptée à
- * 100 % du devis en acquis. Une SUR-estimation, invisible et flatteuse.
+ * Le rattrapage par `actualEndDate` avait été implémenté puis RETIRÉ : champ
+ * libre, et `POST /affaires/:id/archiver` accepte n'importe quel statut de
+ * départ — `PERDUE` compris. Une affaire abandonnée dont quelqu'un avait saisi
+ * la date d'arrêt aurait compté à 100 % du devis : sur-estimation invisible et
+ * flatteuse, exactement ce que ce moteur existe pour interdire.
  *
- * « Jamais d'inférence quand le coût des deux erreurs est asymétrique » : on
- * garde celle qui se voit. Le vrai remède est une colonne `completedAt` posée
- * à la transition vers `TERMINEE` — un fait, pas une déduction.
+ * `completedAt` n'a pas ce défaut parce que ce n'est pas une déduction : il
+ * est posé au moment de la transition, et une affaire jamais terminée ne peut
+ * pas en porter un. On remplace une inférence par un fait — c'est la seule
+ * façon de lever une sous-estimation sans ouvrir une sur-estimation.
+ *
+ * IL NE VAUT QUE POUR `ARCHIVEE`. Une affaire terminée puis REPRISE
+ * (`TERMINEE -> EN_COURS`) est du travail en cours : la route efface son
+ * `completedAt`, mais le moteur ne s'y fie pas. Deux gardes plutôt qu'une —
+ * une seule suffirait à rendre un chiffre flatteur si l'autre cédait.
  */
+const livreParArchivage = (affaire: RevenuAffaireInput): boolean =>
+  affaire.status === "ARCHIVEE" && affaire.completedAt !== null;
 
 /**
  * Statuts qui comptent comme du travail VENDU.
  *
  * `PROSPECT` et `DEVIS_ENVOYE` en sont exclus : rien n'est signé, et compter
  * dessus c'est compter sur un client qui n'a pas dit oui. `PERDUE` et
- * `ARCHIVEE` ne comptent nulle part.
+ * `ARCHIVEE` ne comptent pas comme du VENDU — une archivée porteuse d'un
+ * `completedAt` compte en revanche comme du LIVRÉ (voir `livreParArchivage`).
  */
 const VENDU = new Set(["ACCEPTEE", "EN_COURS"]);
 
@@ -139,15 +184,29 @@ export function splitRevenus(
   let engageCents = 0;
   let encaisseDeclareCents = 0;
   let sansDevis = 0;
+  let archiveesHorsAcquis = 0;
+  let archiveesHorsAcquisCents = 0;
 
   for (const affaire of affaires) {
     // L'argent reçu est un FAIT, indépendant du statut : un acompte encaissé
     // sur une affaire finalement perdue est quand même sur le compte.
     encaisseDeclareCents += affaire.depositsCents;
 
-    const livre = LIVRE.has(affaire.status);
+    const livre = LIVRE.has(affaire.status) || livreParArchivage(affaire);
     const vendu = VENDU.has(affaire.status);
-    if (!livre && !vendu) continue;
+    if (!livre && !vendu) {
+      // Ce qui sort de l'acquis faute de date de livraison est ANNONCÉ, avec
+      // son montant : c'est la seule façon de savoir de combien il manque.
+      if (
+        affaire.status === "ARCHIVEE" &&
+        affaire.completedAt === null &&
+        affaire.quotedAmountCents !== null
+      ) {
+        archiveesHorsAcquis += 1;
+        archiveesHorsAcquisCents += affaire.quotedAmountCents;
+      }
+      continue;
+    }
 
     if (affaire.quotedAmountCents === null) {
       // Signée mais sans devis : on ne sait pas ce que vaut ce travail.
@@ -167,6 +226,8 @@ export function splitRevenus(
     encaisseFactureCents,
     encaisseBasis: "ttc",
     sansDevis,
+    archiveesHorsAcquis,
+    archiveesHorsAcquisCents,
     exact: sansDevis === 0,
   };
 }

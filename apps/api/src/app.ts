@@ -48,6 +48,7 @@ import {
   loadAffaireMargin,
   loadAffairesMargins,
   loadRevenusSplit,
+  nextCompletedAt,
   serializeAffaire,
   toPrismaData,
 } from "./affaires.js";
@@ -5464,6 +5465,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             depositsCents: true,
             hoursWorked: true,
             actualEndDate: true,
+            completedAt: true,
             _count: {
               select: {
                 imputations: { where: { revokedAt: null } },
@@ -5490,6 +5492,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           if (affaire._count.fecInvoices > 0) return "des factures y sont rattachées, à vérifier";
           if ((affaire.depositsCents ?? 0) > 0) return "un acompte a été encaissé, à vérifier";
           if ((affaire.hoursWorked ?? 0) > 0) return "des heures y ont été pointées, à vérifier";
+          /*
+           * `completedAt` est le fait le PLUS FORT de cette liste : il atteste
+           * une transition réelle vers `TERMINEE`, là où `actualEndDate` n'est
+           * qu'une saisie libre. Le cas est inatteignable aujourd'hui — les
+           * trois statuts anonymisables l'effacent tous — mais cette cohérence
+           * ne tient qu'à `nextCompletedAt` : l'omettre ici ferait dépendre
+           * une garde d'effacement d'une règle écrite ailleurs.
+           */
+          if (affaire.completedAt !== null)
+            return "l'affaire a été livrée, à vérifier";
           if (affaire.actualEndDate !== null)
             return "une date de fin réelle est saisie, à vérifier";
           return null;
@@ -6237,11 +6249,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       // création qui échoue rend son numéro, deux créations simultanées n'ont
       // jamais la même.
       const reference = await nextAffaireReference(tx, request.tenantId, year);
+      // Une affaire peut naître déjà terminée (saisie a posteriori d'un
+      // chantier fait). Le fait vaut à la création comme à la transition.
+      const completedAt = nextCompletedAt(body.data.status, null, new Date());
       return tx.affaire.create({
         data: {
           tenantId: request.tenantId,
           reference,
           ...toPrismaData(body.data),
+          ...(completedAt === undefined ? {} : { completedAt }),
           label: body.data.label,
         },
       });
@@ -6431,7 +6447,26 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         });
         if (!prospect) return null;
       }
-      return tx.affaire.update({ where: { id: params.data.id }, data: toPrismaData(body.data) });
+      /*
+       * `completedAt` est DÉRIVÉ du statut, jamais reçu du client.
+       *
+       * L'exposer en entrée rouvrirait exactement le défaut d'`actualEndDate` :
+       * un champ libre qu'on peut poser sur une affaire jamais livrée, et donc
+       * compter à 100 % du devis en acquis. Le fait doit rester la conséquence
+       * d'une transition, pas une saisie.
+       */
+      const completedAt = nextCompletedAt(
+        body.data.status,
+        existing.completedAt,
+        new Date(),
+      );
+      return tx.affaire.update({
+        where: { id: params.data.id },
+        data: {
+          ...toPrismaData(body.data),
+          ...(completedAt === undefined ? {} : { completedAt }),
+        },
+      });
     });
     if (!updated) return reply.code(404).send({ error: "affaire ou prospect inconnu" });
     // Ces réponses portent le nom du client et les montants : jamais en cache.
@@ -6448,7 +6483,27 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const archived = await withTenant(request.tenantId, async (tx) => {
       const existing = await tx.affaire.findUnique({ where: { id: params.data.id } });
       if (!existing) return null;
-      return tx.affaire.update({ where: { id: params.data.id }, data: { status: "ARCHIVEE" } });
+      /*
+       * L'archivage traverse la MÊME dérivation que le reste — une règle, un
+       * seul endroit.
+       *
+       * Écrire `status: "ARCHIVEE"` en dur donnait le bon résultat aujourd'hui
+       * (la branche `ARCHIVEE` ne touche à rien), mais c'était le seul chemin
+       * d'écriture du statut hors de la fonction : le jour où la règle bouge,
+       * les tests unitaires de `nextCompletedAt` resteraient verts pendant que
+       * la route la plus utilisée pour archiver divergerait en silence.
+       *
+       * Ranger n'est pas défaire : c'est ce qui permet à une affaire terminée
+       * puis archivée de rester dans l'acquis.
+       */
+      const completedAt = nextCompletedAt("ARCHIVEE", existing.completedAt, new Date());
+      return tx.affaire.update({
+        where: { id: params.data.id },
+        data: {
+          status: "ARCHIVEE",
+          ...(completedAt === undefined ? {} : { completedAt }),
+        },
+      });
     });
     if (!archived) return reply.code(404).send({ error: "affaire inconnue" });
     void reply.header("cache-control", "private, no-store");

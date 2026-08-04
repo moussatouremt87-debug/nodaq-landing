@@ -258,35 +258,202 @@ describe("le RÉGLÉ vient des factures, et il exclut la retenue", () => {
   });
 });
 
-describe("archiver : une sous-estimation ASSUMÉE", () => {
-  it("une affaire livrée puis ARCHIVÉE sort de l'acquis — et c'est le moindre mal", async () => {
+describe("archiver ne défait plus ce qui a été LIVRÉ", () => {
+  it("terminée puis archivée : le montant RESTE dans l'acquis", async () => {
     /*
-     * `status` est une colonne unique : archiver écrase `TERMINEE`, donc le
-     * chiffre acquis baisse quand le patron range. C'est faux, c'est dit, et
-     * c'est VOLONTAIREMENT préféré à l'alternative.
+     * Ce que le bloc 3 assumait comme sous-estimation : `status` est une
+     * colonne unique, donc archiver écrasait `TERMINEE` et le chiffre acquis
+     * d'un exercice baissait quand le patron rangeait.
      *
-     * Rattraper via `actualEndDate` a été implémenté puis retiré : ce champ
-     * est libre, et `POST /affaires/:id/archiver` accepte n'importe quel
-     * statut de départ, `PERDUE` compris. Une affaire abandonnée dont
-     * quelqu'un a saisi la date d'arrêt aurait alors compté à 100 % du devis
-     * en acquis — une sur-estimation invisible et flatteuse.
-     *
-     * Entre les deux erreurs, on garde celle qui se voit. Le vrai remède est
-     * une colonne `completedAt` posée à la transition vers `TERMINEE`.
+     * `completedAt` le corrige sans rouvrir la faute inverse. Il est posé par
+     * la TRANSITION vers `TERMINEE` et par rien d'autre, là où `actualEndDate`
+     * est un champ libre qu'une affaire abandonnée pouvait porter.
      */
     const avant = (await revenus(ownerCookie)).json() as Record<string, number>;
-    const id = await seedAffaire(`${RUN}-arch`, "TERMINEE", 70_000);
+    const cree = await app.inject({
+      method: "POST",
+      url: "/affaires",
+      headers: { cookie: ownerCookie },
+      payload: { label: `Livrée ${RUN}`, status: "TERMINEE", quotedAmountCents: 70_000 },
+    });
+    expect(cree.statusCode).toBe(201);
+    const id = cree.json().id as string;
+    expect(cree.json().completedAt).not.toBeNull();
+
     const pendant = (await revenus(ownerCookie)).json() as Record<string, number>;
     expect(pendant.acquisCents - avant.acquisCents).toBe(70_000);
 
-    await withTenant(orgA, (tx) =>
-      tx.affaire.update({
-        where: { id },
-        data: { actualEndDate: new Date("2026-06-30T12:00:00Z"), status: "ARCHIVEE" },
-      }),
-    );
+    const range = await app.inject({
+      method: "POST",
+      url: `/affaires/${id}/archiver`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(range.statusCode).toBe(200);
+    // Ranger n'est pas défaire : la date de livraison SURVIT à l'archivage.
+    expect(range.json().completedAt).toBe(cree.json().completedAt);
+
+    const apres = (await revenus(ownerCookie)).json() as Record<string, number>;
+    expect(apres.acquisCents).toBe(pendant.acquisCents);
+  });
+
+  it("archiver par PATCH préserve aussi la date — deux chemins, une règle", async () => {
+    /*
+     * `POST /affaires/:id/archiver` n'est pas le seul chemin vers `ARCHIVEE` :
+     * `PATCH { status: "ARCHIVEE" }` y mène aussi, et c'est LUI qui traverse
+     * `nextCompletedAt`. Sans ce test, la branche « ARCHIVEE préserve » n'était
+     * couverte par rien — la retirer laissait la suite entièrement verte
+     * pendant qu'un archivage par mise à jour effaçait la livraison.
+     */
+    const id = await seedAffaire(`${RUN}-patch-arch`, "EN_COURS", 30_000);
+    const patch = async (payload: Record<string, unknown>) =>
+      app.inject({
+        method: "PATCH",
+        url: `/affaires/${id}`,
+        headers: { cookie: ownerCookie },
+        payload,
+      });
+    const pose = (await patch({ status: "TERMINEE" })).json().completedAt as string;
+    expect(pose).not.toBeNull();
+
+    const avant = (await revenus(ownerCookie)).json() as Record<string, number>;
+    const range = await patch({ status: "ARCHIVEE" });
+    expect(range.json().completedAt).toBe(pose);
     const apres = (await revenus(ownerCookie)).json() as Record<string, number>;
     expect(apres.acquisCents).toBe(avant.acquisCents);
+  });
+
+  it("PERDUE puis archivée ne compte RIEN, même avec une date de fin saisie", async () => {
+    /*
+     * LE CAS QUI AVAIT FAIT RETIRER `actualEndDate`. `/affaires/:id/archiver`
+     * accepte n'importe quel statut de départ ; une affaire abandonnée dont
+     * quelqu'un avait saisi la date d'arrêt aurait compté à 100 % du devis.
+     *
+     * Ici la date de fin est saisie ET l'affaire est archivée : elle ne compte
+     * toujours rien, parce qu'aucune transition vers `TERMINEE` n'a eu lieu.
+     * C'est la différence entre un fait et une déduction.
+     */
+    const avant = (await revenus(ownerCookie)).json() as Record<string, number>;
+    const id = await seedAffaire(`${RUN}-perdue-arch`, "PERDUE", 90_000);
+    await app.inject({
+      method: "PATCH",
+      url: `/affaires/${id}`,
+      headers: { cookie: ownerCookie },
+      payload: { actualEndDate: "2026-06-30" },
+    });
+    await app.inject({
+      method: "POST",
+      url: `/affaires/${id}/archiver`,
+      headers: { cookie: ownerCookie },
+    });
+
+    const apres = (await revenus(ownerCookie)).json() as Record<string, number>;
+    expect(apres.acquisCents).toBe(avant.acquisCents);
+    const ligne = await withTenant(orgA, (tx) =>
+      tx.affaire.findUniqueOrThrow({ where: { id } }),
+    );
+    expect(ligne.completedAt).toBeNull();
+  });
+
+  it("une affaire REPRISE perd sa date de livraison, et sort de l'acquis", async () => {
+    /*
+     * `TERMINEE -> EN_COURS` est une correction : le chantier n'était pas
+     * fini. Garder `completedAt` ferait recompter l'affaire en acquis le jour
+     * où elle serait archivée — donc DEUX fois si elle se termine à nouveau.
+     */
+    const id = await seedAffaire(`${RUN}-reprise`, "ACCEPTEE", 50_000);
+    await app.inject({
+      method: "PATCH",
+      url: `/affaires/${id}`,
+      headers: { cookie: ownerCookie },
+      payload: { status: "TERMINEE" },
+    });
+    const termine = await withTenant(orgA, (tx) =>
+      tx.affaire.findUniqueOrThrow({ where: { id } }),
+    );
+    expect(termine.completedAt).not.toBeNull();
+
+    await app.inject({
+      method: "PATCH",
+      url: `/affaires/${id}`,
+      headers: { cookie: ownerCookie },
+      payload: { status: "EN_COURS" },
+    });
+    const repris = await withTenant(orgA, (tx) =>
+      tx.affaire.findUniqueOrThrow({ where: { id } }),
+    );
+    expect(repris.completedAt).toBeNull();
+
+    // Et l'archivage d'une affaire reprise ne la remet pas dans l'acquis.
+    const avant = (await revenus(ownerCookie)).json() as Record<string, number>;
+    await app.inject({
+      method: "POST",
+      url: `/affaires/${id}/archiver`,
+      headers: { cookie: ownerCookie },
+    });
+    const apres = (await revenus(ownerCookie)).json() as Record<string, number>;
+    expect(apres.acquisCents).toBe(avant.acquisCents);
+  });
+
+  it("la date de livraison ne GLISSE pas à chaque modification", async () => {
+    /*
+     * Sans idempotence, corriger une faute de frappe sur une affaire déjà
+     * terminée repousserait sa livraison à aujourd'hui. Le jour où un exercice
+     * se calculera par période, toutes les affaires anciennes basculeraient
+     * dans le mois en cours à la première correction.
+     */
+    const id = await seedAffaire(`${RUN}-idem`, "EN_COURS", 40_000);
+    const patch = async (payload: Record<string, unknown>) =>
+      app.inject({
+        method: "PATCH",
+        url: `/affaires/${id}`,
+        headers: { cookie: ownerCookie },
+        payload,
+      });
+    const premier = await patch({ status: "TERMINEE" });
+    const pose = premier.json().completedAt as string;
+    expect(pose).not.toBeNull();
+
+    const second = await patch({ status: "TERMINEE", label: `Corrigé ${RUN}` });
+    expect(second.json().completedAt).toBe(pose);
+    const troisieme = await patch({ label: `Encore ${RUN}` });
+    expect(troisieme.json().completedAt).toBe(pose);
+  });
+
+  it("`completedAt` n'est JAMAIS saisi par le client — refus MOTIVÉ", async () => {
+    /*
+     * L'exposer en entrée rouvrirait exactement le défaut d'`actualEndDate` :
+     * un champ libre posable sur une affaire jamais livrée, donc comptée à
+     * 100 % du devis en acquis.
+     *
+     * Le schéma est `.strict()` : un 400, pas un 201 dont l'appelant pourrait
+     * croire qu'il a posé la date. Et `toPrismaData` refuse le champ en second
+     * rideau, pour le jour où quelqu'un l'ajouterait au schéma « pour corriger
+     * une date » — c'est ce que la mutation ci-dessous vérifie.
+     */
+    const res = await app.inject({
+      method: "POST",
+      url: "/affaires",
+      headers: { cookie: ownerCookie },
+      payload: {
+        label: `Triche ${RUN}`,
+        status: "PERDUE",
+        quotedAmountCents: 60_000,
+        completedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("le convertisseur refuse le champ dérivé même si le schéma le laissait passer", async () => {
+    // Second rideau, testé directement : `toPrismaData` ne recopie jamais un
+    // champ dérivé, quelle que soit la porte d'entrée.
+    const { toPrismaData } = await import("../src/affaires.js");
+    const data = toPrismaData({
+      label: "x",
+      completedAt: "2026-01-01T00:00:00.000Z",
+    } as unknown as Parameters<typeof toPrismaData>[0]);
+    expect(data.completedAt).toBeUndefined();
+    expect(data.label).toBe("x");
   });
 });
 
@@ -298,11 +465,35 @@ describe("la troncature est DITE, et elle retire l'exactitude", () => {
      * un consommateur autre que l'écran aurait lu « exact » sur un chiffre
      * amputé.
      */
+    /*
+     * L'affaire lue est FIXÉE, pas laissée au hasard du tri.
+     *
+     * `loadRevenusSplit(tx, 1)` ne lit que la plus récente (`createdAt desc,
+     * id desc`), donc l'assertion `sansDevis === 0` dépendait de quelle affaire
+     * les tests précédents avaient créée en dernier — et le départage par UUID
+     * dès que deux lignes partagent la milliseconde. On force un `createdAt`
+     * futur : la ligne lue est celle qu'on a écrite, avec un devis explicite.
+     */
+    await withTenant(orgA, (tx) =>
+      tx.affaire.create({
+        data: {
+          tenantId: orgA,
+          reference: `${RUN}-tronc`,
+          label: "Affaire de troncature",
+          status: "TERMINEE",
+          quotedAmountCents: 12_345,
+          createdAt: new Date("2099-01-01T00:00:00.000Z"),
+        },
+      }),
+    );
+
     const { loadRevenusSplit } = await import("../src/affaires.js");
     const vue = await withTenant(orgA, (tx) => loadRevenusSplit(tx, 1));
     expect(vue.ignorees).toBeGreaterThan(0);
-    // Prouve que c'est bien la TRONCATURE qui fait tomber `exact` : sans cette
-    // ligne, une affaire sans devis dans le lot suffirait à expliquer le faux.
+    // La seule affaire lue est devisée : si `exact` tombe, c'est la TRONCATURE
+    // et rien d'autre. Sans cette ligne, une affaire sans devis tombée là par
+    // hasard expliquerait le faux tout aussi bien.
+    expect(vue.acquisCents).toBe(12_345);
     expect(vue.sansDevis).toBe(0);
     expect(vue.exact).toBe(false);
   });

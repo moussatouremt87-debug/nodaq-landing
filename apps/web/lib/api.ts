@@ -1292,6 +1292,12 @@ export const RevenusSplit = z.object({
   encaisseFactureCents: z.number().nullable(),
   encaisseBasis: z.literal("ttc"),
   sansDevis: z.number(),
+  /* Ce qui sort de l'acquis faute de date de livraison, avec son montant. Une
+   * affaire livrée puis archivée avant l'existence de `completedAt` en fait
+   * partie : la colonne n'a pas été rétro-remplie, donc le manque est dit
+   * plutôt que deviné. */
+  archiveesHorsAcquis: z.number(),
+  archiveesHorsAcquisCents: z.number(),
   exact: z.boolean(),
   ignorees: z.number(),
 });
@@ -1776,6 +1782,11 @@ export const Affaire = z.object({
   startDate: z.string().nullable(),
   plannedEndDate: z.string().nullable(),
   actualEndDate: z.string().nullable(),
+  /* Instant de la transition vers TERMINEE — un fait, jamais une saisie. C'est
+   * lui qui permet à une affaire terminée PUIS archivée de rester dans
+   * l'acquis ; `actualEndDate`, champ libre, ne le pouvait pas. Lecture seule :
+   * aucun écran ne l'envoie. */
+  completedAt: z.string().nullable(),
   createdAt: z.string(),
 });
 export type Affaire = z.infer<typeof Affaire>;
