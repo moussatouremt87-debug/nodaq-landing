@@ -72,20 +72,19 @@ donnée pour une finalité qu'on ne réalise pas, c'est la garder sans raison.
 |---|---|
 | proposition en attente | transcription conservée — c'est ce qui rend la relecture possible |
 | proposition décidée (validée ou rejetée) | `reduceQuotePayload` reconstruit le payload : la transcription **disparaît** |
-| proposition jamais décidée | **elle reste** — limite connue, ci-dessous |
+| proposition jamais décidée | rejetée et réduite **au bout de 60 jours** |
 
-**Limite connue, et elle est réelle.** Une proposition dictée qui n'est jamais
-décidée garde son verbatim indéfiniment : le nom du client, l'adresse du
-chantier, et ce que le micro a capté à côté. Aucune des purges de l'article 17
-(FEC, classeur, prospect) ne l'atteint — elles visent `create_fixed_asset` et
-`record_prospect_contact`, pas `create_quote`. Le chemin e-mail (2.7) ne
-stockait que l'extraction structurée ; ce ticket élargit le résidu.
+La dernière ligne était une **limite connue** quand ce ticket a été livré : une
+proposition dictée jamais décidée gardait son verbatim indéfiniment — nom du
+client, adresse du chantier, et ce que le micro avait capté à côté. Aucune
+purge de l'article 17 ne l'atteignait, puisqu'elles visent `create_fixed_asset`
+et `record_prospect_contact`, pas `create_quote`.
 
-Le remède n'est pas une rustine ici : c'est une **politique de rétention de la
-file de validation** — au bout de combien de temps une proposition jamais
-décidée se réduit-elle d'elle-même ? La question vaut pour tous les types
-d'action, pas seulement pour la dictée, et elle mérite son ticket. Elle est
-écrite ici plutôt que découverte plus tard.
+Elle est **fermée** : voir [`docs/retention-file-validation.md`](retention-file-validation.md).
+Le remède n'était pas une rustine dans ce ticket-ci, parce que le défaut n'était
+pas propre à la dictée — il valait pour les dix types d'action, et depuis
+toujours. La dictée l'a seulement rendu visible, en portant le payload le plus
+bavard de la file.
 
 ## Les formats : deux listes qui ne se recouvrent pas
 

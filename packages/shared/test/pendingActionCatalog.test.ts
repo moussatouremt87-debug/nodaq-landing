@@ -4,6 +4,7 @@ import {
   PENDING_ACTION_CATALOG_VERSION,
   PENDING_ACTION_GROUPS,
   resolvePendingActionGroups,
+  retentionVerdict,
 } from "../src/index.js";
 
 /*
@@ -97,5 +98,150 @@ describe("ce qui ne doit JAMAIS arriver : une action qui disparaît", () => {
     const groups = resolvePendingActionGroups(pending, ["avis", "stocks", "immobilisations"]);
     const total = groups.reduce((sum, group) => sum + group.count, 0);
     expect(total).toBe(pending.length);
+  });
+});
+
+describe("rétention — une proposition qui dort n'est pas une proposition", () => {
+  const jour = 86_400_000;
+  const now = new Date("2026-08-04T09:00:00Z");
+  const ilYA = (jours: number) => new Date(now.getTime() - jours * jour);
+
+  it("les horizons sont ceux que la doctrine annonce, valeur par valeur", () => {
+    /*
+     * Assertion VOLONTAIREMENT rigide : « > 0 » aurait été vrai de n'importe
+     * quel chiffre, y compris d'un 3650 posé par distraction. C'est une config
+     * versionnée datée sourcée — une règle de rétention qui bouge doit se voir
+     * en diff, et faire échouer ce test est précisément la façon dont elle se
+     * voit. Toute modification ici s'accompagne d'un bump de version et d'une
+     * ligne dans `docs/retention-file-validation.md`.
+     */
+    const horizons = Object.fromEntries(
+      PENDING_ACTION_GROUPS.map((group) => [group.id, group.staleAfterDays]),
+    );
+    expect(horizons).toEqual({
+      relances: 30,
+      prospection: 30,
+      devis: 60,
+      avis: 60,
+      facturation_electronique: 60,
+      ecritures: 90,
+      stocks: 90,
+      immobilisations: 180,
+    });
+  });
+
+  it("une action récente n'est pas touchée", () => {
+    const verdict = retentionVerdict(
+      { type: "send_dunning", status: "pending", lastActivityAt: ilYA(3) },
+      now,
+    );
+    expect(verdict.action).toBe("garder");
+  });
+
+  it("une action REPRISE hier survit, si vieille soit-elle", () => {
+    /*
+     * Le cas que compter l'âge depuis la CRÉATION aurait détruit : une
+     * proposition née il y a six mois, dont le dirigeant a retravaillé le
+     * brouillon hier (`PATCH .../draft` laisse le statut à `pending`). La
+     * rejeter « sans décision » aurait effacé le texte qu'il venait d'écrire.
+     */
+    const verdict = retentionVerdict(
+      { type: "send_dunning", status: "pending", lastActivityAt: ilYA(1) },
+      now,
+    );
+    expect(verdict.action).toBe("garder");
+  });
+
+  it("une action EN ATTENTE au-delà de son horizon est rejetée ET réduite", () => {
+    /*
+     * Réduire SANS rejeter laisserait une action indécidable dans la file :
+     * le dirigeant l'ouvrirait pour n'y trouver plus rien à lire. C'est le
+     * défaut que F6 a corrigé, sous une autre forme.
+     *
+     * Et rejeter se justifie sur le fond : approuver une relance calculée sur
+     * un impayé vieux de trois mois enverrait une lettre fausse — la facture
+     * a pu être payée entre-temps.
+     */
+    const verdict = retentionVerdict(
+      { type: "send_dunning", status: "pending", lastActivityAt: ilYA(60) },
+      now,
+    );
+    expect(verdict.action).toBe("rejeter_et_reduire");
+    // Le motif chiffre l'âge ET l'horizon : « périmée » tout court laisserait
+    // l'utilisateur sans moyen de vérifier que la règle a été bien appliquée.
+    expect(verdict.reason).toBe("sans décision ni reprise depuis 60 jours (horizon : 30)");
+  });
+
+  it("l'horizon est une BORNE : la veille garde, le jour même réduit", () => {
+    // Un test à 60 jours contre un horizon de 30 passerait aussi bien contre
+    // un horizon de 45, de 1, ou contre un « rejette tout ce qui est vieux ».
+    // Le seul cas qui distingue vraiment la valeur, c'est sa frontière.
+    const veille = retentionVerdict(
+      { type: "send_dunning", status: "pending", lastActivityAt: ilYA(29) },
+      now,
+    );
+    const jourJ = retentionVerdict(
+      { type: "send_dunning", status: "pending", lastActivityAt: ilYA(30) },
+      now,
+    );
+    expect(veille.action).toBe("garder");
+    expect(jourJ.action).toBe("rejeter_et_reduire");
+  });
+
+  it("une action DÉCIDÉE finit par être réduite, sans changer de statut", () => {
+    // Une décision est une trace : elle ne se réécrit pas. Mais le contenu
+    // sur lequel elle portait, lui, n'a plus de raison d'être conservé.
+    const verdict = retentionVerdict(
+      { type: "send_dunning", status: "executed", lastActivityAt: ilYA(400) },
+      now,
+    );
+    expect(verdict.action).toBe("reduire");
+    // Une décidée d'il y a onze mois est encore dans l'exercice : la borne
+    // d'un an doit être une vraie borne, pas « vieux = à réduire ».
+    expect(
+      retentionVerdict(
+        { type: "send_dunning", status: "executed", lastActivityAt: ilYA(364) },
+        now,
+      ).action,
+    ).toBe("garder");
+  });
+
+  it("un type INCONNU n'est jamais détruit — il est signalé", () => {
+    /*
+     * Même asymétrie qu'en F6 : on ne détruit pas ce qu'on n'a pas su classer.
+     * Un outil livré avant sa ligne de catalogue verrait sinon ses
+     * propositions effacées par une règle qui ne le connaît pas.
+     */
+    const verdict = retentionVerdict(
+      { type: "un_outil_de_demain", status: "pending", lastActivityAt: ilYA(9_999) },
+      now,
+    );
+    expect(verdict.action).toBe("signaler");
+    expect(verdict.reason).toContain("hors catalogue");
+    // Un type inconnu DÉCIDÉ n'est pas réduit non plus : la borne d'un an ne
+    // doit pas devenir la porte dérobée par laquelle on détruit l'inconnu.
+    expect(
+      retentionVerdict(
+        { type: "un_outil_de_demain", status: "executed", lastActivityAt: ilYA(9_999) },
+        now,
+      ).action,
+    ).toBe("signaler");
+  });
+
+  it("les horizons sont ORDONNÉS par sensibilité, pas au hasard", () => {
+    // Une relance porte un nom et un montant dus ; une immobilisation porte un
+    // libellé de compte. La première doit partir plus vite que la seconde.
+    const horizon = (id: string) =>
+      PENDING_ACTION_GROUPS.find((group) => group.id === id)?.staleAfterDays ?? 0;
+    expect(horizon("relances")).toBeLessThan(horizon("immobilisations"));
+    expect(horizon("prospection")).toBeLessThan(horizon("immobilisations"));
+    /*
+     * Et la règle qui a coûté une revue : un dépôt de facture électronique
+     * porte l'identité complète du client (raison sociale, adresse, SIRET,
+     * libellés) — il ne peut pas dormir plus longtemps qu'une écriture
+     * comptable, quand bien même il reste déclarativement valable plus
+     * longtemps. Quand les deux critères divergent, le plus court gagne.
+     */
+    expect(horizon("facturation_electronique")).toBeLessThan(horizon("ecritures"));
   });
 });

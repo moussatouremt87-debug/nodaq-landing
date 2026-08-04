@@ -614,21 +614,52 @@ export default function ValidationPage() {
               </h2>
               <table className="ledger">
                 <tbody>
-                  {done.slice(0, 8).map((action) => (
-                    <tr key={action.id}>
-                      <td>{actionTypeLabel(action.type)}</td>
-                      <td>
-                        <span className={`badge ${action.status}`}>
-                          {actionStatusLabel(action.status)}
-                        </span>
-                      </td>
-                      <td style={{ color: "var(--ink-faint)", fontSize: 12 }}>
-                        {action.validatedAt
-                          ? new Date(action.validatedAt).toLocaleString("fr-FR")
-                          : "—"}
-                      </td>
-                    </tr>
-                  ))}
+                  {done.slice(0, 8).map((action) => {
+                    /*
+                     * Rejetée SANS validateur = rejet MACHINE : personne n'a
+                     * cliqué. `validatedBy` discrimine sans ambiguïté — une
+                     * décision humaine le renseigne toujours.
+                     *
+                     * Afficher « Rejetée » tout court ferait porter au
+                     * dirigeant un refus qu'il n'a jamais prononcé, et lui
+                     * laisserait croire qu'il a tranché un dossier qu'il n'a
+                     * en réalité jamais vu.
+                     *
+                     * Mais le libellé ne NOMME PAS la cause, et c'est délibéré :
+                     * trois chemins rejettent sans validateur — la rétention
+                     * (art. 5.1.e), la purge d'une source (art. 17) et
+                     * l'opposition d'un prospect. Écrire « Expirée » partout
+                     * aurait remplacé un mensonge par un autre. La cause vient
+                     * du motif que l'API expose, quand il y en a un.
+                     */
+                    const auto = action.status === "rejected" && action.validatedBy === null;
+                    const reason = action.reducedReason ?? null;
+                    return (
+                      <tr key={action.id}>
+                        <td>{actionTypeLabel(action.type)}</td>
+                        <td>
+                          <span
+                            className={`badge ${action.status}`}
+                            title={
+                              reason ??
+                              (auto
+                                ? "Rejet automatique : le contenu de cette proposition a été retiré."
+                                : undefined)
+                            }
+                          >
+                            {auto ? "Rejetée automatiquement" : actionStatusLabel(action.status)}
+                          </span>
+                        </td>
+                        <td style={{ color: "var(--ink-faint)", fontSize: 12 }}>
+                          {action.validatedAt
+                            ? new Date(action.validatedAt).toLocaleString("fr-FR")
+                            : auto
+                              ? "sans décision humaine"
+                              : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </>

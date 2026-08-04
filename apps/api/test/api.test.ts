@@ -272,6 +272,83 @@ describe("authorization chain (requireAuth → resolveTenant → requireMembersh
     );
     expect(JSON.stringify(list.json())).not.toContain("payload");
 
+    /*
+     * Motif de RÉDUCTION (art. 5.1.e / art. 17) : owner seulement, et le
+     * payload ne sort toujours pas — l'assertion ci-dessus le vérifie, la
+     * projection en lisant `payload` pour n'en extraire que ce motif.
+     *
+     * Sans ce champ, l'historique affichait « Rejetée » sur des lignes que
+     * personne n'a décidées : le dirigeant se voyait attribuer un refus qu'il
+     * n'avait pas prononcé, sans un mot pour dire pourquoi la ligne est vide.
+     */
+    const expiree = await withTenant(orgA, (tx) =>
+      tx.pendingAction.create({
+        data: {
+          tenantId: orgA,
+          type: "send_dunning",
+          status: "rejected",
+          /*
+           * Payload RICHE, et pas seulement `{reduced, reducedReason}`.
+           *
+           * Une ligne décidée dont le payload est déjà vide ne peut rien
+           * prouver : une régression confinée à la projection des DÉCIDÉES
+           * (un `SELECT payload` puis un étalement) serait passée inaperçue,
+           * faute de quoi que ce soit à faire fuir. Le résidu ci-dessous est
+           * exactement ce que ces lignes portent en vrai.
+           */
+          payload: {
+            reduced: true,
+            reducedReason: "sans décision ni reprise depuis 45 jours",
+            invoiceNumber: "F-2026-999",
+            customer: "SARL Bardin",
+            grossCents: 486_000,
+          },
+        },
+      }),
+    );
+    const ownerList = await app.inject({
+      method: "GET",
+      url: "/pending-actions",
+      headers: { cookie: cookieA },
+    });
+    /*
+     * L'assertion qui compte est celle-ci, et elle porte sur la liste de
+     * l'OWNER — pas sur celle du membre, dont le payload n'est de toute façon
+     * pas sélectionné. C'est le branchement owner qui touche au payload : une
+     * projection supprimée, ou remplacée par un `{...rest, ...payload}`, lui
+     * renverrait le brouillon et le numéro de facture de `pa1`, et tout le
+     * reste de la suite resterait vert.
+     */
+    expect(JSON.stringify(ownerList.json())).not.toContain("payload");
+    // Une action EN ATTENTE (le `select` partagé).
+    expect(JSON.stringify(ownerList.json())).not.toContain("F-2026-001");
+    expect(JSON.stringify(ownerList.json())).not.toContain("draft");
+    // Et une action DÉCIDÉE (la projection du motif) : c'est la seule branche
+    // qui touche encore au payload, donc la seule qui peut le faire fuir.
+    expect(JSON.stringify(ownerList.json())).not.toContain("Bardin");
+    expect(JSON.stringify(ownerList.json())).not.toContain("F-2026-999");
+
+    const ownerRow = ownerList
+      .json()
+      .find((a: { id: string }) => a.id === expiree.id) as Record<string, unknown>;
+    expect(ownerRow.reducedReason).toBe("sans décision ni reprise depuis 45 jours");
+    // Rejet MACHINE : aucun validateur. C'est ce que l'écran lit pour ne pas
+    // écrire « Rejetée » sur une décision que personne n'a prise.
+    expect(ownerRow.validatedBy).toBeNull();
+
+    const memberList = await app.inject({
+      method: "GET",
+      url: "/pending-actions",
+      headers: { cookie: cookieM },
+    });
+    const memberRow = memberList
+      .json()
+      .find((a: { id: string }) => a.id === expiree.id) as Record<string, unknown>;
+    expect(memberRow).toBeDefined();
+    // Un membre voit la ligne, jamais le motif : « la relance Bardin a été
+    // rejetée faute de décision » reste une information sur un client.
+    expect(memberRow.reducedReason).toBeUndefined();
+
     // Detail with payload: OWNER only.
     const memberDetail = await app.inject({
       method: "GET",

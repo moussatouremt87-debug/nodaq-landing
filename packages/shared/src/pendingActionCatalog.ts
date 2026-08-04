@@ -26,7 +26,7 @@
 import { MODULES } from "./moduleCatalog.js";
 
 /** Date d'instantané — à bumper à chaque changement de groupe ou de type. */
-export const PENDING_ACTION_CATALOG_VERSION = "2026-08-03";
+export const PENDING_ACTION_CATALOG_VERSION = "2026-08-04";
 
 export interface PendingActionGroup {
   /** Identifiant d'onglet, stable (utilisé comme clé d'UI). */
@@ -40,6 +40,25 @@ export interface PendingActionGroup {
    * devis et écritures ne dépendent d'aucun module activable.
    */
   readonly module: string | null;
+  /**
+   * Au-delà de ce délai SANS AUCUNE ACTIVITÉ, la proposition est rejetée et
+   * réduite. « Activité » = la dernière trace humaine sur la ligne (création,
+   * modification du brouillon, rattachement à un chantier, décision), pas la
+   * seule création : une proposition retravaillée hier est vivante, quelle que
+   * soit sa date de naissance.
+   *
+   * Les valeurs ne sont pas rondes par hasard : elles suivent la vitesse à
+   * laquelle le CONTENU devient faux, pas une préférence esthétique. Une
+   * relance calculée sur un impayé d'il y a deux mois propose d'écrire à
+   * quelqu'un qui a peut-être payé ; une proposition d'immobilisation, elle,
+   * reste exacte des mois durant — son montant ne bouge pas.
+   *
+   * Second critère : ce que le payload porte de PERSONNEL. Attention, les deux
+   * critères ne vont PAS toujours dans le même sens — un dépôt de facture
+   * électronique reste valable longtemps ET porte l'identité complète du
+   * client. Quand ils divergent, c'est le plus court qui gagne.
+   */
+  readonly staleAfterDays: number;
 }
 
 /**
@@ -55,48 +74,90 @@ export const PENDING_ACTION_GROUPS: readonly PendingActionGroup[] = [
     label: "Relances",
     types: ["send_dunning"],
     module: null,
+    // Un impayé bouge vite : la facture a pu être réglée entre-temps, et la
+    // lettre proposée nomme quelqu'un en lui réclamant de l'argent.
+    staleAfterDays: 30,
   },
   {
     id: "devis",
     label: "Devis",
     types: ["create_quote"],
     module: null,
+    // Une demande de devis de deux mois est morte commercialement — et c'est
+    // le payload le plus riche en PII depuis la dictée (verbatim intégral).
+    staleAfterDays: 60,
   },
   {
     id: "ecritures",
     label: "Écritures",
     types: ["submit_reconciliation", "book_invoice"],
     module: null,
+    // Comptable : le contenu reste exact longtemps, mais un rapprochement
+    // jamais tranché finit par ne plus correspondre au relevé.
+    //
+    // 90 j et pas plus, parce que ces payloads ne sont PAS anonymes : un
+    // `book_invoice` porte le client et le montant, un `submit_reconciliation`
+    // les libellés d'écritures bancaires. C'est le contenu qui se périme
+    // lentement, pas la sensibilité qui serait faible.
+    staleAfterDays: 90,
   },
   {
     id: "prospection",
     label: "Prospection",
     types: ["record_prospect_contact"],
     module: null,
+    // Nominatif, et la prospection se périme aussi vite que la relance.
+    staleAfterDays: 30,
   },
   {
     id: "stocks",
     label: "Stocks",
     types: ["adjust_stock"],
     module: "stocks",
+    // Aucune donnée personnelle ; un ajustement non tranché devient faux dès
+    // que le stock réel bouge.
+    staleAfterDays: 90,
   },
   {
     id: "immobilisations",
     label: "Immobilisations",
     types: ["create_fixed_asset"],
     module: "immobilisations",
+    // Le montant d'une immobilisation ne bouge pas, et le payload ne porte
+    // qu'un libellé de compte : rien n'impose de se presser.
+    staleAfterDays: 180,
   },
   {
     id: "avis",
     label: "Avis clients",
     types: ["record_review_reply"],
     module: "avis",
+    // Répondre à un avis six mois après ne se fait pas ; le texte cite un
+    // client.
+    staleAfterDays: 60,
   },
   {
     id: "facturation_electronique",
     label: "Factures électroniques",
     types: ["submit_einvoice", "report_einvoice_transactions"],
     module: "facturation_electronique",
+    /*
+     * 60 j, et c'est le critère PII qui commande — le seul groupe où les deux
+     * critères divergent.
+     *
+     * Un dépôt reste déclarativement valable longtemps (l'obligation ne se
+     * périme pas comme un impayé) : sur le seul critère de justesse, 90 j se
+     * défendait. Mais `submit_einvoice` porte une facture client COMPLÈTE —
+     * raison sociale, adresse, SIRET, libellés de lignes : après le devis
+     * dicté, le payload le plus bavard de la file. Lui donner l'horizon des
+     * groupes peu nominatifs aurait été justifier le délai le plus long par
+     * l'argument le plus faux.
+     *
+     * `report_einvoice_transactions`, agrégats seulement, aurait pu rester à
+     * 90 j ; il partage l'onglet, donc l'horizon. Un e-reporting non déposé au
+     * bout de deux mois est de toute façon un problème, pas une proposition.
+     */
+    staleAfterDays: 60,
   },
 ];
 
@@ -106,6 +167,10 @@ const UNCATALOGUED: PendingActionGroup = {
   label: "Autres",
   types: [],
   module: null,
+  // Jamais atteint par la rétention : un type hors catalogue est SIGNALÉ, pas
+  // détruit (voir `retentionVerdict`). La valeur est là pour satisfaire le
+  // type, elle ne sert à rien.
+  staleAfterDays: Number.POSITIVE_INFINITY,
 };
 
 export interface ResolvedPendingActionGroup extends PendingActionGroup {
@@ -159,4 +224,118 @@ export function resolvePendingActionGroups(
     resolved.push({ ...UNCATALOGUED, count: orphanCount, moduleOff: false });
   }
   return resolved;
+}
+
+// ── Rétention (art. 5.1.e) ──────────────────────────────────────────────────
+
+/**
+ * Combien de temps une action DÉCIDÉE garde son contenu.
+ *
+ * La décision elle-même est une trace définitive — qui a validé quoi, et
+ * quand, ne s'efface pas. Ce qui s'efface, c'est ce sur quoi elle portait :
+ * le brouillon envoyé, le nom du client, le verbatim d'une dictée. Un an
+ * couvre l'exercice comptable, donc toute relecture légitime a eu lieu.
+ *
+ * La plupart des types sont déjà réduits AU MOMENT de la décision
+ * (`reduceFinishedPayload`, `reduceQuotePayload`) : cette borne est le filet
+ * pour ceux qui ne le sont pas, et pour l'existant écrit avant ces règles.
+ */
+export const DECIDED_RETENTION_DAYS = 365;
+
+/** Ce qu'une action porte de pertinent pour la rétention. */
+export interface RetentionCandidate {
+  readonly type: string;
+  readonly status: string;
+  /**
+   * Dernière ACTIVITÉ sur la ligne, pas sa création.
+   *
+   * La différence n'est pas cosmétique. Deux routes écrivent en laissant le
+   * statut à `pending` : la reprise du brouillon (`PATCH .../draft`) et le
+   * rattachement à un chantier (`PATCH .../affaire`). Compter l'âge depuis la
+   * création aurait rejeté « sans décision » une proposition retravaillée la
+   * veille — et le balayage aurait écrasé le texte que le dirigeant venait
+   * d'écrire, en prétendant que personne ne s'en était occupé.
+   *
+   * Pour une action décidée, c'est ≥ la date de décision : la borne d'un an ne
+   * peut donc que se déclencher plus tard, jamais plus tôt.
+   */
+  readonly lastActivityAt: Date;
+}
+
+export type RetentionAction =
+  /** Rien à faire. */
+  | "garder"
+  /** En attente et périmée : rejetée ET réduite — jamais l'un sans l'autre. */
+  | "rejeter_et_reduire"
+  /** Décidée depuis longtemps : contenu retiré, statut et attribution intacts. */
+  | "reduire"
+  /** Type hors catalogue : on ne détruit pas ce qu'on n'a pas su classer. */
+  | "signaler";
+
+export interface RetentionVerdict {
+  readonly action: RetentionAction;
+  /** Français, destiné à être écrit dans le payload réduit ou au journal. */
+  readonly reason: string;
+}
+
+const GROUP_BY_TYPE = new Map<string, PendingActionGroup>(
+  PENDING_ACTION_GROUPS.flatMap((group) => group.types.map((type) => [type, group] as const)),
+);
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Que faire d'une action au regard de la rétention. PURE.
+ *
+ * DEUX RÈGLES QUI COMMANDENT LE RESTE.
+ *
+ * 1. **Rejeter et réduire vont ENSEMBLE.** Réduire une action encore en
+ *    attente laisserait dans la file une proposition qu'on ne peut plus lire
+ *    donc plus décider — le défaut que F6 a corrigé, sous une autre forme. Et
+ *    le rejet se justifie sur le fond : approuver une relance calculée sur un
+ *    impayé vieux de trois mois enverrait une lettre fausse.
+ *
+ * 2. **Un type inconnu n'est jamais détruit.** Même asymétrie qu'en F6 : un
+ *    outil livré avant sa ligne de catalogue verrait sinon ses propositions
+ *    effacées par une règle qui ne le connaît pas. On SIGNALE, quelqu'un
+ *    catalogue, et la règle s'applique au tour suivant.
+ *
+ * L'âge se compte sur `lastActivityAt`, JAMAIS sur la création — voir le
+ * commentaire de ce champ : deux routes retravaillent une action en la
+ * laissant `pending`, et les compter pour rien reviendrait à effacer le
+ * travail d'un humain en l'accusant de ne pas avoir décidé.
+ *
+ * AUCUNE GARDE « déjà réduite » ici, et c'est délibéré. Une version
+ * précédente en portait une, sur un champ que le seul appelant codait à
+ * `false` en dur : une branche morte, avec son test, qui donnait l'illusion
+ * que l'idempotence du balayage tenait à la règle pure. Elle tient au SQL de
+ * lecture (`payload->'reducedAt' IS NULL`) et à lui seul — le dire ici évite
+ * qu'on retire un jour le filtre en croyant la règle protégée.
+ */
+export function retentionVerdict(
+  candidate: RetentionCandidate,
+  now: Date,
+): RetentionVerdict {
+  const group = GROUP_BY_TYPE.get(candidate.type);
+  if (group === undefined) {
+    return {
+      action: "signaler",
+      reason: `type hors catalogue (${candidate.type}) — à classer avant toute rétention`,
+    };
+  }
+  const ageDays = Math.floor((now.getTime() - candidate.lastActivityAt.getTime()) / DAY_MS);
+
+  if (candidate.status === "pending") {
+    if (ageDays < group.staleAfterDays) return { action: "garder", reason: "dans son horizon" };
+    return {
+      action: "rejeter_et_reduire",
+      reason: `sans décision ni reprise depuis ${ageDays} jours (horizon : ${group.staleAfterDays})`,
+    };
+  }
+
+  if (ageDays < DECIDED_RETENTION_DAYS) return { action: "garder", reason: "dans son horizon" };
+  return {
+    action: "reduire",
+    reason: `décidée il y a ${ageDays} jours — contenu retiré, décision conservée`,
+  };
 }
