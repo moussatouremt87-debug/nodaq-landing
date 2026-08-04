@@ -1,3 +1,5 @@
+import { splitRevenus } from "@nodaq/shared";
+import type { RevenusSplit } from "@nodaq/shared";
 import { z } from "zod";
 import {
   computeAffaireMargin,
@@ -403,4 +405,133 @@ export async function loadAffairesMargins(
     // censé les surveiller.
     ignorees: Math.max(0, total - affaires.length),
   };
+}
+
+/**
+ * Borne de lecture du découpage des revenus (4.2 bloc 3).
+ *
+ * Généreuse à dessein : la troncature sacrifierait D'ABORD l'acquis. Les
+ * affaires terminées sont les plus anciennes, donc les premières coupées par
+ * un `createdAt desc` — le chiffre du travail livré serait rogné pendant que
+ * l'engagé, récent, resterait complet. Atteinte ⇒ DITE, et `exact` tombe.
+ */
+export const AFFAIRES_REVENUS_SCAN_LIMIT = 5_000;
+
+export interface RevenusSplitView extends RevenusSplit {
+  /** Affaires non examinées faute de place — jamais une troncature muette. */
+  readonly ignorees: number;
+}
+
+/**
+ * Charge de quoi séparer encaissé, engagé et acquis.
+ *
+ * TROIS CHOIX QUI COMPTENT.
+ *
+ * 1. **Requête distincte de celle des marges.** `loadAffairesMargins` ne
+ *    regarde que les affaires ouvertes (`EN_COURS`, `ACCEPTEE`), alors que
+ *    l'acquis vit précisément dans les terminées. Réutiliser la même aurait
+ *    donné un acquis structurellement nul — un chiffre faux qui ne se serait
+ *    jamais fait remarquer, puisqu'il aurait eu l'air d'un démarrage
+ *    tranquille.
+ *
+ * 2. **Les archivées sont chargées**, pour que ranger une affaire livrée ne
+ *    fasse pas baisser le chiffre d'affaires acquis d'un exercice.
+ *
+ * 3. **Le réglé des factures est agrégé sur TOUT le tenant**, pas seulement
+ *    sur les factures rattachées à une affaire. Le rattachement est nullable
+ *    et l'absence de rattachement est le cas MAJORITAIRE : ne compter que les
+ *    factures rattachées afficherait « encaissé » sur une fraction de
+ *    l'encaissé, sous un libellé qui promet le compte en banque.
+ */
+export async function loadRevenusSplit(
+  tx: TenantClient,
+  limit: number = AFFAIRES_REVENUS_SCAN_LIMIT,
+): Promise<RevenusSplitView> {
+  /*
+   * TOUS les statuts, y compris `PERDUE` et `DEVIS_ENVOYE`.
+   *
+   * L'acquis et l'engagé n'en retiennent qu'une partie, mais l'ENCAISSÉ
+   * DÉCLARÉ se compte quel que soit le statut : un acompte reçu sur une
+   * affaire finalement perdue est quand même sur le compte. Ne charger que
+   * les statuts « utiles » rendait cet invariant — écrit dans le moteur et
+   * dans le doc — inatteignable depuis la route.
+   */
+  const statuses = [
+    "PROSPECT",
+    "DEVIS_ENVOYE",
+    "ACCEPTEE",
+    "EN_COURS",
+    "TERMINEE",
+    "PERDUE",
+    "ARCHIVEE",
+  ];
+  const total = await tx.affaire.count({ where: { status: { in: statuses } } });
+  const affaires = await tx.affaire.findMany({
+    take: limit,
+    // `id` en second critère : à égalité de `createdAt`, l'ensemble tronqué
+    // serait sinon non déterministe, et le chiffre varierait d'un appel à
+    // l'autre à la borne.
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    where: { status: { in: statuses } },
+    select: {
+      status: true,
+      quotedAmountCents: true,
+      depositsCents: true,
+    },
+  });
+
+  /*
+   * RÉGLÉ = facturé − résiduel, moins la RETENUE ENCORE DÉTENUE.
+   *
+   * Deux pièges, et le second a coûté une revue.
+   *
+   * 1. `residualCents` exclut la retenue par construction (la dérivation FEC
+   *    la sort du reste dû), donc `facturé − résiduel` la CONTIENT. Sans
+   *    correction, une facture de 10 000 € avec 500 € de retenue ressortirait
+   *    à 10 000 € encaissés le jour où le client en verse 9 500.
+   *
+   * 2. Mais soustraire `fec_invoices.retained_cents` LIGNE À LIGNE est faux
+   *    aussi : c'est « la retenue portée par cette pièce », pas la retenue
+   *    encore due. Une libération se comptabilise souvent sous sa PROPRE
+   *    pièce, et la facture d'origine garde son `retained_cents` à vie — les
+   *    500 € seraient amputés pour toujours, même une fois versés.
+   *
+   * On soustrait donc le SOLDE du compte 4117, que le ticket 2.20 a déjà
+   * calculé et stocké sur l'import (`fec_imports.retained_cents`) exactement
+   * pour cette raison : un solde n'a rien à rattacher, il est juste par
+   * construction.
+   */
+  const regle = await tx.$queryRaw<{ paid: bigint | null }[]>`
+    SELECT SUM(amount_cents - residual_cents)::bigint AS paid FROM fec_invoices`;
+  const dernierImport = await tx.fecImport.findFirst({
+    orderBy: { importedAt: "desc" },
+    select: { retainedCents: true },
+  });
+  /*
+   * `null` et non `0` quand aucun FEC n'a jamais été importé.
+   *
+   * Un zéro se lirait « rien n'est rentré » à côté d'un acquis non nul, alors
+   * que la vraie réponse est « je n'ai pas de source comptable ». C'est la
+   * différence entre un chiffre et une absence de chiffre.
+   */
+  const encaisseFactureCents =
+    dernierImport === null
+      ? null
+      : Math.max(0, Number(regle[0]?.paid ?? 0n) - Number(dernierImport.retainedCents));
+
+  const split = splitRevenus(
+    affaires.map((affaire) => ({
+      status: affaire.status,
+      quotedAmountCents:
+        affaire.quotedAmountCents === null ? null : Number(affaire.quotedAmountCents),
+      depositsCents: Number(affaire.depositsCents ?? 0),
+    })),
+    encaisseFactureCents,
+  );
+
+  const ignorees = Math.max(0, total - affaires.length);
+  // `exact` est recalculé ICI : le moteur pur ne connaît pas la troncature, et
+  // rendre `{ exact: true, ignorees: 500 }` ferait lire « exact » sur un
+  // chiffre amputé à tout consommateur autre que l'écran.
+  return { ...split, ignorees, exact: split.exact && ignorees === 0 };
 }
