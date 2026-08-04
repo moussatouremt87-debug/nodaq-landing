@@ -45,7 +45,8 @@ export type BriefItemKind =
   | "echeance_proche"
   | "impayes"
   | "stock_sous_seuil"
-  | "documents_a_verifier";
+  | "documents_a_verifier"
+  | "contrats_echus";
 
 export interface BriefItem {
   readonly kind: BriefItemKind;
@@ -179,6 +180,22 @@ export interface BriefInput {
   } | null;
   /** Articles sous le seuil d'alerte. `null` = module éteint ou non regardé. */
   readonly stockSousSeuil: number | null;
+  /**
+   * Échéances de contrat dues et NON matérialisées (4.2 bloc 2).
+   * `null` = non regardé — jamais 0 par défaut.
+   *
+   * C'est du travail déjà vendu qui n'a pas encore été planifié : le seul
+   * endroit du brief où l'alerte porte sur ce qu'on a OUBLIÉ DE FAIRE, pas
+   * sur ce qui a mal tourné.
+   */
+  readonly contratsEchus: {
+    /** Contrats ayant au moins une échéance due. */
+    readonly contrats: number;
+    /** Total des échéances dues, tous contrats confondus. */
+    readonly echeances: number;
+    /** La plus ancienne échéance due, « YYYY-MM-DD ». */
+    readonly plusAncienne: string | null;
+  } | null;
   /** Pièces photographiées en attente de vérification. */
   readonly documentsAVerifier: number;
   /** Ce que le brief n'a pas pu examiner, avec la raison. */
@@ -380,6 +397,39 @@ export function composeMorningBrief(input: BriefInput): MorningBrief {
       amountCents: null,
       amountNote: null,
       href: "/validation",
+    });
+  }
+
+  /*
+   * Des passages d'entretien dus et non planifiés (4.2 bloc 2).
+   *
+   * `attention` et non `urgent` : ce n'est pas de l'argent qui part
+   * aujourd'hui, c'est un engagement pris qui glisse. Le mettre en urgent le
+   * ferait concurrencer une affaire en perte, et un brief où tout est urgent
+   * ne hiérarchise plus rien.
+   */
+  if (input.contratsEchus !== null && input.contratsEchus.echeances > 0) {
+    const { contrats, echeances, plusAncienne } = input.contratsEchus;
+    items.push({
+      kind: "contrats_echus",
+      severity: "attention",
+      // Le RETARD est DANS le libellé, et pas en note : « 3 passages » sans
+      // date se lit « cette semaine » alors que le plus ancien peut dater de
+      // mars. `amountNote` ne conviendrait pas — il qualifie un montant, et il
+      // n'y a pas d'argent sur cette ligne.
+      label: [
+        echeances === 1
+          ? "1 passage de contrat à planifier"
+          : `${echeances} passages de contrat à planifier`,
+        contrats > 1 ? `sur ${contrats} contrats` : null,
+        plusAncienne !== null ? `le plus ancien dû le ${plusAncienne}` : null,
+      ]
+        .filter(Boolean)
+        .join(" — "),
+      count: echeances,
+      amountCents: null,
+      amountNote: null,
+      href: "/contrats",
     });
   }
 

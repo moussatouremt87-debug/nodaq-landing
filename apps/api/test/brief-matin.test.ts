@@ -25,6 +25,7 @@ const RIEN: BriefInput = {
   impayes: null,
   stockSousSeuil: null,
   documentsAVerifier: 0,
+  contratsEchus: null,
   blindSpots: [],
 };
 
@@ -344,5 +345,57 @@ describe("zéro n'est pas une nouvelle", () => {
       blindSpots: [{ area: "impayés", why: "aucun facturier connecté" }],
     });
     expect(aveugle.blindSpots).toHaveLength(1);
+  });
+});
+
+describe("les contrats échus — du travail vendu qui n'a pas été planifié", () => {
+  it("remonte en ATTENTION, pas en urgent", () => {
+    /*
+     * Ce n'est pas de l'argent qui part aujourd'hui, c'est un engagement pris
+     * qui glisse. En `urgent`, la ligne concurrencerait une affaire en perte —
+     * et un brief où tout est urgent ne hiérarchise plus rien, donc ne sert
+     * plus à rien.
+     */
+    const brief = composeMorningBrief({
+      ...RIEN,
+      contratsEchus: { contrats: 1, echeances: 1, plusAncienne: "2026-03-15" },
+    });
+    const ligne =
+      brief.kind === "brief" ? brief.items.find((item) => item.kind === "contrats_echus") : null;
+    expect(ligne?.severity).toBe("attention");
+    expect(ligne?.count).toBe(1);
+    // Pas de montant : cette ligne parle de planning, pas d'argent. Un zéro
+    // serait lu comme « ça ne rapporte rien ».
+    expect(ligne?.amountCents).toBeNull();
+  });
+
+  it("la DATE du plus ancien passage est dans le libellé", () => {
+    // « 3 passages à planifier » sans date se lit « cette semaine », alors que
+    // le plus ancien peut dater de mars. C'est toute la différence entre un
+    // rappel et une alerte.
+    const brief = composeMorningBrief({
+      ...RIEN,
+      contratsEchus: { contrats: 2, echeances: 3, plusAncienne: "2026-03-15" },
+    });
+    const ligne =
+      brief.kind === "brief" ? brief.items.find((item) => item.kind === "contrats_echus") : null;
+    expect(ligne?.label).toContain("3 passages");
+    expect(ligne?.label).toContain("2 contrats");
+    expect(ligne?.label).toContain("2026-03-15");
+  });
+
+  it("zéro échéance ne produit AUCUNE ligne — et « non regardé » non plus", () => {
+    // « 0 passage à planifier » est du bruit quotidien : le brief ne dit que
+    // ce sur quoi il y a quelque chose à faire.
+    // Assertion la plus forte disponible : le brief reste `calme`. Une ligne
+    // « 0 passage à planifier » suffirait à le faire basculer, et un brief qui
+    // parle tous les matins pour ne rien dire cesse d'être ouvert.
+    const vide = composeMorningBrief({
+      ...RIEN,
+      contratsEchus: { contrats: 0, echeances: 0, plusAncienne: null },
+    });
+    expect(vide.kind).toBe("calme");
+    const pasRegarde = composeMorningBrief({ ...RIEN, contratsEchus: null });
+    expect(pasRegarde.kind).toBe("calme");
   });
 });
