@@ -18,6 +18,7 @@ const AFFAIRE = {
   status: "TERMINEE" as const,
   quotedAmountCents: 100_000,
   depositsCents: 0,
+  completedAt: null as string | null,
 };
 
 describe("config versionnée datée", () => {
@@ -73,17 +74,12 @@ describe("acquis = travail LIVRÉ, jamais travail vendu", () => {
     expect(res.engageCents).toBe(0);
   });
 
-  it("une ARCHIVÉE ne compte nulle part — sous-estimation ASSUMÉE", () => {
+  it("une ARCHIVÉE sans preuve de livraison ne compte nulle part", () => {
     /*
-     * Archiver une affaire terminée écrase son statut, donc son montant sort
-     * de l'acquis : le chiffre baisse quand le patron range. C'est une
-     * sous-estimation, elle est visible, et elle est dite dans le doc.
-     *
-     * La rattraper via `actualEndDate` a été essayé puis RETIRÉ : ce champ est
-     * libre et l'archivage accepte n'importe quel statut de départ, `PERDUE`
-     * compris — une affaire abandonnée aurait alors compté à 100 % du devis.
-     * Entre une sous-estimation visible et une sur-estimation flatteuse et
-     * invisible, on garde celle qui se voit.
+     * Ranger n'est pas livrer. `ARCHIVEE` est la sortie commune des affaires
+     * gagnées ET perdues : le statut seul ne dit plus laquelle. Sans un FAIT
+     * qui atteste la livraison, elle reste hors de l'acquis — c'est
+     * `completedAt` qui tranche, et lui seul (voir plus bas).
      */
     const rangee = splitRevenus([{ ...AFFAIRE, status: "ARCHIVEE" }], null);
     expect(rangee.acquisCents).toBe(0);
@@ -183,5 +179,94 @@ describe("ce qui n'est pas calculé est DIT", () => {
     // « rien n'est rentré ».
     expect(res.encaisseFactureCents).toBeNull();
     expect(res.exact).toBe(true);
+  });
+});
+
+/*
+ * `completedAt` — un FAIT remplace une déduction.
+ *
+ * Le bloc 3 sortait toute affaire `ARCHIVEE` de l'acquis, y compris celles qui
+ * avaient été terminées : `status` est une colonne unique, donc ranger écrase
+ * `TERMINEE`. Le chiffre d'un exercice baissait quand le patron rangeait.
+ *
+ * Le rattrapage par `actualEndDate` avait été implémenté puis RETIRÉ : champ
+ * libre, et `POST /affaires/:id/archiver` accepte n'importe quel statut de
+ * départ — une affaire abandonnée dont quelqu'un avait saisi la date d'arrêt
+ * aurait compté à 100 % du devis. Sur-estimation invisible et flatteuse.
+ *
+ * `completedAt` n'est pas une déduction : il est posé au MOMENT de la
+ * transition vers `TERMINEE`, et rien d'autre ne l'écrit. Une affaire jamais
+ * terminée ne peut pas en avoir un.
+ */
+describe("archiver ne défait plus ce qui a été livré", () => {
+  it("une ARCHIVÉE qui a été TERMINÉE compte en acquis", () => {
+    const res = splitRevenus(
+      [{ ...AFFAIRE, status: "ARCHIVEE", completedAt: "2026-03-14T10:00:00.000Z" }],
+      null,
+    );
+    expect(res.acquisCents).toBe(100_000);
+    expect(res.engageCents).toBe(0);
+  });
+
+  it("une ARCHIVÉE JAMAIS terminée ne compte nulle part", () => {
+    /*
+     * Le cas que `actualEndDate` ratait. Une affaire PERDUE puis archivée n'a
+     * aucun `completedAt` — aucune transition vers `TERMINEE` n'a eu lieu —
+     * donc elle reste hors de l'acquis quoi qu'on ait saisi ailleurs.
+     */
+    const res = splitRevenus([{ ...AFFAIRE, status: "ARCHIVEE", completedAt: null }], null);
+    expect(res.acquisCents).toBe(0);
+    expect(res.engageCents).toBe(0);
+  });
+
+  it("`completedAt` ne rattrape QUE l'archivage, jamais un statut vivant", () => {
+    /*
+     * Une affaire terminée puis REPRISE (`TERMINEE -> EN_COURS`) est du travail
+     * en cours, pas du travail livré. Si `completedAt` suffisait à lui seul, une
+     * reprise resterait comptée en acquis — et l'affaire compterait DEUX fois
+     * le jour où elle se terminerait à nouveau. C'est le statut qui décide ;
+     * `completedAt` ne fait que rendre `ARCHIVEE` lisible.
+     */
+    const res = splitRevenus(
+      [{ ...AFFAIRE, status: "EN_COURS", completedAt: "2026-03-14T10:00:00.000Z" }],
+      null,
+    );
+    expect(res.acquisCents).toBe(0);
+    expect(res.engageCents).toBe(100_000);
+  });
+
+  it("une ARCHIVÉE terminée SANS devis est comptée à part, pas ignorée", () => {
+    // Même règle que partout : la valeur du travail est inconnue, donc l'acquis
+    // ne peut pas se dire exact.
+    const res = splitRevenus(
+      [
+        {
+          ...AFFAIRE,
+          status: "ARCHIVEE",
+          quotedAmountCents: null,
+          completedAt: "2026-03-14T10:00:00.000Z",
+        },
+      ],
+      null,
+    );
+    expect(res.acquisCents).toBe(0);
+    expect(res.sansDevis).toBe(1);
+    expect(res.exact).toBe(false);
+  });
+
+  it("une PERDUE avec un `completedAt` reste hors de l'acquis", () => {
+    /*
+     * `TERMINEE -> PERDUE` est une correction : le chantier n'a finalement pas
+     * eu lieu. La route efface `completedAt` sur cette transition, mais le
+     * moteur ne s'y fie pas — il ne rattrape que `ARCHIVEE`. Deux gardes
+     * plutôt qu'une, parce qu'une seule suffirait à rendre un chiffre flatteur
+     * si l'autre cédait.
+     */
+    const res = splitRevenus(
+      [{ ...AFFAIRE, status: "PERDUE", completedAt: "2026-03-14T10:00:00.000Z" }],
+      null,
+    );
+    expect(res.acquisCents).toBe(0);
+    expect(res.engageCents).toBe(0);
   });
 });

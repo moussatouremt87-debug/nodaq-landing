@@ -187,6 +187,7 @@ export function serializeAffaire(affaire: {
   startDate: Date | null;
   plannedEndDate: Date | null;
   actualEndDate: Date | null;
+  completedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }) {
@@ -212,9 +213,44 @@ export function serializeAffaire(affaire: {
     startDate: day(affaire.startDate),
     plannedEndDate: day(affaire.plannedEndDate),
     actualEndDate: day(affaire.actualEndDate),
+    /* Un INSTANT, pas un jour : `completedAt` date une transition, pas une
+       journée de chantier. Le tronquer à la date perdrait l'ordre de deux
+       affaires terminées le même jour. */
+    completedAt: affaire.completedAt?.toISOString() ?? null,
     createdAt: affaire.createdAt.toISOString(),
     updatedAt: affaire.updatedAt.toISOString(),
   };
+}
+
+/**
+ * Ce que devient `completedAt` quand le statut change. PURE.
+ *
+ * `undefined` = ne pas toucher. C'est le cas le plus fréquent, et il est
+ * distinct de `null` : un `PATCH` qui ne parle pas du statut ne doit pas
+ * effacer une date de livraison, et un archivage doit la PRÉSERVER — c'est
+ * toute la raison d'être de la colonne.
+ *
+ * | Statut visé | Effet | Pourquoi |
+ * |---|---|---|
+ * | `TERMINEE` | posé (idempotent) | la transition EST le fait |
+ * | `ARCHIVEE` | préservé | ranger n'est pas défaire ; c'est ce qui lève la sous-estimation |
+ * | tout autre | effacé | une affaire reprise ou finalement perdue n'a pas été livrée |
+ *
+ * L'IDEMPOTENCE N'EST PAS UN DÉTAIL : re-poser la date à chaque `PATCH` d'une
+ * affaire déjà terminée ferait glisser la livraison vers la dernière
+ * correction de faute de frappe.
+ */
+export function nextCompletedAt(
+  targetStatus: string | undefined,
+  current: Date | null,
+  now: Date,
+): Date | null | undefined {
+  if (targetStatus === undefined) return undefined;
+  if (targetStatus === "TERMINEE") return current ?? now;
+  if (targetStatus === "ARCHIVEE") return undefined;
+  // N'écrire que s'il y a quelque chose à effacer : un `update` inutile sur
+  // chaque changement de statut ferait bouger `updatedAt` pour rien.
+  return current === null ? undefined : null;
 }
 
 /** Champs de date à convertir avant écriture Prisma. */
@@ -477,6 +513,7 @@ export async function loadRevenusSplit(
       status: true,
       quotedAmountCents: true,
       depositsCents: true,
+      completedAt: true,
     },
   });
 
@@ -525,6 +562,9 @@ export async function loadRevenusSplit(
       quotedAmountCents:
         affaire.quotedAmountCents === null ? null : Number(affaire.quotedAmountCents),
       depositsCents: Number(affaire.depositsCents ?? 0),
+      // Le FAIT qui permet à une affaire terminée PUIS archivée de rester dans
+      // l'acquis. Sans lui, le moteur ne voit qu'un statut `ARCHIVEE` muet.
+      completedAt: affaire.completedAt?.toISOString() ?? null,
     })),
     encaisseFactureCents,
   );

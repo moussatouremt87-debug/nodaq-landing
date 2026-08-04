@@ -90,8 +90,8 @@ par distraction.
 | `TERMINEE` | **acquis** |
 | `ACCEPTEE`, `EN_COURS` | **engagé** |
 | `PROSPECT`, `DEVIS_ENVOYE` | ni l'un ni l'autre — rien n'est signé |
-| `ARCHIVEE` **avec date de fin réelle** | **acquis** — ranger n'est pas défaire |
-| `PERDUE`, `ARCHIVEE` sans date de fin | nulle part |
+| `ARCHIVEE` **avec `completedAt`** | **acquis** — ranger n'est pas défaire |
+| `PERDUE`, `ARCHIVEE` sans `completedAt` | nulle part |
 
 **Pas de prorata**, et c'est délibéré. On pourrait vouloir dire « ce chantier
 est à moitié fait, donc la moitié est acquise » — mais rien dans le produit ne
@@ -99,21 +99,51 @@ sait où en est un chantier : il n'existe pas de lignes de temps, et
 l'avancement n'est pas saisi. Un pourcentage inventé serait exactement le
 chiffre flatteur que ce moteur existe pour empêcher.
 
-**Archiver fait baisser le chiffre acquis, et c'est une sous-estimation
-ASSUMÉE.** `status` est une colonne unique : ranger une affaire terminée écrase
-`TERMINEE`, donc son montant sort de l'acquis.
+### `completedAt` : un fait à la place d'une déduction
 
-Le rattrapage par `actualEndDate` a été implémenté **puis retiré**. Ce champ est
-libre, et `POST /affaires/:id/archiver` accepte n'importe quel statut de départ
-— `PERDUE` compris. Une affaire abandonnée dont quelqu'un a saisi la date
-d'arrêt aurait alors compté à **100 % du devis** en acquis : une sur-estimation
+**Archiver faisait baisser le chiffre acquis.** `status` est une colonne unique :
+ranger une affaire terminée écrase `TERMINEE`, donc son montant sortait de
+l'acquis. Le bloc 3 assumait cette sous-estimation faute de mieux.
+
+Le rattrapage par `actualEndDate` avait été implémenté **puis retiré**. Ce champ
+est libre, et `POST /affaires/:id/archiver` accepte n'importe quel statut de
+départ — `PERDUE` compris. Une affaire abandonnée dont quelqu'un avait saisi la
+date d'arrêt aurait compté à **100 % du devis** en acquis : une sur-estimation
 invisible et flatteuse, exactement ce que ce module existe pour interdire.
 
-*Jamais d'inférence quand le coût des deux erreurs est asymétrique* : entre une
-sous-estimation qui se voit et une sur-estimation qui ne se voit pas, on garde
-la première. Le vrai remède est une colonne `completedAt` posée à la transition
-vers `TERMINEE` — un fait, pas une déduction. **C'est le prochain ticket de ce
-domaine.**
+`completedAt` n'a pas ce défaut parce que ce n'est **pas une déduction**. Il est
+posé au moment de la transition vers `TERMINEE`, et **rien d'autre ne l'écrit** :
+une affaire jamais terminée ne peut pas en porter un. C'est la seule façon de
+lever la sous-estimation sans ouvrir une sur-estimation.
+
+| Statut visé | Effet sur `completedAt` | Pourquoi |
+|---|---|---|
+| `TERMINEE` | posé, **idempotent** | la transition EST le fait |
+| `ARCHIVEE` | **préservé** | ranger n'est pas défaire |
+| tout autre | **effacé** | une affaire reprise, ou finalement perdue, n'a pas été livrée |
+
+**L'idempotence n'est pas un détail.** Re-poser la date à chaque `PATCH` d'une
+affaire déjà terminée ferait glisser sa livraison vers la dernière correction de
+faute de frappe — et le jour où l'acquis se calculera par période, toutes les
+affaires anciennes basculeraient dans le mois en cours.
+
+**L'effacement sur reprise non plus.** `TERMINEE → EN_COURS` est une correction :
+le chantier n'était pas fini. Garder la date ferait recompter l'affaire en acquis
+le jour où elle serait archivée, donc **deux fois** si elle se termine à nouveau.
+
+Le moteur, lui, ne rattrape que `ARCHIVEE` : c'est le **statut** qui décide, et
+`completedAt` ne fait que rendre `ARCHIVEE` lisible. Deux gardes plutôt qu'une —
+une seule suffirait à rendre un chiffre flatteur si l'autre cédait.
+
+**Jamais saisi par le client.** L'exposer en entrée rouvrirait exactement le
+défaut d'`actualEndDate`. Il est dérivé du statut, en sortie seulement.
+
+**Aucun backfill, et c'est délibéré.** Les affaires archivées avant cette colonne
+ne portent aucune trace fiable de leur passage par `TERMINEE` — la déduire
+d'`actualEndDate` ou d'`updatedAt` serait précisément l'inférence que
+`completedAt` remplace. Elles restent hors de l'acquis. La sous-estimation
+persiste donc sur l'historique, et elle est dite ici plutôt que corrigée au
+jugé.
 
 **L'encaissé déclaré, lui, est compté quel que soit le statut** : un acompte reçu sur
 une affaire finalement perdue est quand même sur le compte. C'est précisément

@@ -48,6 +48,7 @@ import {
   loadAffaireMargin,
   loadAffairesMargins,
   loadRevenusSplit,
+  nextCompletedAt,
   serializeAffaire,
   toPrismaData,
 } from "./affaires.js";
@@ -6237,11 +6238,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       // création qui échoue rend son numéro, deux créations simultanées n'ont
       // jamais la même.
       const reference = await nextAffaireReference(tx, request.tenantId, year);
+      // Une affaire peut naître déjà terminée (saisie a posteriori d'un
+      // chantier fait). Le fait vaut à la création comme à la transition.
+      const completedAt = nextCompletedAt(body.data.status, null, new Date());
       return tx.affaire.create({
         data: {
           tenantId: request.tenantId,
           reference,
           ...toPrismaData(body.data),
+          ...(completedAt === undefined ? {} : { completedAt }),
           label: body.data.label,
         },
       });
@@ -6431,7 +6436,26 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         });
         if (!prospect) return null;
       }
-      return tx.affaire.update({ where: { id: params.data.id }, data: toPrismaData(body.data) });
+      /*
+       * `completedAt` est DÉRIVÉ du statut, jamais reçu du client.
+       *
+       * L'exposer en entrée rouvrirait exactement le défaut d'`actualEndDate` :
+       * un champ libre qu'on peut poser sur une affaire jamais livrée, et donc
+       * compter à 100 % du devis en acquis. Le fait doit rester la conséquence
+       * d'une transition, pas une saisie.
+       */
+      const completedAt = nextCompletedAt(
+        body.data.status,
+        existing.completedAt,
+        new Date(),
+      );
+      return tx.affaire.update({
+        where: { id: params.data.id },
+        data: {
+          ...toPrismaData(body.data),
+          ...(completedAt === undefined ? {} : { completedAt }),
+        },
+      });
     });
     if (!updated) return reply.code(404).send({ error: "affaire ou prospect inconnu" });
     // Ces réponses portent le nom du client et les montants : jamais en cache.
@@ -6448,6 +6472,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const archived = await withTenant(request.tenantId, async (tx) => {
       const existing = await tx.affaire.findUnique({ where: { id: params.data.id } });
       if (!existing) return null;
+      // `completedAt` n'est PAS touché : ranger n'est pas défaire. C'est
+      // précisément ce qui permet à une affaire terminée puis archivée de
+      // rester dans l'acquis — la sous-estimation que le bloc 3 assumait.
       return tx.affaire.update({ where: { id: params.data.id }, data: { status: "ARCHIVEE" } });
     });
     if (!archived) return reply.code(404).send({ error: "affaire inconnue" });

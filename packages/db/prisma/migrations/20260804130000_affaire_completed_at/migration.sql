@@ -1,0 +1,26 @@
+-- Un FAIT à la place d'une déduction : quand cette affaire est-elle passée
+-- à TERMINEE ?
+--
+-- `status` est une colonne unique, donc archiver une affaire terminée écrase
+-- `TERMINEE` et son montant sortait de l'acquis : le chiffre d'un exercice
+-- baissait quand le patron rangeait. Le bloc 3 de 4.2 assumait cette
+-- sous-estimation faute de mieux, et le doc annonçait cette colonne comme le
+-- vrai remède.
+--
+-- POURQUOI PAS `actual_end_date` : ce champ est libre, et
+-- `POST /affaires/:id/archiver` accepte n'importe quel statut de départ,
+-- `PERDUE` compris. Une affaire abandonnée dont quelqu'un avait saisi la date
+-- d'arrêt aurait compté à 100 % du devis en acquis — une sur-estimation
+-- invisible et flatteuse. `completed_at` est écrit par la seule transition
+-- vers `TERMINEE` : une affaire jamais terminée ne peut pas en porter un.
+--
+-- AUCUN BACKFILL, ET C'EST DÉLIBÉRÉ. Les affaires déjà archivées ne portent
+-- aucune trace fiable de leur passage par `TERMINEE` : la déduire
+-- d'`actual_end_date` ou d'`updated_at` serait exactement l'inférence que
+-- cette colonne existe pour remplacer. Elles restent hors de l'acquis, et
+-- cette limite est écrite dans `docs/encaisse-acquis.md`.
+--
+-- Pas d'index : la colonne n'est jamais un critère de filtre, elle est lue
+-- avec la ligne lors du balayage borné de `loadRevenusSplit`.
+
+ALTER TABLE "affaires" ADD COLUMN "completed_at" TIMESTAMP(3);
