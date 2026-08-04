@@ -65,6 +65,7 @@ export type DomainEvent =
   | "connecteur.modifie"
   | "module.bascule"
   | "prospect.modifie"
+  | "prospect.efface"
   | "stock.modifie"
   | "rh.modifie"
   | "immobilisation.modifiee"
@@ -125,7 +126,11 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   // parce que supprimer une pièce RAPPROCHÉE défait le rapprochement : une
   // correction seule périmera la trésorerie pour rien, ce qui coûte une
   // requête — l'oublier coûterait un écran faux.
-  "document.modifie": ["cockpit", "classeur", "tresorerie", "brief"],
+  // `validation` et `nav` : symétrique exact de `document.ajoute`. Ajouter une
+  // photo de facture d'équipement DÉPOSE une proposition ; l'effacer la
+  // REJETTE. N'invalider qu'au dépôt, c'était recréer le bug d'origine à
+  // l'envers — un badge qui compte une proposition déjà retirée.
+  "document.modifie": ["cockpit", "classeur", "tresorerie", "brief", "validation", "nav"],
   // Un import FEC remplace les créances dérivées : impayés, marge, cockpit —
   // ET remplit la file, puisqu'il propose jusqu'à 200 immobilisations à
   // valider (comptes 2x/28x). C'est le premier geste d'un nouveau client.
@@ -142,17 +147,36 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
     "validation",
     "rh",
   ],
-  // La purge efface ces mêmes dérivées, mais PAS la file : les propositions
-  // déjà déposées survivent à l'effacement des écritures dont elles viennent.
-  // D'où deux listes différentes — la nuance est le sujet, pas un détail.
+  // La purge efface ces mêmes dérivées — ET la file, désormais. Ce commentaire
+  // affirmait l'inverse (« les propositions déjà déposées survivent ») : c'était
+  // vrai, et c'était le défaut que le ticket d'effacement a corrigé. La purge
+  // rejette et réduit jusqu'à 200 propositions, donc `validation` et `nav`
+  // (le badge en dérive) doivent suivre, sans quoi l'écran continue d'afficher
+  // des propositions qui n'existent plus.
   // `rh` y figure aussi : après purge, le €/h passe à « CA indisponible », et
   // laisser l'ancien chiffre à l'écran serait le pire des deux cas.
-  "fec.purge": ["cockpit", "connecteurs", "impayes", "marge", "tresorerie", "rh", "brief"],
+  "fec.purge": [
+    "cockpit",
+    "connecteurs",
+    "impayes",
+    "marge",
+    "tresorerie",
+    "rh",
+    "brief",
+    "validation",
+    "nav",
+  ],
   "connecteur.modifie": ["cockpit", "connecteurs", "tresorerie", "impayes"],
   // Éteindre un module retire des pages de la NAV et des cartes du cockpit :
   // les deux doivent suivre sans rechargement (pivot ADR-007).
   "module.bascule": ["nav", "cockpit", "connecteurs", "brief"],
   "prospect.modifie": ["prospects", "cockpit"],
+  // Effacer une fiche (art. 17) ANONYMISE l'identité recopiée sur les affaires
+  // jamais contractées : le nom du client disparaît d'une fiche chantier qu'un
+  // autre onglet peut avoir sous les yeux. Événement distinct de
+  // `prospect.modifie`, qui ne touche aucune affaire — périmer les affaires à
+  // chaque changement d'étape ferait clignoter un écran pour rien.
+  "prospect.efface": ["prospects", "cockpit", "affaires"],
   // Le cockpit affiche les alertes de stock (quand le module est actif).
   "stock.modifie": ["stocks", "cockpit", "brief"],
   // Salariés, absences, synchro paie. `marge` est de la sur-invalidation
@@ -264,7 +288,7 @@ export const MUTATION_EFFECTS: Readonly<Record<string, MutationEffect>> = {
   updateProspect: ["prospect.modifie"],
   logProspectInteraction: ["prospect.modifie"],
   opposeProspect: ["prospect.modifie"],
-  deleteProspect: ["prospect.modifie"],
+  deleteProspect: ["prospect.efface"],
   // Avis clients
   createReview: ["avis.modifie"],
   importReviews: ["avis.modifie"],

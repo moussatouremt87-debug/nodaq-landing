@@ -158,6 +158,14 @@ function actionLine(action: PendingActionSummary, detail: PendingActionDetail | 
     };
   }
   if (action.type === "create_fixed_asset" && payload) {
+    // Effacée (art. 17) : ni libellé ni montant à afficher — et surtout pas
+    // un « ? » suivi de zéros, qui se lit comme une donnée manquante par bug.
+    if (payload.reduced === true) {
+      return {
+        title: "Immobilisation — contenu effacé",
+        meta: asString(payload.reducedReason) ?? "source supprimée",
+      };
+    }
     return {
       title: `Immobilisation — ${asString(payload.label) ?? "?"}`,
       meta: [
@@ -234,6 +242,22 @@ function FixedAssetProposal({ payload }: { payload: Dict }) {
   const warnings = Array.isArray(payload.warnings)
     ? payload.warnings.filter((w): w is string => typeof w === "string")
     : [];
+  /*
+   * Payload RÉDUIT par un effacement (art. 17) : la source a été purgée, et
+   * avec elle le libellé et les montants qui en dérivaient.
+   *
+   * Sans ce cas, le rendu nominal affichait « ? — · 0,00 € · 0 ans » : un
+   * montant effacé rendu comme un ZÉRO, c'est-à-dire un chiffre faux là où il
+   * n'y a plus de chiffre du tout. On dit ce qui s'est passé.
+   */
+  if (payload.reduced === true) {
+    return (
+      <p className="muted">
+        Contenu effacé — {asString(payload.reducedReason) ?? "source supprimée"}. La trace de la
+        décision est conservée ; les données qui venaient de la source ne le sont plus.
+      </p>
+    );
+  }
   return (
     <div>
       <p>

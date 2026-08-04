@@ -150,13 +150,12 @@ contraignant que `tenant_id`.
 survit, `prospect_id` à `NULL`. L'**opposition**, elle, ne supprime pas : elle
 minimise. Ce sont deux régimes distincts.
 
-> **Limite connue, à traiter dans son propre ticket.** `affaires.client_name`,
-> `address` et les coordonnées GPS sont une **copie indépendante** de l'identité
-> et de l'adresse — potentiellement le domicile — de la personne. Elles
-> survivent à l'effacement du prospect. Pour une affaire `EN_COURS` ou
-> `TERMINEE`, l'exécution du contrat les fonde ; pour une affaire restée
-> `PROSPECT`, `DEVIS_ENVOYE` ou `PERDUE`, **aucun contrat ne les fonde**, et
-> rien ne les anonymise aujourd'hui.
+`affaires.client_name`, `address` et les coordonnées GPS sont une **copie
+indépendante** de l'identité et de l'adresse — souvent le domicile — de la
+personne. La clé composite met `prospect_id` à `NULL`, mais la copie, elle,
+survivait intacte : effacer la fiche en gardant l'adresse n'est pas un
+effacement. L'effacement anonymise donc aussi ces colonnes, **selon le statut**,
+et le détail est dans [`docs/effacement.md`](effacement.md).
 
 Effacer une pièce du classeur **révoque** son imputation : sans cela, la fiche
 continuerait d'afficher un coût pour une pièce disparue, que plus personne ne
