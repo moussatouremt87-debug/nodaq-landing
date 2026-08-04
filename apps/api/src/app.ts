@@ -5410,13 +5410,57 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
          * acomptes encaissés, heures pointées, date de fin réelle. Une seule
          * suffit à conserver.
          */
-        const affaires = await tx.affaire.findMany({
+        /*
+         * LA SOURCE DE RECOPIE (4.2 bloc 2) — le trou que ce ticket ferme.
+         *
+         * `POST /contrats/:id/occurrences` écrit `contrat.client_name` sur
+         * chaque affaire générée. Anonymiser les affaires existantes en
+         * laissant le contrat intact, c'est effacer un nom qui revient au clic
+         * suivant : un effacement qui se défait tout seul n'est pas un
+         * effacement, c'est un délai.
+         */
+        const contrats = await tx.contrat.findMany({
           where: { prospectId: params.data.id },
+          select: { id: true, label: true, status: true, clientName: true },
+        });
+        const contratIds = contrats.map((contrat) => contrat.id);
+
+        /*
+         * Deux chemins vers les affaires, tous deux EXPLICITES.
+         *
+         * Le second (fiche -> contrat -> affaires) n'est pas un raffinement :
+         * les affaires matérialisées avant ce ticket ne portent aucun
+         * `prospect_id`, la matérialisation ne copiait que le nom. La
+         * recherche par fiche seule les manquait — et l'effacement se
+         * déclarait complet en les laissant nominatives.
+         */
+        const affaires = await tx.affaire.findMany({
+          where: {
+            OR: [
+              { prospectId: params.data.id },
+              /*
+               * Le chemin par contrat ne vaut que pour les affaires ORPHELINES
+               * de fiche.
+               *
+               * Un contrat d'entretien peut servir plusieurs interlocuteurs, et
+               * `PATCH /affaires` accepte un `prospectId` : une affaire générée
+               * par ce contrat mais rattachée EXPLICITEMENT à quelqu'un d'autre
+               * appartient à cette autre personne. L'anonymiser serait le
+               * symétrique exact de l'erreur que le refus de la correspondance
+               * de noms cherche à éviter — détruire la donnée d'un tiers au
+               * nom de l'effacement d'un autre.
+               */
+              ...(contratIds.length > 0
+                ? [{ contratId: { in: contratIds }, prospectId: null }]
+                : []),
+            ],
+          },
           select: {
             id: true,
             reference: true,
             label: true,
             status: true,
+            contratId: true,
             depositsCents: true,
             hoursWorked: true,
             actualEndDate: true,
@@ -5464,8 +5508,90 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
               row.motif !== null,
           );
 
+        /*
+         * Le contrat suit la MÊME logique que les affaires : on conserve sur
+         * un FAIT, jamais sur un libellé.
+         *
+         * Deux faits fondent une conservation. Un contrat ACTIF est une
+         * relation en cours d'exécution (art. 17.3.b) — l'effacer casserait
+         * la prestation que la personne reçoit encore. Un contrat qui a
+         * produit une affaire elle-même conservée porte la trace de la même
+         * exécution : l'anonymiser tout en gardant l'affaire nominative ne
+         * protégerait personne et détruirait la seule pièce qui explique d'où
+         * vient ce chantier.
+         */
+        const contratsAvecAffaireConservee = new Set(
+          conservees
+            .map(({ affaire }) => affaire.contratId)
+            .filter((id): id is string => id !== null),
+        );
+        const motifDeConservationContrat = (contrat: (typeof contrats)[number]): string | null => {
+          if (contrat.status === "ACTIF") {
+            return "contrat en cours — l'exécution le fonde, à vérifier";
+          }
+          if (contratsAvecAffaireConservee.has(contrat.id)) {
+            return "des interventions exécutées en dérivent, à vérifier";
+          }
+          return null;
+        };
+        const contratsAAnonymiser = contrats.filter(
+          (contrat) => motifDeConservationContrat(contrat) === null,
+        );
+        const { count: contratsAnonymises } = await tx.contrat.updateMany({
+          where: { id: { in: contratsAAnonymiser.map((contrat) => contrat.id) } },
+          /*
+           * `notes` part AVEC le nom, et ce n'est pas du zèle.
+           *
+           * C'est un champ libre de 2 000 caractères sur un contrat dont on
+           * vient de juger que rien ne fonde de le garder — « le client
+           * n'ouvre jamais avant 9 h », « conflit sur la facture de mars ». Le
+           * lien vers la fiche disparaît une ligne plus bas par `SET NULL` :
+           * ce qui survit ici devient définitivement inatteignable. L'opt-out
+           * (`/prospects/:id/opposition`) efface déjà `notes` pour la même
+           * raison, et l'anonymisation des affaires emporte déjà l'adresse.
+           */
+          data: { clientName: null, notes: null },
+        });
+        const contratsConserves = contrats
+          .map((contrat) => ({ contrat, motif: motifDeConservationContrat(contrat) }))
+          .filter(
+            (row): row is { contrat: (typeof contrats)[number]; motif: string } =>
+              row.motif !== null,
+          );
+
+        /*
+         * L'ANGLE MORT, compté plutôt que tu.
+         *
+         * Un contrat qui porte un nom de client sans lien vers une fiche est
+         * hors de portée de tout effacement : rien ne permet de savoir s'il
+         * s'agit de cette personne, et le déduire par correspondance de noms
+         * serait l'inférence que la doctrine interdit — deux clients homonymes
+         * existent, et effacer le contrat du mauvais détruit la donnée d'un
+         * tiers en silence. Le nombre ne prétend rien sur la personne
+         * effacée : il dit combien de contrats l'owner doit relire lui-même.
+         */
         const deleted = await tx.prospect.deleteMany({ where: { id: params.data.id } });
-        return { count: deleted.count, anonymisees, conservees };
+        /*
+         * COMPTÉ APRÈS la suppression, et l'ordre porte la justesse du nombre.
+         *
+         * Le `SET NULL` de la FK détache à l'instant les contrats CONSERVÉS :
+         * ils gardent leur nom et n'ont plus de fiche, donc ils entrent
+         * pleinement dans « ce que l'owner doit relire ». Compter avant les
+         * aurait exclus — le nombre aurait valu `réel − contratsConserves`
+         * sous un libellé qui promet le total, c'est-à-dire un angle mort
+         * annoncé trop petit.
+         */
+        const contratsSansFiche = await tx.contrat.count({
+          where: { prospectId: null, clientName: { not: null } },
+        });
+        return {
+          count: deleted.count,
+          anonymisees,
+          conservees,
+          contratsAnonymises,
+          contratsConserves,
+          contratsSansFiche,
+        };
       });
       if (outcome.count === 0) return reply.code(404).send({ error: "prospect not found" });
       return {
@@ -5480,6 +5606,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           status: affaire.status,
           motif,
         })),
+        contratsAnonymises: outcome.contratsAnonymises,
+        contratsConserves: outcome.contratsConserves.map(({ contrat, motif }) => ({
+          id: contrat.id,
+          label: contrat.label,
+          status: contrat.status,
+          motif,
+        })),
+        // Ce que l'effacement NE PEUT PAS atteindre — sans quoi « effacé » se
+        // lirait « il ne reste rien ».
+        contratsSansFiche: outcome.contratsSansFiche,
       };
     },
   );
@@ -6331,6 +6467,23 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
    * (savoir qu'un passage est dû fait partie du travail de terrain), ÉCRITURE
    * réservée au dirigeant (le montant par période est une donnée commerciale).
    */
+  /**
+   * La fiche visée existe-t-elle DANS CE TENANT ?
+   *
+   * La FK composite `(tenant_id, prospect_id)` rend déjà la fuite impossible
+   * en base — mais elle la rend impossible en levant, et une violation de
+   * contrainte remonterait en 500 opaque. Un contrôle explicite rend un 400
+   * motivé : un refus est une RÉPONSE, pas une panne. `undefined` = le champ
+   * n'est pas dans la requête, `null` = on détache volontairement.
+   */
+  async function prospectExists(
+    tx: Prisma.TransactionClient,
+    prospectId: string | null | undefined,
+  ): Promise<boolean> {
+    if (prospectId === null || prospectId === undefined) return true;
+    return (await tx.prospect.findUnique({ where: { id: prospectId } })) !== null;
+  }
+
   app.get("/contrats", { preHandler: businessRoute }, async (request, reply) => {
     // Nom de client et montants : jamais de cache partagé.
     void reply.header("cache-control", "private, no-store");
@@ -6357,16 +6510,18 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       return reply.code(400).send({ error: "la fin précède le début" });
     }
     const today = todayCivilIso();
-    const created = await withTenant(request.tenantId, (tx) =>
-      tx.contrat.create({
+    const created = await withTenant(request.tenantId, async (tx) => {
+      if (!(await prospectExists(tx, body.data.prospectId))) return null;
+      return tx.contrat.create({
         data: {
           tenantId: request.tenantId,
           ...toContratData(body.data),
           label: body.data.label,
           cadence: body.data.cadence,
         },
-      }),
-    );
+      });
+    });
+    if (created === null) return reply.code(400).send({ error: "prospect inconnu" });
     void reply.header("cache-control", "private, no-store");
     return reply.code(201).send(serializeContrat(created, today));
   });
@@ -6381,6 +6536,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const updated = await withTenant(request.tenantId, async (tx) => {
       const existing = await tx.contrat.findUnique({ where: { id: params.data.id } });
       if (!existing) return null;
+      if (!(await prospectExists(tx, body.data.prospectId))) return "prospect" as const;
       const startDate = body.data.startDate ?? toCivilDate(existing.startDate);
       const endDate =
         body.data.endDate === undefined ? toCivilDate(existing.endDate) : body.data.endDate;
@@ -6391,6 +6547,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       });
     });
     if (updated === null) return reply.code(404).send({ error: "contrat inconnu" });
+    if (updated === "prospect") return reply.code(400).send({ error: "prospect inconnu" });
     if (updated === "incoherent") {
       return reply.code(400).send({ error: "la fin précède le début" });
     }
@@ -6463,6 +6620,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
               // liste, et le patron ne saurait pas laquelle il vient de faire.
               label: `${contrat.label} — ${occurrence}`,
               clientName: contrat.clientName,
+              /*
+               * Le nom est recopié — donc le LIEN doit l'être aussi.
+               *
+               * Sans lui, une affaire générée ne connaissait que son contrat :
+               * `DELETE /prospects/:id`, qui cherche par fiche, ne la voyait
+               * pas, et l'identité recopiée survivait à l'effacement. Copier
+               * l'identité sans copier le moyen de l'effacer, c'est fabriquer
+               * de la donnée orpheline à chaque clic.
+               */
+              prospectId: contrat.prospectId,
               contratId: contrat.id,
               status: "ACCEPTEE",
               // Montant de LA PÉRIODE, pas du contrat : c'est ce qui empêche

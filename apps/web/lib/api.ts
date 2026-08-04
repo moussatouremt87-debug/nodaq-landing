@@ -1030,6 +1030,22 @@ export const ProspectDeletion = z.object({
       motif: z.string(),
     }),
   ),
+  /* Les contrats : la SOURCE DE RECOPIE. Anonymiser les affaires en laissant
+   * le contrat nominatif, c'est effacer un nom qui revient à la prochaine
+   * matérialisation. */
+  contratsAnonymises: z.number(),
+  contratsConserves: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      status: z.string(),
+      motif: z.string(),
+    }),
+  ),
+  /* L'angle mort, compté plutôt que tu : un contrat nominatif sans fiche est
+   * hors de portée de tout effacement, et le déduire par correspondance de
+   * noms serait l'inférence que la doctrine interdit. */
+  contratsSansFiche: z.number(),
 });
 export type ProspectDeletion = z.infer<typeof ProspectDeletion>;
 
@@ -1200,6 +1216,9 @@ export const Contrat = z.object({
   id: z.string(),
   label: z.string(),
   clientName: z.string().nullable(),
+  /* Rattachement à une fiche : la seule chose qui rende ce contrat atteignable
+   * par un effacement. Sans lui, le nom saisi ici est hors de portée. */
+  prospectId: z.string().nullable(),
   cadence: z.string(),
   amountCents: z.number().nullable(),
   startDate: z.string().nullable(),
@@ -1216,6 +1235,7 @@ export const listContrats = (): Promise<{ contrats: Contrat[] }> =>
 export const createContrat = (input: {
   label: string;
   clientName?: string | null;
+  prospectId?: string | null;
   cadence: string;
   amountCents?: number | null;
   startDate?: string | null;
@@ -1224,6 +1244,20 @@ export const createContrat = (input: {
 
 export const setContratStatus = (id: string, status: string): Promise<Contrat> =>
   call(Contrat, `/contrats/${id}`, { method: "PATCH", body: JSON.stringify({ status }) });
+
+/**
+ * Rattacher un contrat EXISTANT à une fiche.
+ *
+ * Sans ce chemin, seuls les contrats créés après le correctif d'effacement
+ * seraient atteignables : le stock déjà en base resterait nominatif pour
+ * toujours, et le compteur `contratsSansFiche` ne pourrait jamais retomber à
+ * zéro. Une garde qu'on ne peut pas appliquer à l'existant n'est pas une garde.
+ */
+export const setContratProspect = (
+  id: string,
+  prospectId: string | null,
+): Promise<Contrat> =>
+  call(Contrat, `/contrats/${id}`, { method: "PATCH", body: JSON.stringify({ prospectId }) });
 
 /** Matérialise les échéances dues en affaires. JAMAIS automatique : un clic. */
 export const materialiserContrat = (

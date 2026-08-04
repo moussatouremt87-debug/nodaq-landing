@@ -154,14 +154,16 @@ affaires, et il faut d'abord voir si le clic depuis le brief suffit.
 revalorisation annuelle indexée : deux règles de facturation qui appellent leurs
 propres bornes de justesse, et qui n'ont rien à faire dans un moteur de dates.
 
-**Un chemin d'effacement pour `client_name` et `notes`.** Ce sont des données
-personnelles nouvelles, et il n'existe pas de `DELETE /contrats` — cohérent avec
-« aucune suppression », mais l'effacement d'un prospect (art. 17) n'anonymise
-aujourd'hui que les affaires, pas les contrats, qui ne lui sont pas liés. Un nom
-effacé côté prospect peut donc être **réécrit sur une affaire** au prochain clic
-de matérialisation. Rattacher un contrat à un prospect fermerait proprement le
-trou ; le faire par correspondance de noms serait exactement l'inférence que la
-doctrine interdit. **Limite connue, à traiter dans son propre ticket.**
+**~~Un chemin d'effacement pour `client_name`~~ — LIVRÉ.** Cette limite était la
+bonne, et elle était plus grave qu'écrit ici : un nom effacé côté prospect était
+**réécrit sur une affaire neuve** au prochain clic de matérialisation, si bien
+que l'effacement se défaisait tout seul un mois plus tard. `contrats.prospect_id`
+(nullable, saisi, jamais deviné) rend le contrat atteignable, la matérialisation
+copie le lien en même temps que le nom, et ce qui reste hors de portée est
+compté, et l'existant est rattachable depuis l'écran. `notes` part avec le nom
+lors de l'anonymisation : ce n'était pas un problème de recopie mais de
+SURVIE — un champ libre sur un contrat détaché de sa fiche devient
+définitivement inatteignable. Voir [`effacement.md`](effacement.md).
 
 **La migration en deux fichiers.** La convention (et le précédent 4.1) sépare la
 création de table de la migration RLS. Ici tout est dans

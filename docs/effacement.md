@@ -94,6 +94,113 @@ doctrine maison appliquée à l'effacement : *un refus est une réponse motivée
 *ce qui n'est pas fait est dit*. Un effacement qui laisse des données doit dire
 lesquelles — sinon personne ne sait qu'il reste du travail.
 
+## Le contrat, ou l'effacement qui se défait tout seul
+
+Le bloc 2 de 4.2 a introduit une **source de recopie**, et elle a rendu tout ce
+qui précède insuffisant. `POST /contrats/:id/occurrences` écrit
+`contrats.client_name` sur **chaque affaire générée**. Effacer une fiche
+anonymisait donc consciencieusement les affaires existantes pendant que le
+contrat, lui, gardait le nom — et le réécrivait sur une affaire neuve au clic
+suivant.
+
+Un mois plus tard, la donnée était revenue. **Un nom supprimé qui revient n'est
+pas un effacement, c'est un délai** — et c'est la pire forme, parce que
+l'exécution s'était déclarée réussie.
+
+### Le lien est saisi, jamais deviné
+
+`contrats.prospect_id` est nullable et **explicite**. Rapprocher un contrat
+d'une fiche par correspondance de noms aurait fermé le trou d'un seul coup, et
+c'est exactement l'inférence que la doctrine interdit : deux clients homonymes
+existent, et effacer le contrat du mauvais détruit la donnée d'un tiers **en
+silence**. Le coût des deux erreurs est asymétrique — un contrat hors de portée
+reste un problème visible, puisqu'il est compté et annoncé.
+
+La clé étrangère est composite `(tenant_id, prospect_id)` — l'intégrité
+référentielle contourne la RLS — avec la **liste de colonnes** PostgreSQL 15+
+`ON DELETE SET NULL ("prospect_id")` : sans elle, `SET NULL` sur une FK
+composite annulerait aussi `tenant_id`, qui est `NOT NULL`.
+
+### Deux chemins vers les affaires, tous deux explicites
+
+La matérialisation copie désormais `prospect_id` **en même temps** que le nom :
+copier une identité sans copier le moyen de l'effacer fabrique de la donnée
+orpheline à chaque clic. Restent les affaires générées **avant** ce ticket, qui
+ne portent que leur `contrat_id` : la recherche par fiche ne les voyait pas, et
+l'effacement se déclarait complet en les laissant nominatives. Le chemin
+*fiche → contrat → affaires* les rattrape — deux liens explicites, pas une
+correspondance de noms.
+
+### Ce qui fonde de garder un contrat
+
+Même logique que les affaires : on conserve sur un **fait**, jamais sur un
+libellé.
+
+| Fait | Conservé parce que |
+|---|---|
+| statut `ACTIF` | relation en cours d'exécution (art. 17.3.b) — l'effacer casserait la prestation que la personne reçoit encore |
+| a produit une affaire elle-même conservée | même exécution ; anonymiser le contrat en gardant l'affaire nominative ne protégerait personne et détruirait la pièce qui explique d'où vient ce chantier |
+
+**`SUSPENDU` est anonymisé, et c'est un choix.** Une interruption saisonnière
+est fréquente en paysage ou en entretien, et on pourrait y voir une exécution
+en pause. Mais « suspendu » ne dit pas si la relation reprendra ; conserver
+sur cette lecture reviendrait à déduire une base légale d'un mot qui ne
+l'affirme pas. Conséquence assumée : à la reprise, les affaires matérialisées
+n'auront plus de nom de client — une perte **visible**, que le dirigeant
+corrige en deux gestes, contre une conservation invisible qu'il ne verrait
+jamais.
+
+Et une conservation **muette** serait un effacement qui ment :
+`contratsConserves` rapporte chaque contrat gardé avec son motif.
+
+**`notes` part avec le nom.** Champ libre de 2 000 caractères sur un contrat
+dont on vient de juger que rien ne fonde de le garder — « ne pas appeler avant
+9 h », « litige sur la facture de mars ». Le lien vers la fiche disparaît la
+ligne suivante : ce qui survit ici devient définitivement inatteignable.
+L'opposition efface déjà `notes` côté fiche, l'anonymisation des affaires
+emporte déjà l'adresse ; laisser celui-ci aurait été une asymétrie sans raison.
+
+### Le chemin par contrat ne vaut que pour les affaires ORPHELINES
+
+Un contrat d'entretien peut servir plusieurs interlocuteurs, et
+`PATCH /affaires` accepte un `prospectId`. Une affaire générée par ce contrat
+mais rattachée **explicitement** à quelqu'un d'autre appartient à cette autre
+personne : l'anonymiser serait le symétrique exact de l'erreur que le refus de
+la correspondance de noms cherche à éviter — détruire la donnée d'un tiers au
+nom de l'effacement d'un autre. Le chemin par contrat exclut donc les affaires
+dont le `prospect_id` est renseigné.
+
+### L'angle mort est compté
+
+`contratsSansFiche` dit combien de contrats portent un nom de client sans lien
+vers une fiche. Ce nombre ne prétend **rien** sur la personne effacée — il dit
+combien de contrats l'owner doit relire lui-même, parce qu'aucun effacement ne
+peut les atteindre.
+
+**Il est compté APRÈS la suppression**, et l'ordre porte la justesse du nombre.
+Le `SET NULL` détache à l'instant les contrats **conservés** : ils gardent leur
+nom et n'ont plus de fiche, donc ils entrent pleinement dans « ce qu'il reste à
+relire ». Compter avant les aurait exclus, et le nombre aurait valu
+`réel − contratsConserves` sous un libellé qui promet le total.
+
+Il tombe à zéro à mesure que les contrats sont rattachés — et le rattachement
+doit exister **pour l'existant**, sans quoi la garde ne vaudrait que pour les
+contrats créés après elle et le compteur ne bougerait jamais. L'écran Contrats
+affiche `· sans fiche` sur chacun, propose « Rattacher les noms » dès qu'il en
+reste un, et nomme le champ « Fiche client (rend le nom effaçable) » plutôt que
+« Client » — un libellé neutre se lirait comme un confort de saisie.
+
+Le formulaire **pré-remplit** le nom depuis la fiche choisie : toute la chaîne
+d'effacement fait confiance à ce lien, donc un contrat pointant Dupont mais
+nommé Martin ferait anonymiser le nom de quelqu'un d'autre. Pré-rempli, pas
+verrouillé — une raison sociale peut légitimement différer d'un nom de personne.
+
+Les fiches sont chargées **à la demande** (ouverture du formulaire ou du mode
+rattachement) : elles portent des coordonnées dont cet écran n'a aucun usage.
+Une troncature ou un échec de chargement est **dit** — dégrader en liste vide
+afficherait « aucune fiche » à un dirigeant qui en a six cents, et il saisirait
+un nom définitivement hors de portée en croyant n'avoir pas le choix.
+
 ## Ce que ce ticket ne livre pas
 
 **Le bouton de suppression d'une fiche — donc le rapport n'a pas de

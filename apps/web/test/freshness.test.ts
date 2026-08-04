@@ -30,7 +30,10 @@ import {
 
 describe("correspondance événement -> vues (config versionnée)", () => {
   it("versionnée, et chaque événement salit au moins une vue", () => {
-    expect(FRESHNESS_RULES_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // Suffixe de révision autorisé (`2026-08-04.1`), comme `REVENUS_VERSION` :
+    // deux règles peuvent changer le même jour, et forcer une date unique
+    // pousserait à ne PAS bumper — ce qui vide le versionnement de son sens.
+    expect(FRESHNESS_RULES_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}(\.\d+)?$/);
     const events = Object.keys(EVENT_VIEWS) as (keyof typeof EVENT_VIEWS)[];
     expect(events.length).toBeGreaterThan(0);
     for (const event of events) {

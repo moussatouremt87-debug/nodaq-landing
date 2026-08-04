@@ -23,6 +23,12 @@ import { buildApp } from "../src/app.js";
 let app: FastifyInstance;
 let ownerCookie: string;
 let orgA: string;
+/* Second tenant RÉEL. Un UUID inexistant ne prouve rien sur l'isolation : le
+ * rejet serait identique avec ou sans RLS. Seule une fiche qui EXISTE ailleurs
+ * distingue « invisible parce qu'un autre tenant la détient » de
+ * « inexistante ». */
+let autreCookie: string;
+let prospectAutreTenant: string;
 
 const RUN = Date.now().toString(36);
 
@@ -53,6 +59,30 @@ beforeAll(async () => {
     payload: { name: `Org Eff ${RUN}`, slug: `org-eff-${RUN}` },
   });
   orgA = org.json().id as string;
+
+  const autreSignup = await app.inject({
+    method: "POST",
+    url: "/api/auth/sign-up/email",
+    payload: {
+      email: `eff-autre-${RUN}@example.com`,
+      password: "a-strong-password-123",
+      name: "Eff Autre",
+    },
+  });
+  autreCookie = cookiesOf(autreSignup);
+  await app.inject({
+    method: "POST",
+    url: "/api/auth/organization/create",
+    headers: { cookie: autreCookie },
+    payload: { name: `Org Autre ${RUN}`, slug: `org-autre-${RUN}` },
+  });
+  const fiche = await app.inject({
+    method: "POST",
+    url: "/prospects",
+    headers: { cookie: autreCookie },
+    payload: { name: `Fiche Voisine ${RUN}`, stage: "nouveau", source: "recommandation" },
+  });
+  prospectAutreTenant = fiche.json().id as string;
 }, 60_000);
 
 afterAll(async () => {
@@ -483,5 +513,375 @@ describe("prospect — l'identité recopiée sur les affaires", () => {
     // qu'il lui reste quelque chose à décider.
     expect(body.affairesConservees[0].motif).toContain("à vérifier");
     expect(body.affairesConservees[0].reference).toMatch(/^\d{4}-\d{3}$/);
+  });
+});
+
+/*
+ * L'EFFACEMENT QUI SE DÉFAIT TOUT SEUL.
+ *
+ * Le bloc précédent anonymise les affaires qui portent l'identité recopiée.
+ * Il ne suffit pas : le bloc 2 (contrats récurrents) a introduit une SOURCE DE
+ * RECOPIE. Matérialiser une échéance écrit `contrat.clientName` sur l'affaire
+ * générée. Un contrat d'entretien mensuel effacé aujourd'hui réécrit donc le
+ * nom sur une affaire neuve au prochain clic — et l'effacement, techniquement
+ * exécuté, n'a rien effacé du tout un mois plus tard.
+ *
+ * Tarir la source est la seule correction : un chiffre supprimé qui revient
+ * n'est pas un effacement, c'est un délai.
+ */
+describe("contrat — la source qui RÉÉCRIT le nom effacé", () => {
+  async function seedProspect(nom: string): Promise<string> {
+    const res = await app.inject({
+      method: "POST",
+      url: "/prospects",
+      headers: { cookie: ownerCookie },
+      payload: { name: nom, stage: "nouveau", source: "recommandation" },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().id as string;
+  }
+
+  /** `status` n'existe pas à la création (le contrat naît ACTIF) : on le pose ensuite. */
+  async function seedContrat({
+    status,
+    ...payload
+  }: Record<string, unknown> & { status?: string }): Promise<string> {
+    const res = await app.inject({
+      method: "POST",
+      url: "/contrats",
+      headers: { cookie: ownerCookie },
+      payload: {
+        label: `Entretien ${RUN}`,
+        cadence: "mensuel",
+        amountCents: 20_000,
+        // Départ dans le passé : au moins une échéance est due tout de suite.
+        startDate: "2026-01-15",
+        ...payload,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const id = res.json().id as string;
+    if (status !== undefined && status !== "ACTIF") {
+      const patched = await app.inject({
+        method: "PATCH",
+        url: `/contrats/${id}`,
+        headers: { cookie: ownerCookie },
+        payload: { status },
+      });
+      expect(patched.statusCode).toBe(200);
+    }
+    return id;
+  }
+
+  async function materialiser(contratId: string): Promise<string[]> {
+    const res = await app.inject({
+      method: "POST",
+      url: `/contrats/${contratId}/occurrences`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    return (res.json().created as { id: string }[]).map((row) => row.id);
+  }
+
+  it("après effacement, une NOUVELLE matérialisation ne réécrit plus le nom", async () => {
+    /*
+     * LE TEST QUI PORTE CE TICKET. Sans lui, tout le reste est cosmétique :
+     * on peut anonymiser douze affaires et voir le nom revenir au treizième
+     * clic. La chaîne testée est complète — fiche effacée, puis un geste
+     * ORDINAIRE du dirigeant un mois plus tard.
+     */
+    const prospectId = await seedProspect(`Marc Renard ${RUN}`);
+    const contratId = await seedContrat({
+      prospectId,
+      clientName: "Marc Renard",
+      // Terminé : rien ne fonde de le conserver.
+      status: "TERMINE",
+    });
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/prospects/${prospectId}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(del.statusCode).toBe(200);
+    expect(del.json().contratsAnonymises).toBe(1);
+
+    // Le contrat SURVIT — c'est un effacement de données personnelles, pas la
+    // destruction d'un engagement commercial.
+    const apres = await withTenant(orgA, (tx) =>
+      tx.contrat.findUniqueOrThrow({ where: { id: contratId } }),
+    );
+    expect(apres.clientName).toBeNull();
+    expect(apres.prospectId).toBeNull();
+    expect(apres.label).toBe(`Entretien ${RUN}`);
+
+    // Et le geste qui défaisait tout : on réactive et on matérialise.
+    await app.inject({
+      method: "PATCH",
+      url: `/contrats/${contratId}`,
+      headers: { cookie: ownerCookie },
+      payload: { status: "ACTIF" },
+    });
+    const [affaireId] = await materialiser(contratId);
+    const affaire = await withTenant(orgA, (tx) =>
+      tx.affaire.findUniqueOrThrow({ where: { id: affaireId as string } }),
+    );
+    expect(affaire.clientName).toBeNull();
+  });
+
+  it("un contrat ACTIF est CONSERVÉ et signalé — l'exécution le fonde", async () => {
+    /*
+     * Art. 17.3.b : la donnée nécessaire à l'exécution d'un contrat en cours
+     * n'est pas effaçable sur simple demande. Mais une conservation MUETTE
+     * serait un effacement qui ment : l'owner doit voir ce qui reste, et
+     * pourquoi, pour finir le travail à la main.
+     */
+    const prospectId = await seedProspect(`Claire Vasseur ${RUN}`);
+    await seedContrat({ prospectId, clientName: "Claire Vasseur", status: "ACTIF" });
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/prospects/${prospectId}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(del.statusCode).toBe(200);
+    const body = del.json();
+    expect(body.contratsAnonymises).toBe(0);
+    expect(body.contratsConserves).toHaveLength(1);
+    expect(body.contratsConserves[0].motif).toContain("en cours");
+    expect(body.contratsConserves[0].motif).toContain("à vérifier");
+  });
+
+  it("les affaires DÉJÀ générées par le contrat sont atteintes par la chaîne", async () => {
+    /*
+     * Une affaire matérialisée avant ce ticket ne porte AUCUN `prospectId` :
+     * la matérialisation ne copiait que le nom. La recherche par fiche seule
+     * ne la voyait donc pas — le nom restait, et l'effacement se déclarait
+     * complet. Le chemin fiche -> contrat -> affaires ferme ce trou sans rien
+     * deviner : ce sont deux liens explicites, pas une correspondance de noms.
+     */
+    const prospectId = await seedProspect(`Hugo Berger ${RUN}`);
+    const contratId = await seedContrat({
+      prospectId,
+      clientName: "Hugo Berger",
+      status: "ACTIF",
+    });
+    const [affaireId] = await materialiser(contratId);
+    // Le chemin AVANT : matérialiser copie le lien en même temps que le nom.
+    // Copier l'identité sans copier le moyen de l'effacer fabriquerait de la
+    // donnée orpheline à chaque clic.
+    const generee = await withTenant(orgA, (tx) =>
+      tx.affaire.findUniqueOrThrow({ where: { id: affaireId as string } }),
+    );
+    expect(generee.prospectId).toBe(prospectId);
+
+    // On simule l'existant : l'affaire ne connaît que son contrat.
+    await withTenant(orgA, (tx) =>
+      tx.affaire.update({
+        where: { id: affaireId as string },
+        data: { prospectId: null, status: "PERDUE" },
+      }),
+    );
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/prospects/${prospectId}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(del.statusCode).toBe(200);
+    expect(del.json().affairesAnonymisees).toBe(1);
+    const affaire = await withTenant(orgA, (tx) =>
+      tx.affaire.findUniqueOrThrow({ where: { id: affaireId as string } }),
+    );
+    expect(affaire.clientName).toBeNull();
+  });
+
+  it("un contrat SANS lien de fiche n'est jamais touché — pas de correspondance de noms", async () => {
+    /*
+     * Deux clients peuvent porter le même nom, et un homonyme effacé ne doit
+     * pas emporter le contrat de l'autre. Rapprocher par le nom serait
+     * exactement l'inférence que la doctrine interdit : le coût des deux
+     * erreurs est asymétrique — ne pas atteindre un contrat laisse un problème
+     * VISIBLE (il est compté et dit), en effacer un de trop détruit
+     * silencieusement la donnée d'un tiers.
+     */
+    /*
+     * Le nom du contrat est EXACTEMENT celui de la fiche : c'est la seule
+     * forme de ce test qui prouve quelque chose. Un contrat nommé
+     * différemment survivrait à n'importe quelle implémentation, y compris
+     * une qui rapproche par le nom — le test serait vert sans rien garantir.
+     */
+    const nom = `Sophie Marchand ${RUN}`;
+    const prospectId = await seedProspect(nom);
+    const homonyme = await seedContrat({ clientName: nom, status: "TERMINE" });
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/prospects/${prospectId}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(del.statusCode).toBe(200);
+    expect(del.json().contratsAnonymises).toBe(0);
+    const apres = await withTenant(orgA, (tx) =>
+      tx.contrat.findUniqueOrThrow({ where: { id: homonyme } }),
+    );
+    expect(apres.clientName).toBe(nom);
+  });
+
+  it("l'angle mort est COMPTÉ à la valeur EXACTE, après détachement", async () => {
+    /*
+     * Tenant dédié : un `> 0` resterait vert pour presque n'importe quelle
+     * implémentation — un `count()` de tous les contrats, un compte ignorant
+     * `clientName` — et ne serait vrai que grâce aux contrats semés par les
+     * tests précédents, donc rouge si ce test était joué seul.
+     *
+     * Quatre contrats, une seule réponse juste : les DEUX nominatifs sans
+     * fiche, PLUS celui que la suppression vient de détacher (conservé, donc
+     * encore nominatif et désormais sans fiche). Celui sans nom ne compte pas.
+     * Compter AVANT le `deleteMany` rendrait 2 — un angle mort annoncé trop
+     * petit, sous un libellé qui promet le total à relire.
+     */
+    /*
+     * Fiche PROPRE à ce test. Réutiliser `prospectAutreTenant` la supprimerait,
+     * et le test d'isolation qui suit se retrouverait à viser une fiche
+     * inexistante — c'est-à-dire creux, exactement le défaut qu'il vient de
+     * corriger. Un test qui détruit la donnée d'un autre test le rend faux
+     * sans jamais le faire rougir.
+     */
+    const fiche = await app.inject({
+      method: "POST",
+      url: "/prospects",
+      headers: { cookie: autreCookie },
+      payload: { name: `Fiche Angle ${RUN}`, stage: "nouveau", source: "recommandation" },
+    });
+    expect(fiche.statusCode).toBe(201);
+    const ficheId = fiche.json().id as string;
+
+    const contrat = async (payload: Record<string, unknown>): Promise<void> => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/contrats",
+        headers: { cookie: autreCookie },
+        payload: { label: `Angle ${RUN}`, cadence: "mensuel", ...payload },
+      });
+      expect(res.statusCode).toBe(201);
+    };
+    await contrat({ clientName: "Sans fiche A" });
+    await contrat({ clientName: "Sans fiche B" });
+    await contrat({});
+    await contrat({ clientName: `Fiche Angle ${RUN}`, prospectId: ficheId });
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/prospects/${ficheId}`,
+      headers: { cookie: autreCookie },
+    });
+    expect(del.statusCode).toBe(200);
+    // Le contrat lié était ACTIF : conservé, donc toujours nominatif — et
+    // détaché par le SET NULL, donc désormais hors de portée lui aussi.
+    expect(del.json().contratsConserves).toHaveLength(1);
+    expect(del.json().contratsSansFiche).toBe(3);
+  });
+
+  it("une fiche EXISTANTE d'un autre tenant est refusée — à la création ET à la mise à jour", async () => {
+    /*
+     * La fiche visée EXISTE, dans une autre organisation. C'est la seule forme
+     * de ce test qui prouve l'isolation : avec un UUID inexistant, le refus
+     * serait identique que `prospectExists` lise sous RLS ou hors RLS — donc
+     * vert précisément dans le cas où la fuite existerait.
+     *
+     * La FK composite (tenant_id, prospect_id) ferme la voie en base ; la
+     * route doit rendre un 400 MOTIVÉ plutôt qu'un 500 de violation de
+     * contrainte. Un refus est une réponse.
+     */
+    const cree = await app.inject({
+      method: "POST",
+      url: "/contrats",
+      headers: { cookie: ownerCookie },
+      payload: {
+        label: `Fantôme ${RUN}`,
+        cadence: "mensuel",
+        prospectId: prospectAutreTenant,
+      },
+    });
+    expect(cree.statusCode).toBe(400);
+    expect(cree.json().error).toContain("prospect");
+
+    // Le PATCH porte la MÊME garde, et sans ce test une régression sur cette
+    // ligne-là passerait inaperçue.
+    const contratId = await seedContrat({ clientName: `Legit ${RUN}` });
+    const patch = await app.inject({
+      method: "PATCH",
+      url: `/contrats/${contratId}`,
+      headers: { cookie: ownerCookie },
+      payload: { prospectId: prospectAutreTenant },
+    });
+    expect(patch.statusCode).toBe(400);
+    expect(patch.json().error).toContain("prospect");
+    const inchange = await withTenant(orgA, (tx) =>
+      tx.contrat.findUniqueOrThrow({ where: { id: contratId } }),
+    );
+    expect(inchange.prospectId).toBeNull();
+  });
+
+  it("les NOTES du contrat partent avec le nom", async () => {
+    /*
+     * Champ libre de 2 000 caractères sur un contrat dont le code vient de
+     * juger que rien ne fonde de le garder. Le lien vers la fiche disparaît la
+     * ligne suivante par `SET NULL` : ce qui survit ici devient définitivement
+     * inatteignable. L'opposition efface déjà `notes` côté fiche, et
+     * l'anonymisation des affaires emporte déjà l'adresse — laisser celui-ci
+     * serait une asymétrie sans raison.
+     */
+    const prospectId = await seedProspect(`Yann Colas ${RUN}`);
+    const contratId = await seedContrat({
+      prospectId,
+      clientName: "Yann Colas",
+      notes: "Ne pas appeler avant 9 h — litige sur la facture de mars",
+      status: "TERMINE",
+    });
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/prospects/${prospectId}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(del.statusCode).toBe(200);
+    const apres = await withTenant(orgA, (tx) =>
+      tx.contrat.findUniqueOrThrow({ where: { id: contratId } }),
+    );
+    expect(apres.notes).toBeNull();
+  });
+
+  it("une affaire rattachée à QUELQU'UN D'AUTRE n'est pas anonymisée au passage", async () => {
+    /*
+     * Le chemin fiche -> contrat -> affaires ne vaut que pour les affaires
+     * ORPHELINES de fiche. Un contrat d'entretien peut servir plusieurs
+     * interlocuteurs, et `PATCH /affaires` accepte un `prospectId` : anonymiser
+     * une affaire explicitement rattachée à un tiers serait le symétrique exact
+     * de l'erreur que le refus de la correspondance de noms cherche à éviter —
+     * détruire la donnée d'une personne au nom de l'effacement d'une autre.
+     */
+    const efface = await seedProspect(`Léa Fournier ${RUN}`);
+    const tiers = await seedProspect(`Paul Tiers ${RUN}`);
+    const contratId = await seedContrat({ prospectId: efface, clientName: "Léa Fournier" });
+    const [affaireId] = await materialiser(contratId);
+    await withTenant(orgA, (tx) =>
+      tx.affaire.update({
+        where: { id: affaireId as string },
+        data: { prospectId: tiers, clientName: "Paul Tiers", status: "PERDUE" },
+      }),
+    );
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/prospects/${efface}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(del.statusCode).toBe(200);
+    const apres = await withTenant(orgA, (tx) =>
+      tx.affaire.findUniqueOrThrow({ where: { id: affaireId as string } }),
+    );
+    expect(apres.clientName).toBe("Paul Tiers");
   });
 });
