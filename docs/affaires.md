@@ -129,14 +129,16 @@ la liste affiche « réservé au dirigeant » plutôt qu'un tiret qui se lirait
 
 ## Le vocabulaire
 
-`packages/shared/src/affaireVocabulary.ts` : chantier (BTP), mission (services),
-affaire (défaut). Exhaustif par construction — ajouter un vertical sans lui
-donner de mot ne compile pas. **Aucune feature ne teste le vertical** ; elle
-appelle `affaireWords(vertical)`.
+`packages/shared/src/verticalPacks.ts` : chantier (bâtiment, paysage),
+événement (événementiel), intervention (maintenance), mission (services au
+projet), affaire (défaut). Exhaustif par construction — ajouter un vertical
+sans lui donner de mot ne compile pas. **Aucune feature ne teste le vertical** ;
+elle appelle `affaireWords(vertical)`.
 
-Provisoire et dit : les cinq verticaux actuels héritent de l'ancienne
-segmentation (3.7) et ne recouvrent pas la cible du pivot. Le ticket 4.2 apporte
-les vrais packs, et ce fichier est son point d'absorption.
+La limite qui était écrite ici est **fermée** : `affaireVocabulary.ts` ne
+connaissait que l'ancienne segmentation (3.7), si bien qu'un paysagiste ou un
+traiteur ne pouvait pas se déclarer. Le ticket 4.2 l'a absorbé — voir
+[`packs-verticaux.md`](packs-verticaux.md).
 
 ## Données personnelles
 

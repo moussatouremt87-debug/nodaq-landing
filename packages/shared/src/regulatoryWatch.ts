@@ -10,11 +10,15 @@
  */
 
 /** Catalog snapshot date — bump on every rule change. */
-export const REGULATORY_WATCH_VERSION = "2026-07-30";
+export const REGULATORY_WATCH_VERSION = "2026-08-04";
 
-/** Business verticals (blueprint 3.11: industrie/BTP, retail, négoce, services). */
-export const VERTICALS = ["industrie_btp", "retail", "negoce", "services", "autre"] as const;
-export type Vertical = (typeof VERTICALS)[number];
+/*
+ * Verticals now live in `verticalPacks.ts` (ticket 4.2): one vertical = one
+ * data file. This module CONSUMES the list, it no longer owns it — an
+ * obligation is scoped by trade, but the trades themselves are a product
+ * decision, not a regulatory one.
+ */
+import type { Vertical } from "./verticalPacks.js";
 
 export interface RegulatoryItem {
   id: string;
@@ -168,7 +172,41 @@ export const REGULATORY_ITEMS: readonly RegulatoryItem[] = [
       label: "Code des assurances, art. L241-1",
       url: "https://www.legifrance.gouv.fr/codes/article_lc/LEGIARTI000006795171",
     },
-    verticals: ["industrie_btp"],
+    /*
+     * Étendue aux métiers de travaux du pivot (4.2). Le sens de l'erreur
+     * commande : ne pas rappeler la décennale à qui la doit est bien pire que
+     * la rappeler à qui ne la doit pas — son absence est un délit (code des
+     * assurances, art. L243-3), le rappel de trop se lit et s'ignore. Le texte
+     * de l'obligation porte d'ailleurs sa propre nuance (« dont la
+     * responsabilité décennale PEUT être engagée »).
+     *
+     * LE CRITÈRE N'EST PAS « POSE DES BRIQUES ». Une première version excluait
+     * `services_projet` au motif qu'il « ne construit pas d'ouvrage » — c'est
+     * précisément le critère que l'art. 1792-1 1° du code civil écarte : est
+     * réputé constructeur « tout architecte, entrepreneur, TECHNICIEN ou autre
+     * personne liée au maître de l'ouvrage par un contrat de louage
+     * d'ouvrage ». Un maître d'œuvre, un bureau d'études ou un économiste de
+     * la construction doit la décennale sans toucher une truelle. Le critère
+     * retenu est donc le LIEN CONTRACTUEL avec un maître de l'ouvrage.
+     *
+     * - `batiment`, `industrie_btp` : sans discussion.
+     * - `paysage` : murs de soutènement, terrasses et dallages sont des
+     *   ouvrages.
+     * - `maintenance` : le cas le plus discutable (la jurisprudence renvoie
+     *   souvent les équipements installés sur existant à la responsabilité
+     *   contractuelle de droit commun) — inclus au nom de l'asymétrie, et il
+     *   faut alors inclure `services_projet` pour la même raison.
+     * - `services_projet` : recouvre la maîtrise d'œuvre et les bureaux
+     *   d'études, expressément visés par l'art. 1792-1 1°.
+     * - `evenementiel` : exclu — chapiteaux, scènes et structures démontables
+     *   ne sont pas des ouvrages.
+     *
+     * Les verticaux de l'ANCIEN découpage ne sont pas re-scopés ici : `services`
+     * y est un fourre-tout indifférencié (coiffeur et bureau d'études au même
+     * endroit), et rescoper une segmentation qu'on ne propose plus dépasse ce
+     * ticket. `industrie_btp` garde ce qu'il avait.
+     */
+    verticals: ["batiment", "paysage", "maintenance", "services_projet", "industrie_btp"],
   },
   {
     id: "information-prix",

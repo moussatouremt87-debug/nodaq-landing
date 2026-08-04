@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { PrismaClient } from "@prisma/client";
@@ -86,20 +84,34 @@ afterAll(async () => {
 });
 
 describe("veille réglementaire — owner-only", () => {
-  it("la liste VERTICALS (TS) et le CHECK SQL de tenant_profiles restent synchrones", () => {
-    // Liste dupliquée base/TS : un vertical ajouté côté TS sans migration
-    // donnerait un 500 (échec fermé, mais cassé). Ce test fige la synchro.
-    const sql = readFileSync(
-      fileURLToPath(
-        new URL(
-          "../../../packages/db/prisma/migrations/20260730000000_tenant_profiles/migration.sql",
-          import.meta.url,
-        ),
-      ),
-      "utf8",
-    );
-    const check = /tenant_profiles_vertical_check[\s\S]*?\(([^)]*)\)/.exec(sql)?.[1] ?? "";
-    const sqlValues = [...check.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+  it("la liste VERTICALS (TS) et le CHECK SQL de tenant_profiles restent synchrones", async () => {
+    /*
+     * Liste dupliquée base/TS : un vertical ajouté côté TS sans migration
+     * donnerait un 500 (échec fermé, mais cassé). Ce test fige la synchro.
+     *
+     * Lu depuis la contrainte EFFECTIVE de la base, plus depuis un fichier de
+     * migration. La version précédente lisait `20260730000000_tenant_profiles`
+     * en dur : elle figeait la PREMIÈRE définition de la contrainte, donc elle
+     * serait devenue fausse — et rouge — à la première migration qui l'altère,
+     * en accusant le code alors que la base et le TS seraient d'accord. Un
+     * test qui se trompe de coupable est pire qu'un test absent.
+     */
+    const [row] = await prisma.$queryRaw<{ def: string }[]>`
+      SELECT pg_get_constraintdef(oid) AS def
+        FROM pg_constraint
+        -- conrelid et pas seulement conname : un homonyme dans un autre
+        -- schéma ferait sinon choisir une ligne au hasard, et le test
+        -- comparerait la mauvaise contrainte.
+       WHERE conname = 'tenant_profiles_vertical_check'
+         AND conrelid = 'public.tenant_profiles'::regclass`;
+    expect(row?.def).toBeDefined();
+    // Classe LARGE : un futur identifiant à chiffre ou tiret serait invisible
+    // pour `[a-z_]+`, donc absent de `sqlValues` — et le test dénoncerait une
+    // désynchro qui n'existe pas. C'est le défaut même qu'il vient de corriger.
+    // Pas de filtre sur « text » : Postgres n'entoure JAMAIS le cast de
+    // quotes (`'batiment'::text`), donc un tel filtre ne protégerait de rien
+    // et masquerait un futur vertical qui s'appellerait « text ».
+    const sqlValues = [...(row?.def ?? "").matchAll(/'([^']+)'/g)].map((m) => m[1]).sort();
     expect(sqlValues).toEqual([...VERTICALS].sort());
   });
 
@@ -188,5 +200,71 @@ describe("veille réglementaire — owner-only", () => {
       expect(match.reason.length).toBeGreaterThan(10);
       expect(match.source.url).toMatch(/^https:\/\//);
     }
+  });
+
+  it("un métier de la CIBLE du pivot s'enregistre vraiment, et reçoit ses obligations", async () => {
+    /*
+     * La preuve de bout en bout que le pack 4.2 est branché : Zod, la
+     * contrainte SQL et le catalogue d'obligations doivent tomber d'accord.
+     * Les tests de `@nodaq/shared` ne peuvent pas le dire — ils ne voient ni
+     * la route ni la base, et c'est exactement là que les deux listes
+     * dupliquées peuvent diverger.
+     *
+     * Avant ce ticket, un paysagiste n'était PAS storable : il n'existait pas
+     * dans la liste, l'écran lui proposait « Autre », et il repartait avec les
+     * obligations de personne.
+     */
+    const put = await app.inject({
+      method: "PUT",
+      url: "/reglementaire/profil",
+      headers: { cookie: ownerCookie },
+      payload: { vertical: "paysage", headcountOverride: 6 },
+    });
+    expect(put.statusCode).toBe(200);
+    expect(put.json()).toMatchObject({ vertical: "paysage" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/reglementaire",
+      headers: { cookie: ownerCookie },
+    });
+    const ids = (res.json() as { matches: { id: string }[] }).matches.map((m) => m.id);
+    /*
+     * La décennale suit les TRAVAUX, pas la nomenclature : les ouvrages d'un
+     * paysagiste (murs de soutènement, terrasses, dallages) en relèvent, et ne
+     * pas la lui rappeler serait la pire des deux erreurs — son absence est un
+     * délit (code des assurances, art. L243-3).
+     */
+    expect(ids).toContain("garantie-decennale");
+    // 6 salariés : pas de CSE (11) ni d'OETH (20). Le pack ne dérègle pas les
+    // seuils d'effectif au passage.
+    expect(ids).not.toContain("cse");
+    expect(ids).not.toContain("oeth");
+
+    // Un métier de la cible qui ne construit PAS d'ouvrage ne la reçoit pas :
+    // sinon « applicable » ne voudrait plus rien dire.
+    await app.inject({
+      method: "PUT",
+      url: "/reglementaire/profil",
+      headers: { cookie: ownerCookie },
+      payload: { vertical: "evenementiel", headcountOverride: 6 },
+    });
+    const traiteur = await app.inject({
+      method: "GET",
+      url: "/reglementaire",
+      headers: { cookie: ownerCookie },
+    });
+    const idsTraiteur = (traiteur.json() as { matches: { id: string }[] }).matches.map((m) => m.id);
+    expect(idsTraiteur).not.toContain("garantie-decennale");
+
+    // Profil REMIS comme on l'a trouvé : ce cas est le dernier du bloc
+    // aujourd'hui, et c'est exactement pour ça qu'il ne faut pas laisser
+    // l'ordre des tests porter du sens.
+    await app.inject({
+      method: "PUT",
+      url: "/reglementaire/profil",
+      headers: { cookie: ownerCookie },
+      payload: { vertical: "industrie_btp", headcountOverride: 25 },
+    });
   });
 });

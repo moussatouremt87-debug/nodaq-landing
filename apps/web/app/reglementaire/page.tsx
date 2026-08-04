@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { verticalChoices } from "@nodaq/shared";
+import { emitDomainEvent } from "../../lib/freshness";
 import {
   ApiError,
   getComplianceProfile,
@@ -16,13 +18,24 @@ import type { ComplianceProfile, RegulatoryWatch } from "../../lib/api";
  * juridique — le label reste affiché en permanence.
  */
 
-const VERTICAL_LABELS: [string, string][] = [
-  ["industrie_btp", "Industrie / BTP"],
-  ["retail", "Commerce de détail"],
-  ["negoce", "Négoce"],
-  ["services", "Services"],
-  ["autre", "Autre"],
-];
+/*
+ * Les métiers viennent du PACK (4.2), en DEUX GROUPES — `verticalChoices()`.
+ *
+ * La liste écrite ici avait cessé d'être vraie : elle ne connaissait aucun des
+ * cinq métiers de la cible du pivot, si bien qu'un paysagiste ou un traiteur ne
+ * pouvait tout simplement pas se déclarer. C'est la règle d'architecture de
+ * l'ADR-007 dans sa forme la plus concrète : un vertical est une donnée, et une
+ * donnée ne se recopie pas dans un écran.
+ *
+ * Les DEUX groupes sont rendus, toujours. Ne montrer que la cible rendait
+ * `retail` inatteignable pour qui n'y était pas déjà, donc plus personne ne
+ * pouvait se déclarer commerçant ni recevoir l'obligation d'information sur
+ * les prix : un vertical qu'on ne peut plus choisir est un vertical supprimé
+ * en silence.
+ *
+ * Ce n'est PAS le point d'entrée principal — cet écran appartient à un module
+ * hors socle. Le choix du métier vit dans `/reglages/metier`.
+ */
 
 const STATUS_LABELS: Record<string, string> = {
   echeance_proche: "échéance proche",
@@ -67,11 +80,23 @@ export default function ReglementairePage() {
     }
     try {
       await putComplianceProfile({ vertical, headcountOverride: parsed });
+      /*
+       * Le vertical qu'on vient d'écrire pilote le MOT affiché ailleurs
+       * (« chantier », « événement », « intervention ») et les défauts de
+       * modules de la navigation. `refresh()` ne rafraîchit que cette page :
+       * sans cet événement, un paysagiste qui se déclare voit encore
+       * « affaire » sur ses chantiers jusqu'au rechargement.
+       */
+      emitDomainEvent("profil.modifie");
       await refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "enregistrement impossible");
     }
   }
+
+  // Déstructuré une fois : `verticalChoices()` appelée deux fois dans le JSX
+  // recalculait la même liste à chaque rendu.
+  const { cible, ancien } = verticalChoices();
 
   if (forbidden) {
     return (
@@ -92,11 +117,21 @@ export default function ReglementairePage() {
           <label>
             Vertical métier :{" "}
             <select value={vertical} onChange={(e) => setVertical(e.target.value)}>
-              {VERTICAL_LABELS.map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
+              {cible.map((choice) => (
+                <option key={choice.id} value={choice.id}>
+                  {choice.label}
                 </option>
               ))}
+              {/* Visible mais SÉPARÉ : le groupe dit lequel est d'actualité
+                  sans fermer la porte. Masquer l'ancien découpage revenait à
+                  le supprimer en silence. */}
+              <optgroup label="Ancien découpage">
+                {ancien.map((choice) => (
+                  <option key={choice.id} value={choice.id}>
+                    {choice.label}
+                  </option>
+                ))}
+              </optgroup>
             </select>
           </label>
           <label>

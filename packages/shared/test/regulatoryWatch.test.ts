@@ -4,6 +4,7 @@ import {
   REGULATORY_ITEMS,
   REGULATORY_WATCH_VERSION,
 } from "../src/regulatoryWatch.js";
+import { VERTICALS, type Vertical } from "../src/verticalPacks.js";
 
 /*
  * Veille réglementaire (ticket 3.7) — catalogue en CONFIG VERSIONNÉE DATÉE
@@ -78,13 +79,50 @@ describe("matchRegulatoryItems", () => {
     expect(btp.matches.some((m) => m.id === "mediation-consommation")).toBe(true);
   });
 
-  it("verticals : la décennale ne s'applique qu'au BTP, l'affichage des prix au retail", () => {
-    const btp = matchRegulatoryItems({ vertical: "industrie_btp", headcount: 5 }, NOW);
-    const services = matchRegulatoryItems({ vertical: "services", headcount: 5 }, NOW);
-    expect(btp.matches.some((m) => m.id === "garantie-decennale")).toBe(true);
-    expect(services.matches.some((m) => m.id === "garantie-decennale")).toBe(false);
-    const retail = matchRegulatoryItems({ vertical: "retail", headcount: 5 }, NOW);
-    expect(retail.matches.some((m) => m.id === "information-prix")).toBe(true);
+  it("verticals : le périmètre des DEUX obligations scopées est figé, vertical par vertical", () => {
+    /*
+     * Itération sur les DIX verticaux, avec le tableau attendu écrit en clair.
+     *
+     * La version précédente ne testait que `industrie_btp` et `services` :
+     * elle est restée verte quand 4.2 a étendu la décennale à quatre métiers
+     * de plus, et retirer `batiment` de la règle n'aurait fait rougir aucune
+     * suite — sur l'obligation dont l'absence est un délit. Un scope
+     * d'obligation légale se fige valeur par valeur, comme un taux.
+     */
+    const attendu: Record<string, { decennale: boolean; prix: boolean }> = {
+      // Cible du pivot. Le critère de la décennale est le LIEN CONTRACTUEL
+      // avec un maître de l'ouvrage (art. 1792-1 1° : « technicien »), pas le
+      // fait de poser des briques — d'où `services_projet` (maîtrise d'œuvre,
+      // bureaux d'études) et l'exclusion de l'événementiel.
+      batiment: { decennale: true, prix: false },
+      paysage: { decennale: true, prix: false },
+      maintenance: { decennale: true, prix: false },
+      services_projet: { decennale: true, prix: false },
+      evenementiel: { decennale: false, prix: false },
+      // Ancien découpage — inchangé par 4.2, et ce test le prouve : aucun
+      // vertical existant ne perd ni ne gagne d'obligation au passage.
+      industrie_btp: { decennale: true, prix: false },
+      services: { decennale: false, prix: false },
+      negoce: { decennale: false, prix: true },
+      retail: { decennale: false, prix: true },
+      autre: { decennale: false, prix: false },
+    };
+    // La liste attendue couvre EXACTEMENT les verticaux storables : un vertical
+    // ajouté sans décision d'obligation fait échouer ici, pas en production.
+    expect(Object.keys(attendu).sort()).toEqual([...VERTICALS].sort());
+
+    for (const [vertical, veut] of Object.entries(attendu)) {
+      const ids = matchRegulatoryItems({ vertical: vertical as Vertical, headcount: 5 }, NOW)
+        .matches.map((m) => m.id);
+      expect({ vertical, decennale: ids.includes("garantie-decennale") }).toEqual({
+        vertical,
+        decennale: veut.decennale,
+      });
+      expect({ vertical, prix: ids.includes("information-prix") }).toEqual({
+        vertical,
+        prix: veut.prix,
+      });
+    }
   });
 
   it("échéances : facturation électronique = échéance proche (réception 2026-09-01), statut daté", () => {

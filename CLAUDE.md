@@ -131,6 +131,7 @@ Le détail vit dans `docs/` — **lis le doc du domaine avant d'y toucher**.
 |---|---|---|
 | Socle : auth, RLS, classifier, LLM, agent-runtime, file de validation | `packages/*`, `apps/agent-runtime` | ADR-006 |
 | **Affaires** (pivot) : imputations, marge déterministe, vocabulaire | `apps/api/src/affaires.ts`, `packages/shared/src/affaireMargin.ts` | `affaires.md` |
+| **Packs verticaux** : métiers, libellés, vocabulaire accordé (un vertical = une DONNÉE) | `packages/shared/src/verticalPacks.ts` | `packs-verticaux.md` |
 | Imputation suggérée (photo → affaire, **jamais écrite d'office**) | `apps/api/src/affaireSuggestion.ts` | `imputation-suggeree.md` |
 | Brief du matin (assemblage déterministe, angles morts DITS) | `apps/api/src/briefMatin.ts` | `brief-matin.md` |
 | File de validation (affaire + socle ; une action ne se masque jamais) | `apps/api/src/app.ts`, `packages/shared/src/pendingActionCatalog.ts` | `file-validation.md` |
