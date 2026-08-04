@@ -24,7 +24,7 @@
  */
 
 /** Bump à chaque ajout de vue ou d'événement. */
-export const FRESHNESS_RULES_VERSION = "2026-08-04";
+export const FRESHNESS_RULES_VERSION = "2026-08-04.1";
 
 /** Vues de données rafraîchissables. */
 export const VIEW_KEYS = [
@@ -179,7 +179,12 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   // autre onglet peut avoir sous les yeux. Événement distinct de
   // `prospect.modifie`, qui ne touche aucune affaire — périmer les affaires à
   // chaque changement d'étape ferait clignoter un écran pour rien.
-  "prospect.efface": ["prospects", "cockpit", "affaires"],
+  // `contrats` : l'effacement écrit aussi dans les contrats liés — nom et
+  // notes anonymisés, `prospect_id` détaché par le SET NULL de la FK. Sans
+  // cette entrée, l'écran Contrats continuerait d'afficher le nom qui vient
+  // d'être effacé, ce qui est exactement le mensonge que ce registre existe
+  // pour empêcher.
+  "prospect.efface": ["prospects", "cockpit", "affaires", "contrats"],
   // Le cockpit affiche les alertes de stock (quand le module est actif).
   "stock.modifie": ["stocks", "cockpit", "brief"],
   // Salariés, absences, synchro paie. `marge` est de la sur-invalidation
@@ -347,6 +352,7 @@ export const MUTATION_EFFECTS: Readonly<Record<string, MutationEffect>> = {
   // Contrats récurrents (4.2 bloc 2).
   createContrat: ["contrat.modifie"],
   setContratStatus: ["contrat.modifie"],
+  setContratProspect: ["contrat.modifie"],
   materialiserContrat: ["contrat.modifie"],
   // Registre RGPD : lu par sa page uniquement.
   addActivityFromTemplate: null,

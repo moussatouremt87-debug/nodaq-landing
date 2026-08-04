@@ -1245,6 +1245,20 @@ export const createContrat = (input: {
 export const setContratStatus = (id: string, status: string): Promise<Contrat> =>
   call(Contrat, `/contrats/${id}`, { method: "PATCH", body: JSON.stringify({ status }) });
 
+/**
+ * Rattacher un contrat EXISTANT à une fiche.
+ *
+ * Sans ce chemin, seuls les contrats créés après le correctif d'effacement
+ * seraient atteignables : le stock déjà en base resterait nominatif pour
+ * toujours, et le compteur `contratsSansFiche` ne pourrait jamais retomber à
+ * zéro. Une garde qu'on ne peut pas appliquer à l'existant n'est pas une garde.
+ */
+export const setContratProspect = (
+  id: string,
+  prospectId: string | null,
+): Promise<Contrat> =>
+  call(Contrat, `/contrats/${id}`, { method: "PATCH", body: JSON.stringify({ prospectId }) });
+
 /** Matérialise les échéances dues en affaires. JAMAIS automatique : un clic. */
 export const materialiserContrat = (
   id: string,

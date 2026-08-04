@@ -160,8 +160,10 @@ bonne, et elle était plus grave qu'écrit ici : un nom effacé côté prospect 
 que l'effacement se défaisait tout seul un mois plus tard. `contrats.prospect_id`
 (nullable, saisi, jamais deviné) rend le contrat atteignable, la matérialisation
 copie le lien en même temps que le nom, et ce qui reste hors de portée est
-compté. Voir [`effacement.md`](effacement.md). `notes` reste libre et n'est pas
-recopié — il ne quitte jamais le contrat.
+compté, et l'existant est rattachable depuis l'écran. `notes` part avec le nom
+lors de l'anonymisation : ce n'était pas un problème de recopie mais de
+SURVIE — un champ libre sur un contrat détaché de sa fiche devient
+définitivement inatteignable. Voir [`effacement.md`](effacement.md).
 
 **La migration en deux fichiers.** La convention (et le précédent 4.1) sépare la
 création de table de la migration RLS. Ici tout est dans

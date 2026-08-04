@@ -5438,7 +5438,21 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           where: {
             OR: [
               { prospectId: params.data.id },
-              ...(contratIds.length > 0 ? [{ contratId: { in: contratIds } }] : []),
+              /*
+               * Le chemin par contrat ne vaut que pour les affaires ORPHELINES
+               * de fiche.
+               *
+               * Un contrat d'entretien peut servir plusieurs interlocuteurs, et
+               * `PATCH /affaires` accepte un `prospectId` : une affaire générée
+               * par ce contrat mais rattachée EXPLICITEMENT à quelqu'un d'autre
+               * appartient à cette autre personne. L'anonymiser serait le
+               * symétrique exact de l'erreur que le refus de la correspondance
+               * de noms cherche à éviter — détruire la donnée d'un tiers au
+               * nom de l'effacement d'un autre.
+               */
+              ...(contratIds.length > 0
+                ? [{ contratId: { in: contratIds }, prospectId: null }]
+                : []),
             ],
           },
           select: {
@@ -5525,7 +5539,18 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         );
         const { count: contratsAnonymises } = await tx.contrat.updateMany({
           where: { id: { in: contratsAAnonymiser.map((contrat) => contrat.id) } },
-          data: { clientName: null },
+          /*
+           * `notes` part AVEC le nom, et ce n'est pas du zèle.
+           *
+           * C'est un champ libre de 2 000 caractères sur un contrat dont on
+           * vient de juger que rien ne fonde de le garder — « le client
+           * n'ouvre jamais avant 9 h », « conflit sur la facture de mars ». Le
+           * lien vers la fiche disparaît une ligne plus bas par `SET NULL` :
+           * ce qui survit ici devient définitivement inatteignable. L'opt-out
+           * (`/prospects/:id/opposition`) efface déjà `notes` pour la même
+           * raison, et l'anonymisation des affaires emporte déjà l'adresse.
+           */
+          data: { clientName: null, notes: null },
         });
         const contratsConserves = contrats
           .map((contrat) => ({ contrat, motif: motifDeConservationContrat(contrat) }))
@@ -5545,13 +5570,20 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
          * tiers en silence. Le nombre ne prétend rien sur la personne
          * effacée : il dit combien de contrats l'owner doit relire lui-même.
          */
+        const deleted = await tx.prospect.deleteMany({ where: { id: params.data.id } });
+        /*
+         * COMPTÉ APRÈS la suppression, et l'ordre porte la justesse du nombre.
+         *
+         * Le `SET NULL` de la FK détache à l'instant les contrats CONSERVÉS :
+         * ils gardent leur nom et n'ont plus de fiche, donc ils entrent
+         * pleinement dans « ce que l'owner doit relire ». Compter avant les
+         * aurait exclus — le nombre aurait valu `réel − contratsConserves`
+         * sous un libellé qui promet le total, c'est-à-dire un angle mort
+         * annoncé trop petit.
+         */
         const contratsSansFiche = await tx.contrat.count({
           where: { prospectId: null, clientName: { not: null } },
         });
-
-        // Le `SET NULL` de la FK détache les contrats CONSERVÉS : le lien
-        // disparaît avec la fiche, le nom qu'ils gardent est dit ci-dessus.
-        const deleted = await tx.prospect.deleteMany({ where: { id: params.data.id } });
         return {
           count: deleted.count,
           anonymisees,

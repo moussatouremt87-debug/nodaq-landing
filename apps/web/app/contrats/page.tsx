@@ -8,6 +8,7 @@ import {
   getProspects,
   listContrats,
   materialiserContrat,
+  setContratProspect,
   setContratStatus,
 } from "../../lib/api";
 import type { Contrat, Prospect } from "../../lib/api";
@@ -39,6 +40,9 @@ const CADENCE_LABELS: Record<string, string> = {
 export default function ContratsPage() {
   const [contrats, setContrats] = useState<Contrat[]>([]);
   const [prospects, setProspects] = useState<Prospect[]>([]);
+  /** Ce que la liste de fiches NE DIT PAS : troncature ou échec de chargement. */
+  const [fichesAngleMort, setFichesAngleMort] = useState<string | null>(null);
+  const [rattachement, setRattachement] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -53,16 +57,6 @@ export default function ContratsPage() {
   });
 
   const load = useCallback(async () => {
-    /*
-     * Les fiches servent au RATTACHEMENT, pas à l'affichage. Sans elles, le
-     * nom saisi sur un contrat est hors de portée d'un effacement (art. 17) :
-     * la matérialisation le recopie sur chaque affaire générée, et le produit
-     * n'a aucun moyen de savoir de qui il s'agit. Un échec ici ne casse pas
-     * l'écran — il retire seulement le choix.
-     */
-    await getProspects()
-      .then((res) => setProspects(res.prospects.filter((p) => !p.optedOut)))
-      .catch(() => setProspects([]));
     await listContrats()
       .then((res) => setContrats(res.contrats))
       .catch((err: unknown) => {
@@ -73,6 +67,35 @@ export default function ContratsPage() {
         );
         throw err;
       });
+  }, []);
+
+  /*
+   * Les fiches servent au RATTACHEMENT, jamais à l'affichage — c'est ce qui
+   * rend le nom d'un contrat effaçable (art. 17). Chargées À LA DEMANDE :
+   * elles portent des coordonnées et des annotations dont cet écran n'a aucun
+   * usage, et la création est réservée au dirigeant.
+   *
+   * UN ÉCHEC OU UNE TRONCATURE SE DIT. Dégrader en liste vide afficherait
+   * « aucune fiche » à un dirigeant qui en a six cents, et il saisirait un nom
+   * définitivement hors de portée d'un effacement en croyant n'avoir pas le
+   * choix.
+   */
+  const chargerFiches = useCallback(async () => {
+    setFichesAngleMort(null);
+    try {
+      const res = await getProspects();
+      setProspects(res.prospects.filter((p) => !p.optedOut));
+      if (res.truncated) {
+        setFichesAngleMort(
+          "Liste tronquée : toutes vos fiches ne sont pas proposées ici.",
+        );
+      }
+    } catch {
+      setProspects([]);
+      setFichesAngleMort(
+        "Fiches non chargées — un contrat enregistré sans fiche restera hors de portée d'un effacement.",
+      );
+    }
   }, []);
 
   const freshness = useFreshness(["contrats"], load);
@@ -151,6 +174,26 @@ export default function ContratsPage() {
     }
   }
 
+  async function rattacher(contrat: Contrat, prospectId: string): Promise<void> {
+    if (prospectId === "") return;
+    setBusyId(contrat.id);
+    setError(null);
+    try {
+      await setContratProspect(contrat.id, prospectId);
+      emitDomainEvent("contrat.modifie");
+      setNotice("Contrat rattaché — son nom est désormais effaçable.");
+      freshness.refresh();
+    } catch (err) {
+      setError(
+        err instanceof ApiError && err.status === 403
+          ? "Réservé au dirigeant."
+          : "Rattachement impossible.",
+      );
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function basculer(contrat: Contrat): Promise<void> {
     setBusyId(contrat.id);
     setError(null);
@@ -181,10 +224,38 @@ export default function ContratsPage() {
           <div className="titles">
             <div className="title">{contrats.length} contrat(s)</div>
           </div>
-          <button className="btn" onClick={() => setOuvert((v) => !v)}>
+          <button
+            className="btn"
+            onClick={() => {
+              const next = !ouvert;
+              setOuvert(next);
+              if (next) void chargerFiches();
+            }}
+          >
             {ouvert ? "Annuler" : "Nouveau contrat"}
           </button>
+          {/* Le stock EXISTANT doit pouvoir être rattaché, sinon
+              `contratsSansFiche` ne retombe jamais à zéro et la garde ne vaut
+              que pour les contrats créés après elle. */}
+          {contrats.some((c) => c.clientName !== null && c.prospectId === null) && (
+            <button
+              className="btn"
+              onClick={() => {
+                const next = !rattachement;
+                setRattachement(next);
+                if (next) void chargerFiches();
+              }}
+            >
+              {rattachement ? "Terminer" : "Rattacher les noms"}
+            </button>
+          )}
         </div>
+
+        {fichesAngleMort !== null && (ouvert || rattachement) && (
+          <p className="warn" style={{ marginBottom: 10 }}>
+            {fichesAngleMort}
+          </p>
+        )}
 
         {ouvert && (
           <div className="form-grid" style={{ marginBottom: 14 }}>
@@ -209,7 +280,19 @@ export default function ContratsPage() {
               Fiche client (rend le nom effaçable) :{" "}
               <select
                 value={form.prospectId}
-                onChange={(e) => setForm({ ...form, prospectId: e.target.value })}
+                onChange={(e) => {
+                  /* Le nom SUIT la fiche : toute la chaîne d'effacement fait
+                     confiance à ce lien, donc un contrat pointant Dupont mais
+                     nommé Martin ferait anonymiser le nom de quelqu'un d'autre.
+                     Pré-rempli, pas verrouillé — une raison sociale peut
+                     légitimement différer. */
+                  const choisie = prospects.find((p) => p.id === e.target.value);
+                  setForm({
+                    ...form,
+                    prospectId: e.target.value,
+                    clientName: choisie ? choisie.name : form.clientName,
+                  });
+                }}
               >
                 <option value="">aucune — le nom restera hors de portée</option>
                 {prospects.map((prospect) => (
@@ -276,6 +359,21 @@ export default function ContratsPage() {
                             l'owner est le seul à pouvoir le corriger. */}
                         {contrat.prospectId === null && " · sans fiche"}
                       </div>
+                    )}
+                    {rattachement && contrat.clientName && contrat.prospectId === null && (
+                      <select
+                        disabled={busyId === contrat.id}
+                        value=""
+                        onChange={(e) => void rattacher(contrat, e.target.value)}
+                      >
+                        <option value="">rattacher à une fiche…</option>
+                        {prospects.map((prospect) => (
+                          <option key={prospect.id} value={prospect.id}>
+                            {prospect.name}
+                            {prospect.company ? ` — ${prospect.company}` : ""}
+                          </option>
+                        ))}
+                      </select>
                     )}
                     <div className="ameta">
                       {CADENCE_LABELS[contrat.cadence] ?? contrat.cadence}
