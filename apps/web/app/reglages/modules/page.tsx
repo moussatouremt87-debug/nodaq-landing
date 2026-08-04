@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { verticalLabel } from "@nodaq/shared";
 import { ApiError, getModules, setModule } from "../../../lib/api";
 import { emitDomainEvent } from "../../../lib/freshness";
 import type { ModuleStates } from "../../../lib/api";
@@ -60,7 +61,16 @@ export default function ModulesPage() {
           <>
             <p className="muted">
               {state.vertical
-                ? `Défauts proposés pour votre vertical (« ${state.vertical} », page Veille réglementaire) — chaque module reste activable ou désactivable ici. `
+                ? // Le LIBELLÉ du pack, pas l'identifiant brut : « services_projet »
+                  // ou « evenementiel » affiché à un dirigeant se lit comme une
+                  // fuite de code. Les anciens ids (« retail », « services »)
+                  // passaient encore pour du français, les nouveaux non.
+                  //
+                  // Et le renvoi pointe vers « Votre métier » (socle), pas vers
+                  // la Veille réglementaire : c'est un module HORS SOCLE,
+                  // éteint par défaut, donc le seul pointeur affiché menait
+                  // jusqu'ici au module qu'il fallait justement rallumer.
+                  `Défauts proposés pour votre métier (« ${verticalLabel(state.vertical)} », modifiable dans Réglages › Votre métier) — chaque module reste activable ou désactivable ici. `
                 : "Réglage réservé au dirigeant — état des modules en lecture seule. "}
               Désactiver un module retire sa page du menu, ses outils de l&apos;employé virtuel
               et rend ses écrans « module désactivé » ; aucune donnée n&apos;est supprimée.

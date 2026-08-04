@@ -1,4 +1,4 @@
-import type { Vertical } from "./regulatoryWatch.js";
+import type { Vertical } from "./verticalPacks.js";
 
 /*
  * Module catalog (ticket 3.11) — same doctrine as the other versioned

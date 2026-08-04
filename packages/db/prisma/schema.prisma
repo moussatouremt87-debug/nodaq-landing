@@ -703,8 +703,9 @@ model StaffAbsence {
 /// Ticket 3.7 — profil tenant pour la veille réglementaire (secteur/effectif).
 /// Une ligne par tenant (tenantId unique). `vertical` pilote quelles obligations
 /// réglementaires sont pertinentes pour ce tenant — validé côté app par Zod
-/// (industrie_btp | retail | negoce | services | autre), défense en profondeur
-/// via CHECK en base. `headcountOverride` est l'effectif déclaré par
+/// (`VERTICALS` dans `packages/shared/src/verticalPacks.ts` : les cinq métiers
+/// de la cible du pivot + les cinq de l'ancien découpage, conservés), défense
+/// en profondeur via CHECK en base. `headcountOverride` est l'effectif déclaré par
 /// l'utilisateur ; si absent, l'effectif est dérivé de `staff_members` côté app
 /// (jamais stocké en doublon ici). Sealed by RLS (see the migration
 /// `rls_tenant_profiles`).
@@ -1139,7 +1140,7 @@ model SupportIssue {
 /// Ticket 4.1 — L'OBJET AFFAIRE, pivot du produit (ADR-007).
 ///
 /// Une affaire = un chantier, un événement, une intervention, une mission. Le
-/// MOT vient du pack vertical, jamais du code (`affaireVocabulary.ts`).
+/// MOT vient du pack vertical, jamais du code (`verticalPacks.ts`, 4.2).
 ///
 /// Deux règles de structure, non négociables :
 ///  1. TOUT rattachement est NULLABLE. Une pièce sans affaire (essence,

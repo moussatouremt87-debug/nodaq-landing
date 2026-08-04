@@ -24,7 +24,7 @@
  */
 
 /** Bump à chaque ajout de vue ou d'événement. */
-export const FRESHNESS_RULES_VERSION = "2026-08-03";
+export const FRESHNESS_RULES_VERSION = "2026-08-04";
 
 /** Vues de données rafraîchissables. */
 export const VIEW_KEYS = [
@@ -73,7 +73,8 @@ export type DomainEvent =
   | "avis.modifie"
   | "echeance.modifiee"
   | "affaire.modifiee"
-  | "affaire.imputee";
+  | "affaire.imputee"
+  | "profil.modifie";
 
 /**
  * Quelles vues chaque événement périme.
@@ -201,6 +202,21 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   // chantier. La ligne annoncée par le commentaire d'origine a bougé, et rien
   // d'autre n'a eu à bouger — c'était le pari de cette config.
   "affaire.imputee": ["affaires", "classeur", "cockpit", "brief"],
+  /*
+   * Le VERTICAL du tenant change — et c'est l'événement qui périme le plus de
+   * mots à la fois (4.2).
+   *
+   * Le vertical pilote deux choses très différentes : le VOCABULAIRE
+   * (`affaireWords`, donc « chantier » / « événement » / « intervention » sur
+   * les affaires, la marge, le brief et le cockpit) et les DÉFAUTS DE MODULES
+   * (`resolveModules`, donc la navigation).
+   *
+   * Il était déclaré « ne périme rien », ce qui était déjà faux et que les
+   * packs rendent visible : un paysagiste se déclare pour la première fois, et
+   * l'écran Affaires continue de lui dire « affaire » jusqu'au rechargement —
+   * exactement le moment où le produit devait lui parler sa langue.
+   */
+  "profil.modifie": ["affaires", "marge", "cockpit", "brief", "nav"],
 };
 
 export function viewsFor(event: DomainEvent): readonly ViewKey[] {
@@ -316,10 +332,12 @@ export const MUTATION_EFFECTS: Readonly<Record<string, MutationEffect>> = {
   registerPushDevice: null,
   updatePushDevice: null,
   revokePushDevice: null,
-  // Registre RGPD et profil de veille : lus par leur page uniquement.
+  // Registre RGPD : lu par sa page uniquement.
   addActivityFromTemplate: null,
   deleteActivity: null,
-  putComplianceProfile: null,
+  // Le profil de veille, LUI, ne l'est pas : il porte le vertical, donc le mot
+  // affiché sur la moitié du produit et les défauts de modules de la nav.
+  putComplianceProfile: ["profil.modifie"],
   // Back-office support (schéma `ops`, 2.18) : hors des vues d'un tenant.
   updateSupportDraft: null,
   sendSupportReply: null,
