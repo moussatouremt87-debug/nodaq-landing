@@ -113,9 +113,16 @@ export function Dictaphone() {
       </p>
       <p className="muted">
         {/* Dire ce qu'on fait de l'enregistrement, à l'endroit où on le
-            demande — pas dans une politique que personne n'ouvre. */}
+            demande — pas dans une politique que personne n'ouvre.
+            La phrase précédente promettait « pour que VOUS puissiez le
+            relire » : faux pour un membre, qui peut dicter mais ne peut lire
+            ni la file (payload réservé au dirigeant) ni cette page après
+            rechargement. Une information donnée à la personne concernée, à
+            l'instant où on lui demande son micro, doit être vraie pour tous
+            ceux à qui l'écran est servi. */}
         L&apos;enregistrement est transcrit sur nos serveurs souverains puis{" "}
-        <strong>supprimé</strong> : seul le texte est conservé, pour que vous puissiez le relire.
+        <strong>supprimé</strong> : seul le texte est conservé, joint à la proposition, pour
+        être relu avant validation.
       </p>
 
       {phase === "recording" ? (

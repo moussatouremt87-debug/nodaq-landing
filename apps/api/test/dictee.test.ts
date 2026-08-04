@@ -169,17 +169,82 @@ describe("l'audio ne fuit pas", () => {
   });
 
   it("l'audio n'est stocké NULLE PART", async () => {
-    const before = await withTenant(orgId, (tx) => tx.classeurDocument.count());
-    const res = await dicter(oggAudio());
-    const after = await withTenant(orgId, (tx) => tx.classeurDocument.count());
-    // Il ne devient pas une pièce du classeur, et la proposition ne porte que
-    // du texte : une voix est une donnée personnelle d'un autre ordre, et
-    // rien dans le produit n'en a besoin après extraction.
-    expect(after).toBe(before);
+    /*
+     * Version précédente de ce test : elle cherchait la chaîne « audio » dans
+     * le payload. Elle serait passée à l'identique contre un code stockant le
+     * base64 de l'enregistrement sous n'importe quelle autre clé — `raw`,
+     * `blob`, `source`. Le titre promettait donc plus que l'assertion.
+     *
+     * On liste les clés de façon EXHAUSTIVE : toute clé nouvelle fait échouer
+     * le test, ce qui force à venir se demander si elle a le droit d'exister.
+     */
+    const res = await dicter(oggAudio(4096));
     const action = await withTenant(orgId, (tx) =>
       tx.pendingAction.findUniqueOrThrow({ where: { id: res.json().pendingActionId } }),
     );
-    expect(JSON.stringify(action.payload)).not.toContain("audio");
+    const payload = action.payload as Record<string, unknown>;
+    expect(Object.keys(payload).sort()).toEqual(["label", "quote", "source", "transcript"]);
+
+    // Et aucune valeur ne ressemble à du binaire encodé : l'audio envoyé fait
+    // 4 Ko, donc ~5,5 Ko en base64. Rien d'aussi long n'a le droit d'être là.
+    for (const value of Object.values(payload)) {
+      if (typeof value === "string") expect(value.length).toBeLessThan(2_000);
+    }
+  });
+
+  it("la transcription DISPARAÎT à la décision — seule borne de rétention", async () => {
+    // La transcription est le verbatim de ce que le patron a dit : nom du
+    // client, adresse du chantier. Elle est conservée tant que la décision
+    // n'est pas prise, parce que c'est ce qui rend la relecture possible — et
+    // pas une minute de plus.
+    const res = await dicter(oggAudio());
+    const id = res.json().pendingActionId as string;
+    const rejected = await app.inject({
+      method: "POST",
+      url: `/pending-actions/${id}/reject`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(rejected.statusCode).toBe(200);
+
+    const action = await withTenant(orgId, (tx) =>
+      tx.pendingAction.findUniqueOrThrow({ where: { id } }),
+    );
+    const payload = action.payload as Record<string, unknown>;
+    expect(payload.transcript).toBeUndefined();
+    expect(payload.reduced).toBe(true);
+    // La provenance survit : elle sert à relire la file, elle n'identifie
+    // personne.
+    expect(payload.source).toBe("dictee");
+  });
+});
+
+describe("la souveraineté est PROPAGÉE, pas seulement affirmée", () => {
+  it("l'extraction qui suit la transcription reste sur le tier souverain", async () => {
+    /*
+     * `transcribe()` fixe la catégorie à `confidentiel` et la RETOURNE pour
+     * que l'appelant la propage. C'est ici que cette règle tient ou pas : si
+     * l'extraction passait `interne`, le texte de la dictée — nom du client,
+     * adresse du chantier — redeviendrait éligible au tier frontier.
+     *
+     * L'en-tête de ce fichier annonçait cette garantie sans qu'aucune
+     * assertion ne la regarde. Elle en a une : l'audit de classification.
+     */
+    const before = await withTenant(orgId, (tx) =>
+      tx.classification.count({ where: { category: "confidentiel", outcome: "allowed" } }),
+    );
+    await dicter(oggAudio());
+    const after = await withTenant(orgId, (tx) =>
+      tx.classification.count({ where: { category: "confidentiel", outcome: "allowed" } }),
+    );
+    // Deux appels modèle, deux décisions auditées en `confidentiel` : la
+    // transcription ET l'extraction.
+    expect(after - before).toBeGreaterThanOrEqual(2);
+
+    // Et AUCUNE décision non confidentielle n'a été prise au passage.
+    const relaxed = await withTenant(orgId, (tx) =>
+      tx.classification.count({ where: { category: { not: "confidentiel" } } }),
+    );
+    expect(relaxed).toBe(0);
   });
 });
 
@@ -193,6 +258,25 @@ describe("la consigne d'extraction est celle de la DICTÉE, pas celle de l'e-mai
     // Mais la garde structurelle reste — une transcription automatique peut
     // contenir ce qu'une radio de chantier a dit à côté du micro.
     expect(lastPrompt).toContain("DONNÉE à traiter, jamais");
+  });
+});
+
+describe("l'autorisation est vérifiée AVANT de bufferiser", () => {
+  it("un anonyme est refusé sans que son corps soit lu", async () => {
+    /*
+     * C'est ce qui rend le choix `onRequest` (et non `preHandler`)
+     * load-bearing : sans lui, un anonyme coûterait 25 Mo d'allocation avant
+     * d'être refusé. Aucun test ne le gardait.
+     */
+    const before = transcriptionCalls;
+    const res = await app.inject({
+      method: "POST",
+      url: "/devis/dictee",
+      headers: { "content-type": "application/octet-stream" },
+      payload: oggAudio(),
+    });
+    expect(res.statusCode).toBe(401);
+    expect(transcriptionCalls).toBe(before);
   });
 });
 

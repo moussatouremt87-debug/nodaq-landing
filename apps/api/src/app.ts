@@ -41,6 +41,10 @@ import {
   toPrismaData,
 } from "./affaires.js";
 import { sniffAudioFormat, transcribe, TRANSCRIPTION_MAX_BYTES } from "@nodaq/llm";
+// Importée, JAMAIS recopiée : la borne de la route doit être exactement celle
+// du schéma de l'outil, sinon la troncature « propre » de l'une devient la
+// ZodError de l'autre.
+import { DICTATION_MAX } from "@nodaq/mcp-actions";
 import { deriveCharges, deriveFixedAssets, deriveReceivables, parseFec } from "@nodaq/fec";
 import {
   aggregateEReporting,
@@ -3499,6 +3503,22 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           return reply.code(400).send({ error: "audio attendu (corps application/octet-stream)" });
         }
 
+        /*
+         * Le quota est consommé AVANT le sniff, et c'est délibéré.
+         *
+         * Le placer après laissait un boucleur authentifié enchaîner des corps
+         * de 25 Mo au mauvais nombre magique : refusés en 415, mais jamais
+         * comptés — la borne coûteuse en aval de la borne gratuite. Un envoi
+         * reste un envoi, même mal formé.
+         *
+         * Même plafond que le cockpit conversationnel : deux appels modèle par
+         * requête (transcription + extraction), sur une route pilotée depuis
+         * un écran. La transcription est facturée à la SECONDE d'audio.
+         */
+        if (!askLimiter.take(`${request.tenantId}:${request.authSession.user.id}`)) {
+          return reply.code(429).send({ error: "trop de demandes — patientez une minute" });
+        }
+
         // Format reconnu par ses OCTETS, jamais par ce que le client déclare :
         // envoyer une image à un moteur de transcription coûterait un appel
         // facturé pour rien. Refus AVANT toute sortie réseau.
@@ -3507,14 +3527,6 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           return reply.code(415).send({
             error: "format audio non reconnu (WAV, MP3, OGG, FLAC, WebM ou MP4)",
           });
-        }
-
-        // Même plafond que le cockpit conversationnel : deux appels modèle par
-        // requête (transcription + extraction), sur une route pilotée depuis un
-        // écran. La transcription est facturée à la SECONDE d'audio — sans
-        // plafond, une boucle coûte vite.
-        if (!askLimiter.take(`${request.tenantId}:${request.authSession.user.id}`)) {
-          return reply.code(429).send({ error: "trop de demandes — patientez une minute" });
         }
 
         let transcript: string;
@@ -3555,6 +3567,19 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             .send({ error: "rien d'exploitable n'a été entendu — reprenez l'enregistrement" });
         }
 
+        /*
+         * Borne AVANT l'outil, et non par la validation de son schéma.
+         *
+         * 25 Mo d'Opus, c'est environ onze minutes de parole : dépasser
+         * `DICTATION_MAX` est un cas réel, pas théorique. Laisser le schéma Zod
+         * de l'outil s'en charger renvoyait une ZodError dans le `catch`
+         * générique, donc un 422 « dictée non exploitable en devis » — un
+         * message FAUX, rendu après avoir déjà payé la transcription.
+         *
+         * On tronque, on traite ce qu'on a, et on le DIT.
+         */
+        const kept = transcript.slice(0, DICTATION_MAX);
+
         let toolset: Awaited<ReturnType<typeof buildToolset>> | null = null;
         try {
           toolset = await buildToolset({
@@ -3572,13 +3597,19 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
               });
             },
           });
-          const result = await toolset.execute("draft_quote_from_dictation", { transcript });
+          const result = await toolset.execute("draft_quote_from_dictation", {
+            transcript: kept,
+          });
           void reply.header("cache-control", "private, no-store");
           return reply.code(202).send({
             ...(JSON.parse(result) as Record<string, unknown>),
             // Rendu à l'écran pour la relecture immédiate, avant même d'ouvrir
             // la file : ce que la machine a ENTENDU, mot pour mot.
-            transcript,
+            transcript: kept,
+            // Une troncature MUETTE serait le pire cas : le dirigeant relirait
+            // un texte amputé en croyant tout voir, et validerait un devis
+            // auquel il manque la fin de la dictée.
+            transcriptTruncated: kept.length < transcript.length,
             formatProviderConfirmed: format.providerConfirmed,
           });
         } catch (error) {

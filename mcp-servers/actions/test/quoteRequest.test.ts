@@ -214,8 +214,12 @@ describe("la dictée — même moteur, provenance DIFFÉRENTE", () => {
     expect(DICTATION_EXTRACTION_PROMPT).toContain("Ne corrige pas les chiffres");
   });
 
-  it("la transcription est bornée comme l'e-mail", () => {
+  it("la transcription est bornée À la borne, pas « un peu »", () => {
+    // Version précédente : `length < long.length`, vrai pour n'importe quelle
+    // troncature — y compris d'un seul caractère. Elle ne gardait rien.
     const long = "a".repeat(DICTATION_MAX + 500);
-    expect(wrapDictation(long).length).toBeLessThan(long.length);
+    const wrapped = wrapDictation(long);
+    expect(wrapped).toContain("a".repeat(DICTATION_MAX));
+    expect(wrapped).not.toContain("a".repeat(DICTATION_MAX + 1));
   });
 });

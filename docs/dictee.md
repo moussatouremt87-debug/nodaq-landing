@@ -59,6 +59,34 @@ doctrine HITL interdit.
 C'est aussi la mitigation que le spike prescrivait : *« faire dicter avec
 relecture à l'écran »*.
 
+La transcription est rendue **à deux endroits**, et il faut les deux : sur
+l'écran de dictée juste après l'envoi (relecture immédiate, par celui qui a
+parlé) **et dans le détail de la file de validation**. La première version ne
+faisait que la première — donc on conservait du verbatim en base pour une
+relecture que le seul décideur, le dirigeant, ne voyait jamais. Garder une
+donnée pour une finalité qu'on ne réalise pas, c'est la garder sans raison.
+
+### Ce que dure la transcription
+
+| Moment | État |
+|---|---|
+| proposition en attente | transcription conservée — c'est ce qui rend la relecture possible |
+| proposition décidée (validée ou rejetée) | `reduceQuotePayload` reconstruit le payload : la transcription **disparaît** |
+| proposition jamais décidée | **elle reste** — limite connue, ci-dessous |
+
+**Limite connue, et elle est réelle.** Une proposition dictée qui n'est jamais
+décidée garde son verbatim indéfiniment : le nom du client, l'adresse du
+chantier, et ce que le micro a capté à côté. Aucune des purges de l'article 17
+(FEC, classeur, prospect) ne l'atteint — elles visent `create_fixed_asset` et
+`record_prospect_contact`, pas `create_quote`. Le chemin e-mail (2.7) ne
+stockait que l'extraction structurée ; ce ticket élargit le résidu.
+
+Le remède n'est pas une rustine ici : c'est une **politique de rétention de la
+file de validation** — au bout de combien de temps une proposition jamais
+décidée se réduit-elle d'elle-même ? La question vaut pour tous les types
+d'action, pas seulement pour la dictée, et elle mérite son ticket. Elle est
+écrite ici plutôt que découverte plus tard.
+
 ## Les formats : deux listes qui ne se recouvrent pas
 
 | | Formats |

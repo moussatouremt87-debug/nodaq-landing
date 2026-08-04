@@ -132,6 +132,12 @@ export function reduceFinishedPayload(
  * file (combien de lignes, d'où venait la demande), on jette ce qui identifie
  * le prospect et le contenu de sa demande. Un tiers qui a écrit une fois ne
  * doit pas rester en base indéfiniment.
+ *
+ * Vaut aussi pour une proposition DICTÉE : le payload est reconstruit de zéro,
+ * donc la `transcript` — le verbatim de ce que le patron a dit, avec le nom du
+ * client et l'adresse du chantier — disparaît à la décision. C'est la seule
+ * borne de rétention qui existe aujourd'hui sur ce champ ; une proposition
+ * JAMAIS décidée le garde (limite connue, `docs/dictee.md`).
  */
 function reduceQuotePayload(payload: unknown): Prisma.InputJsonValue {
   const data = payload as Record<string, unknown> | null;

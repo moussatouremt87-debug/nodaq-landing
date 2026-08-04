@@ -65,24 +65,25 @@ describe("ce que le fournisseur garantit, et ce qu'il ne garantit pas", () => {
     // La distinction est le cœur du fichier : `webm` et `mp4` ne figurent pas
     // dans la documentation Scaleway lue par le spike. Les accepter est un
     // pari assumé ; le taire serait une promesse qu'on ne tient pas.
-    for (const format of AUDIO_FORMATS) {
-      expect(typeof format.providerConfirmed).toBe("boolean");
-    }
     expect(sniffAudioFormat(WAV)?.providerConfirmed).toBe(true);
     expect(sniffAudioFormat(WEBM)?.providerConfirmed).toBe(false);
     expect(sniffAudioFormat(MP4)?.providerConfirmed).toBe(false);
   });
 
-  it("la liste confirmée est celle de la source citée par le spike", () => {
-    // Si quelqu'un ajoute un format « confirmé » sans mettre à jour la source,
-    // ce test le force à regarder la doc plutôt que la mémoire.
-    expect([...PROVIDER_CONFIRMED_FORMATS].sort()).toEqual([
-      "flac",
-      "mp3",
-      "mpga",
-      "oga",
-      "ogg",
-      "wav",
-    ]);
+  it("le drapeau `providerConfirmed` DÉCOULE de la liste sourcée", () => {
+    /*
+     * Version précédente : elle comparait `PROVIDER_CONFIRMED_FORMATS` à une
+     * copie littérale d'elle-même, et ne croisait jamais la liste avec les
+     * booléens. Ajouter `{ id: "aiff", providerConfirmed: true }` passait.
+     * La constante « sourcée » n'était donc lue par personne — une config
+     * versionnée que rien n'applique.
+     *
+     * Ici, les deux doivent s'accorder : un format ne peut se déclarer
+     * confirmé que s'il figure dans la liste tirée de la documentation.
+     */
+    const sourced = new Set<string>(PROVIDER_CONFIRMED_FORMATS);
+    for (const format of AUDIO_FORMATS) {
+      expect(format.providerConfirmed).toBe(sourced.has(format.id));
+    }
   });
 });

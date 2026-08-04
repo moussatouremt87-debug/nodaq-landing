@@ -44,7 +44,14 @@ export interface AudioFormat {
   readonly providerConfirmed: boolean;
 }
 
-/** Formats listés par la documentation du fournisseur (voir en-tête). */
+/**
+ * Formats listés par la documentation du fournisseur (voir en-tête).
+ *
+ * `mpga` et `oga` n'ont pas d'entrée propre dans `AUDIO_FORMATS` : ce sont des
+ * noms d'extension pour des conteneurs que le renifleur reconnaît déjà comme
+ * `mp3` et `ogg`. La liste dit ce que le FOURNISSEUR accepte ; `AUDIO_FORMATS`
+ * dit ce que nos octets savent identifier.
+ */
 export const PROVIDER_CONFIRMED_FORMATS = [
   "wav",
   "mp3",
