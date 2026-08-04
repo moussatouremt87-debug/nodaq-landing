@@ -990,6 +990,7 @@ model Prospect {
   tenant       Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   interactions ProspectInteraction[]
   affaires     Affaire[]
+  contrats     Contrat[]
 
   @@unique([tenantId, id])
   @@index([tenantId, stage])
@@ -1304,6 +1305,11 @@ model Contrat {
   tenantId           String    @map("tenant_id") @db.Uuid
   label              String
   clientName         String?   @map("client_name")
+  /// Fiche prospect dont ce contrat porte l'identité — NULLABLE, sans
+  /// exception. Il n'existe QUE pour que l'effacement (art. 17) atteigne la
+  /// source de recopie : sans lui, matérialiser une échéance réécrit un nom
+  /// effacé sur une affaire neuve. Jamais dérivé d'une correspondance de noms.
+  prospectId         String?   @map("prospect_id") @db.Uuid
   /// 'mensuel' | 'trimestriel' | 'semestriel' | 'annuel' — validé côté app par
   /// Zod, défense en profondeur via CHECK en base.
   cadence            String
@@ -1322,10 +1328,12 @@ model Contrat {
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
   tenant             Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  prospect           Prospect? @relation(fields: [tenantId, prospectId], references: [tenantId, id], onDelete: SetNull)
   affaires           Affaire[]
 
   @@unique([tenantId, id])
   @@index([tenantId, status])
+  @@index([tenantId, prospectId])
   @@map("contrats")
   @@schema("public")
 }

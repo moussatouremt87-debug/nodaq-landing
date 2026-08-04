@@ -5,11 +5,12 @@ import {
   ApiError,
   createContrat,
   formatEuroCents,
+  getProspects,
   listContrats,
   materialiserContrat,
   setContratStatus,
 } from "../../lib/api";
-import type { Contrat } from "../../lib/api";
+import type { Contrat, Prospect } from "../../lib/api";
 import { emitDomainEvent } from "../../lib/freshness";
 import { useFreshness } from "../../lib/useFreshness";
 
@@ -37,6 +38,7 @@ const CADENCE_LABELS: Record<string, string> = {
 
 export default function ContratsPage() {
   const [contrats, setContrats] = useState<Contrat[]>([]);
+  const [prospects, setProspects] = useState<Prospect[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -44,12 +46,23 @@ export default function ContratsPage() {
   const [form, setForm] = useState({
     label: "",
     clientName: "",
+    prospectId: "",
     cadence: "mensuel",
     amount: "",
     startDate: "",
   });
 
   const load = useCallback(async () => {
+    /*
+     * Les fiches servent au RATTACHEMENT, pas à l'affichage. Sans elles, le
+     * nom saisi sur un contrat est hors de portée d'un effacement (art. 17) :
+     * la matérialisation le recopie sur chaque affaire générée, et le produit
+     * n'a aucun moyen de savoir de qui il s'agit. Un échec ici ne casse pas
+     * l'écran — il retire seulement le choix.
+     */
+    await getProspects()
+      .then((res) => setProspects(res.prospects.filter((p) => !p.optedOut)))
+      .catch(() => setProspects([]));
     await listContrats()
       .then((res) => setContrats(res.contrats))
       .catch((err: unknown) => {
@@ -77,13 +90,21 @@ export default function ContratsPage() {
       await createContrat({
         label: form.label.trim(),
         clientName: form.clientName.trim() === "" ? null : form.clientName.trim(),
+        prospectId: form.prospectId === "" ? null : form.prospectId,
         cadence: form.cadence,
         amountCents: cents,
         startDate: form.startDate === "" ? null : form.startDate,
       });
       emitDomainEvent("contrat.modifie");
       setOuvert(false);
-      setForm({ label: "", clientName: "", cadence: "mensuel", amount: "", startDate: "" });
+      setForm({
+        label: "",
+        clientName: "",
+        prospectId: "",
+        cadence: "mensuel",
+        amount: "",
+        startDate: "",
+      });
       setNotice("Contrat enregistré.");
       freshness.refresh();
     } catch (err) {
@@ -182,6 +203,24 @@ export default function ContratsPage() {
               />
             </label>
             <label>
+              {/* Le libellé DIT à quoi sert le lien. « Fiche client » seul se
+                  lirait comme un confort de saisie ; c'est en réalité la seule
+                  chose qui rende le nom ci-dessus effaçable. */}
+              Fiche client (rend le nom effaçable) :{" "}
+              <select
+                value={form.prospectId}
+                onChange={(e) => setForm({ ...form, prospectId: e.target.value })}
+              >
+                <option value="">aucune — le nom restera hors de portée</option>
+                {prospects.map((prospect) => (
+                  <option key={prospect.id} value={prospect.id}>
+                    {prospect.name}
+                    {prospect.company ? ` — ${prospect.company}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
               Cadence :{" "}
               <select
                 value={form.cadence}
@@ -229,7 +268,15 @@ export default function ContratsPage() {
                 <tr key={contrat.id}>
                   <td>
                     <strong>{contrat.label}</strong>
-                    {contrat.clientName && <div className="ameta">{contrat.clientName}</div>}
+                    {contrat.clientName && (
+                      <div className="ameta">
+                        {contrat.clientName}
+                        {/* Ce qui n'est pas rattachable est DIT : un nom sans
+                            fiche survit à l'effacement de la personne, et
+                            l'owner est le seul à pouvoir le corriger. */}
+                        {contrat.prospectId === null && " · sans fiche"}
+                      </div>
+                    )}
                     <div className="ameta">
                       {CADENCE_LABELS[contrat.cadence] ?? contrat.cadence}
                       {contrat.amountCents !== null &&

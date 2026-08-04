@@ -94,6 +94,66 @@ doctrine maison appliquée à l'effacement : *un refus est une réponse motivée
 *ce qui n'est pas fait est dit*. Un effacement qui laisse des données doit dire
 lesquelles — sinon personne ne sait qu'il reste du travail.
 
+## Le contrat, ou l'effacement qui se défait tout seul
+
+Le bloc 2 de 4.2 a introduit une **source de recopie**, et elle a rendu tout ce
+qui précède insuffisant. `POST /contrats/:id/occurrences` écrit
+`contrats.client_name` sur **chaque affaire générée**. Effacer une fiche
+anonymisait donc consciencieusement les affaires existantes pendant que le
+contrat, lui, gardait le nom — et le réécrivait sur une affaire neuve au clic
+suivant.
+
+Un mois plus tard, la donnée était revenue. **Un nom supprimé qui revient n'est
+pas un effacement, c'est un délai** — et c'est la pire forme, parce que
+l'exécution s'était déclarée réussie.
+
+### Le lien est saisi, jamais deviné
+
+`contrats.prospect_id` est nullable et **explicite**. Rapprocher un contrat
+d'une fiche par correspondance de noms aurait fermé le trou d'un seul coup, et
+c'est exactement l'inférence que la doctrine interdit : deux clients homonymes
+existent, et effacer le contrat du mauvais détruit la donnée d'un tiers **en
+silence**. Le coût des deux erreurs est asymétrique — un contrat hors de portée
+reste un problème visible, puisqu'il est compté et annoncé.
+
+La clé étrangère est composite `(tenant_id, prospect_id)` — l'intégrité
+référentielle contourne la RLS — avec la **liste de colonnes** PostgreSQL 15+
+`ON DELETE SET NULL ("prospect_id")` : sans elle, `SET NULL` sur une FK
+composite annulerait aussi `tenant_id`, qui est `NOT NULL`.
+
+### Deux chemins vers les affaires, tous deux explicites
+
+La matérialisation copie désormais `prospect_id` **en même temps** que le nom :
+copier une identité sans copier le moyen de l'effacer fabrique de la donnée
+orpheline à chaque clic. Restent les affaires générées **avant** ce ticket, qui
+ne portent que leur `contrat_id` : la recherche par fiche ne les voyait pas, et
+l'effacement se déclarait complet en les laissant nominatives. Le chemin
+*fiche → contrat → affaires* les rattrape — deux liens explicites, pas une
+correspondance de noms.
+
+### Ce qui fonde de garder un contrat
+
+Même logique que les affaires : on conserve sur un **fait**, jamais sur un
+libellé.
+
+| Fait | Conservé parce que |
+|---|---|
+| statut `ACTIF` | relation en cours d'exécution (art. 17.3.b) — l'effacer casserait la prestation que la personne reçoit encore |
+| a produit une affaire elle-même conservée | même exécution ; anonymiser le contrat en gardant l'affaire nominative ne protégerait personne et détruirait la pièce qui explique d'où vient ce chantier |
+
+Et une conservation **muette** serait un effacement qui ment :
+`contratsConserves` rapporte chaque contrat gardé avec son motif.
+
+### L'angle mort est compté
+
+`contratsSansFiche` dit combien de contrats portent un nom de client sans lien
+vers une fiche. Ce nombre ne prétend **rien** sur la personne effacée — il dit
+combien de contrats l'owner doit relire lui-même, parce qu'aucun effacement ne
+peut les atteindre. Il tombera à zéro à mesure que les contrats seront
+rattachés ; l'écran Contrats affiche `· sans fiche` sur chacun, et son
+formulaire nomme le champ « Fiche client (rend le nom effaçable) » plutôt que
+« Client », parce qu'un libellé neutre se lirait comme un confort de saisie.
+
 ## Ce que ce ticket ne livre pas
 
 **Le bouton de suppression d'une fiche — donc le rapport n'a pas de

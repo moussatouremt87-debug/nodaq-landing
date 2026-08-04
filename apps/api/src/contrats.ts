@@ -54,6 +54,17 @@ export const ContratCreateInput = z
   .object({
     label: z.string().trim().min(1).max(200),
     clientName: z.string().trim().min(1).max(200).nullable().optional(),
+    /*
+     * Rattachement à une fiche prospect — la seule chose qui rende ce contrat
+     * ATTEIGNABLE par un effacement (art. 17).
+     *
+     * `clientName` est une copie libre de l'identité d'une personne, et la
+     * matérialisation la recopie sur chaque affaire générée. Sans ce lien,
+     * effacer la fiche anonymise les affaires existantes puis regarde le
+     * contrat réécrire le nom au clic suivant. Nullable, sans exception : la
+     * plupart des contrats ne viendront jamais d'une fiche.
+     */
+    prospectId: z.string().uuid().nullable().optional(),
     cadence: z.enum(CADENCES),
     /*
      * Montant HT PAR PÉRIODE, jamais le total du contrat — et c'est la borne
@@ -117,6 +128,7 @@ export interface ContratRow {
   id: string;
   label: string;
   clientName: string | null;
+  prospectId: string | null;
   cadence: string;
   amountCents: bigint | null;
   vatRateBps: number | null;
@@ -152,6 +164,7 @@ export function serializeContrat(contrat: ContratRow, todayIso: string) {
     id: contrat.id,
     label: contrat.label,
     clientName: contrat.clientName,
+    prospectId: contrat.prospectId,
     cadence: contrat.cadence,
     amountCents: toNumber(contrat.amountCents),
     vatRateBps: contrat.vatRateBps,
