@@ -43,6 +43,7 @@ export const VIEW_KEYS = [
   "factures",
   "echeancier",
   "affaires",
+  "contrats",
   "brief",
   "nav",
 ] as const;
@@ -74,7 +75,8 @@ export type DomainEvent =
   | "echeance.modifiee"
   | "affaire.modifiee"
   | "affaire.imputee"
-  | "profil.modifie";
+  | "profil.modifie"
+  | "contrat.modifie";
 
 /**
  * Quelles vues chaque événement périme.
@@ -217,6 +219,16 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
    * exactement le moment où le produit devait lui parler sa langue.
    */
   "profil.modifie": ["affaires", "marge", "cockpit", "brief", "nav"],
+  /*
+   * Un contrat change, ou ses échéances deviennent des affaires (4.2 bloc 2).
+   *
+   * `affaires` et `marge` en font partie parce que matérialiser CRÉE des
+   * affaires devisées : la liste des chantiers et la marge globale sont
+   * fausses l'instant d'après. `brief` parce que le compteur « passages à
+   * planifier » vient de tomber à zéro — le laisser afficher son ancien
+   * chiffre juste après le clic serait la démonstration ratée type.
+   */
+  "contrat.modifie": ["contrats", "affaires", "marge", "cockpit", "brief"],
 };
 
 export function viewsFor(event: DomainEvent): readonly ViewKey[] {
@@ -332,6 +344,10 @@ export const MUTATION_EFFECTS: Readonly<Record<string, MutationEffect>> = {
   registerPushDevice: null,
   updatePushDevice: null,
   revokePushDevice: null,
+  // Contrats récurrents (4.2 bloc 2).
+  createContrat: ["contrat.modifie"],
+  setContratStatus: ["contrat.modifie"],
+  materialiserContrat: ["contrat.modifie"],
   // Registre RGPD : lu par sa page uniquement.
   addActivityFromTemplate: null,
   deleteActivity: null,

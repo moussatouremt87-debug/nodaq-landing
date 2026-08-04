@@ -5,6 +5,16 @@ import { z } from "zod";
 import { buildToolset, ComptaAgent } from "@nodaq/agent-runtime";
 import type { ToolsetContext } from "@nodaq/agent-runtime";
 import {
+  ContratCreateInput,
+  ContratUpdateInput,
+  serializeContrat,
+  toCivilDate,
+  summarizeDueContracts,
+  todayCivilIso,
+  toContratData,
+  toDbDateRequired,
+} from "./contrats.js";
+import {
   nextAffaireReference,
   prisma,
   Prisma,
@@ -5673,6 +5683,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
    * silencieusement les impayés parce qu'aucun facturier n'est connecté laisse
    * croire qu'il n'y en a pas.
    */
+  /**
+   * Contrats actifs examinés par le brief et rendus par la liste.
+   *
+   * Borne DITE : au-delà, le brief pousse un angle mort plutôt que de laisser
+   * un compteur partiel passer pour un total. Un TPE de 3 à 15 salariés n'y
+   * arrivera pas ; la borne est écrite ici plutôt que promise absente.
+   */
+  const CONTRATS_BRIEF_LIMIT = 500;
+
   app.get("/brief", { preHandler: businessRoute }, async (request, reply) => {
     void reply.header("cache-control", "private, no-store");
     const isOwner = request.membershipRole === "owner";
@@ -5726,6 +5745,21 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           impayes: null,
           fecWarnings: null,
           stock: await stockSql(tx),
+          // Les contrats échus ne portent AUCUN montant dans le brief : c'est
+          // du planning, pas de l'argent. Un membre de terrain a besoin de
+          // savoir qu'un passage est dû — le lui cacher ferait du brief un
+          // écran de dirigeant, alors que le travail, c'est lui qui le fait.
+          //
+          // Gaté sur le module `affaires` : matérialiser une échéance CRÉE une
+          // affaire. Inviter à en créer pendant que le brief dit par ailleurs
+          // « affaires : module désactivé » serait se contredire dans le même
+          // écran.
+          contrats: affairesOn
+            ? await tx.contrat.findMany({
+                where: { status: "ACTIF" },
+                take: CONTRATS_BRIEF_LIMIT + 1,
+              })
+            : null,
         };
       }
 
@@ -5798,10 +5832,27 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         impayes: overdue,
         fecWarnings: FecWarnings.parse(lastImport?.warnings ?? []),
         stock: await stockSql(tx),
+        contrats: affairesOn
+          ? await tx.contrat.findMany({
+              where: { status: "ACTIF" },
+              take: CONTRATS_BRIEF_LIMIT + 1,
+            })
+          : null,
       };
     });
 
     if (!affairesOn) blindSpots.push({ area: "affaires", why: "module désactivé" });
+    /*
+     * Ce qui n'est pas calculé est DIT : au-delà de la borne, des échéances
+     * dues disparaîtraient du compteur sans un mot, et le patron lirait
+     * « 4 passages à planifier » là où il y en a cinquante.
+     */
+    if (data.contrats !== null && data.contrats.length > CONTRATS_BRIEF_LIMIT) {
+      blindSpots.push({
+        area: "contrats",
+        why: `plus de ${CONTRATS_BRIEF_LIMIT} contrats actifs : le compte des passages dus est partiel`,
+      });
+    }
     if (!stocksOn) blindSpots.push({ area: "stocks", why: "module désactivé" });
     if (!classeurOn) blindSpots.push({ area: "classeur", why: "module désactivé" });
     if (!isOwner) {
@@ -5960,6 +6011,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
               ),
             },
       stockSousSeuil: data.stock === null ? null : (data.stock[0]?.count ?? 0),
+      // Calculé à la LECTURE, comme le plan de chaque contrat : une valeur
+      // stockée serait fausse dès le lendemain, et fausse en silence.
+      contratsEchus:
+        data.contrats === null
+          ? null
+          : summarizeDueContracts(data.contrats.slice(0, CONTRATS_BRIEF_LIMIT), todayIso),
       blindSpots,
     });
 
@@ -6238,6 +6295,194 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     if (!archived) return reply.code(404).send({ error: "affaire inconnue" });
     void reply.header("cache-control", "private, no-store");
     return serializeAffaire(archived);
+  });
+
+  /*
+   * CONTRATS RÉCURRENTS (4.2, bloc 2) — une brique GÉNÉRIQUE.
+   *
+   * Contrat d'entretien d'un paysagiste, contrat de maintenance, forfait
+   * mensuel de prestation : même mécanique — un départ, un pas, une fin
+   * éventuelle. Écrire trois moteurs parce que le vocabulaire diffère, ce
+   * serait le `if (vertical === …)` que l'ADR-007 interdit, déguisé en feature.
+   *
+   * Même gabarit d'autorisation que les affaires : LECTURE ouverte aux membres
+   * (savoir qu'un passage est dû fait partie du travail de terrain), ÉCRITURE
+   * réservée au dirigeant (le montant par période est une donnée commerciale).
+   */
+  app.get("/contrats", { preHandler: businessRoute }, async (request, reply) => {
+    // Nom de client et montants : jamais de cache partagé.
+    void reply.header("cache-control", "private, no-store");
+    const today = todayCivilIso();
+    const rows = await withTenant(request.tenantId, (tx) =>
+      tx.contrat.findMany({
+        orderBy: [{ status: "asc" }, { label: "asc" }],
+        take: CONTRATS_BRIEF_LIMIT,
+      }),
+    );
+    return { contrats: rows.map((row) => serializeContrat(row, today)) };
+  });
+
+  app.post("/contrats", { preHandler: ownerRoute }, async (request, reply) => {
+    const body = ContratCreateInput.safeParse(request.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: "invalid body" });
+    // Un terme antérieur au départ ne décrit aucun contrat : le refuser tout de
+    // suite vaut mieux qu'un plan vide que personne ne saurait expliquer.
+    if (
+      body.data.startDate &&
+      body.data.endDate &&
+      body.data.endDate < body.data.startDate
+    ) {
+      return reply.code(400).send({ error: "la fin précède le début" });
+    }
+    const today = todayCivilIso();
+    const created = await withTenant(request.tenantId, (tx) =>
+      tx.contrat.create({
+        data: {
+          tenantId: request.tenantId,
+          ...toContratData(body.data),
+          label: body.data.label,
+          cadence: body.data.cadence,
+        },
+      }),
+    );
+    void reply.header("cache-control", "private, no-store");
+    return reply.code(201).send(serializeContrat(created, today));
+  });
+
+  app.patch("/contrats/:id", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid id" });
+    const body = ContratUpdateInput.safeParse(request.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: "invalid body" });
+
+    const today = todayCivilIso();
+    const updated = await withTenant(request.tenantId, async (tx) => {
+      const existing = await tx.contrat.findUnique({ where: { id: params.data.id } });
+      if (!existing) return null;
+      const startDate = body.data.startDate ?? toCivilDate(existing.startDate);
+      const endDate =
+        body.data.endDate === undefined ? toCivilDate(existing.endDate) : body.data.endDate;
+      if (startDate && endDate && endDate < startDate) return "incoherent" as const;
+      return tx.contrat.update({
+        where: { id: params.data.id },
+        data: toContratData(body.data),
+      });
+    });
+    if (updated === null) return reply.code(404).send({ error: "contrat inconnu" });
+    if (updated === "incoherent") {
+      return reply.code(400).send({ error: "la fin précède le début" });
+    }
+    void reply.header("cache-control", "private, no-store");
+    return serializeContrat(updated, today);
+  });
+
+  /*
+   * Matérialiser les échéances dues en AFFAIRES.
+   *
+   * JAMAIS AUTOMATIQUE, et c'est le point du ticket. Un générateur de fond qui
+   * créerait des chantiers tout seul remplirait la base de travail que
+   * personne n'a décidé de faire — et le patron découvrirait douze affaires un
+   * lundi matin sans savoir d'où elles viennent. L'assistant PRÉPARE (le plan
+   * est calculé et affiché), l'humain VALIDE (il clique ici).
+   *
+   * IDEMPOTENT par `lastOccurrenceDate` : deux clics ne créent pas deux fois la
+   * même intervention. La borne du moteur (`MAX_DUE_OCCURRENCES`) tient aussi
+   * ici, et la troncature est DITE dans la réponse.
+   */
+  app.post("/contrats/:id/occurrences", { preHandler: ownerRoute }, async (request, reply) => {
+    const params = z.object({ id: Uuid }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid id" });
+    const today = todayCivilIso();
+    const year = Number(today.slice(0, 4));
+
+    const outcome = await withTenant(
+      request.tenantId,
+      async (tx) => {
+        /*
+         * VERROU DE LIGNE avant toute lecture, et ce n'est pas de la ceinture
+         * et bretelles.
+         *
+         * `withTenant` n'impose aucun niveau d'isolation : on est en READ
+         * COMMITTED. Deux POST parallèles — un double-clic suffit — lisaient
+         * tous deux `lastOccurrenceDate = null` et créaient DEUX FOIS les
+         * mêmes interventions. Le verrou du compteur de références sérialise
+         * les requêtes mais ne rafraîchit pas un contrat déjà lu, donc il ne
+         * protégeait rien ici. Le test « deux clics » est séquentiel : il ne
+         * pouvait pas voir ce cas.
+         *
+         * `FOR UPDATE` fait attendre la seconde transaction, qui relit alors
+         * un `lastOccurrenceDate` à jour et ne trouve plus rien à faire.
+         */
+        const locked = await tx.$queryRaw<{ id: string }[]>`
+          SELECT id FROM contrats WHERE id = ${params.data.id}::uuid FOR UPDATE`;
+        if (locked.length === 0) return { code: 404 as const, error: "contrat inconnu" };
+        const contrat = await tx.contrat.findUnique({ where: { id: params.data.id } });
+        if (!contrat) return { code: 404 as const, error: "contrat inconnu" };
+        // Un contrat suspendu ou terminé ne génère rien : le refus est une
+        // RÉPONSE motivée, pas un 200 avec une liste vide.
+        if (contrat.status !== "ACTIF") {
+          return { code: 409 as const, error: `contrat ${contrat.status.toLowerCase()}` };
+        }
+        const serialized = serializeContrat(contrat, today);
+        const due = serialized.plan.due;
+        if (due.length === 0) {
+          return { code: 200 as const, created: [], truncated: false, reason: null };
+        }
+
+        const created: { id: string; reference: string; startDate: string }[] = [];
+        for (const occurrence of due) {
+          const reference = await nextAffaireReference(tx, request.tenantId, year);
+          const affaire = await tx.affaire.create({
+            data: {
+              tenantId: request.tenantId,
+              reference,
+              // Le LIBELLÉ porte la date : « Entretien Dupont — 2026-07-15 ».
+              // Douze affaires au même nom seraient indiscernables dans une
+              // liste, et le patron ne saurait pas laquelle il vient de faire.
+              label: `${contrat.label} — ${occurrence}`,
+              clientName: contrat.clientName,
+              contratId: contrat.id,
+              status: "ACCEPTEE",
+              // Montant de LA PÉRIODE, pas du contrat : c'est ce qui empêche
+              // la marge de la première intervention d'avaler l'année entière.
+              quotedAmountCents: contrat.amountCents,
+              vatRateBps: contrat.vatRateBps,
+              startDate: toDbDateRequired(occurrence),
+            },
+          });
+          created.push({ id: affaire.id, reference, startDate: occurrence });
+        }
+
+        // `lastOccurrenceDate` avance jusqu'à la DERNIÈRE réellement créée :
+        // en cas de troncature, le reste sera rattrapé au clic suivant plutôt
+        // que perdu.
+        const derniere = created[created.length - 1];
+        if (derniere) {
+          await tx.contrat.update({
+            where: { id: contrat.id },
+            data: { lastOccurrenceDate: toDbDateRequired(derniere.startDate) },
+          });
+        }
+
+        return {
+          code: 200 as const,
+          created,
+          truncated: serialized.plan.truncated,
+          reason: serialized.plan.reason,
+        };
+      },
+      { timeoutMs: 30_000 },
+    );
+
+    if (outcome.code !== 200) {
+      return reply.code(outcome.code).send({ error: outcome.error });
+    }
+    void reply.header("cache-control", "private, no-store");
+    return reply.send({
+      created: outcome.created,
+      truncated: outcome.truncated,
+      reason: outcome.reason,
+    });
   });
 
   /*

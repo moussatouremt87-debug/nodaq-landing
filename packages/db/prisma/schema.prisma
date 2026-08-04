@@ -59,6 +59,7 @@ model Tenant {
   affaires             Affaire[]
   affaireCounters      AffaireCounter[]
   affaireImputations   AffaireImputation[]
+  contrats             Contrat[]
 
   @@map("tenants")
   @@schema("public")
@@ -1197,8 +1198,13 @@ model Affaire {
   actualEndDate          DateTime?           @map("actual_end_date") @db.Date
   createdAt              DateTime            @default(now()) @map("created_at")
   updatedAt              DateTime            @default(now()) @updatedAt @map("updated_at")
+  /// Contrat récurrent (4.2 bloc 2) dont cette affaire matérialise une
+  /// échéance — NULLABLE, sans exception (règle de structure n°1) : la
+  /// majorité des affaires ne viennent d'aucun contrat.
+  contratId              String?             @map("contrat_id") @db.Uuid
   tenant                 Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   prospect               Prospect?           @relation(fields: [tenantId, prospectId], references: [tenantId, id], onDelete: SetNull)
+  contrat                Contrat?            @relation(fields: [tenantId, contratId], references: [tenantId, id], onDelete: SetNull)
   imputations            AffaireImputation[]
   classeurDocuments      ClasseurDocument[]
   fecInvoices            FecInvoice[]
@@ -1211,6 +1217,7 @@ model Affaire {
   @@unique([tenantId, id])
   @@index([tenantId, status])
   @@index([tenantId, prospectId])
+  @@index([tenantId, contratId])
   @@map("affaires")
   @@schema("public")
 }
@@ -1277,5 +1284,48 @@ model AffaireImputation {
   @@index([tenantId, affaireId, revokedAt])
   @@index([tenantId, targetType, targetId])
   @@map("affaire_imputations")
+  @@schema("public")
+}
+
+/// Ticket 4.2 bloc 2 — contrats récurrents (entretien, maintenance, forfait
+/// mensuel) : le vocabulaire vient du pack vertical, jamais du code. Un
+/// contrat ne CRÉE aucune affaire lui-même — `lastOccurrenceDate` ne fait que
+/// tracer la dernière échéance déjà matérialisée en affaire, pour que le
+/// moteur de génération sache où reprendre. `amountCents` est le montant HT
+/// PAR PÉRIODE (mensuel/trimestriel/semestriel/annuel selon `cadence`),
+/// JAMAIS le total du contrat — un contrat récurrent n'a pas de fin connue
+/// tant qu'il n'est pas résilié. `@@unique([tenantId, id])` est la cible de
+/// la clé étrangère composite portée par `affaires.contrat_id` (même
+/// mécanisme que `affaires`/`affaire_imputations` en 4.1) : sans elle,
+/// l'intégrité référentielle (qui contourne la RLS) laisserait une affaire
+/// d'un tenant pointer le contrat d'un AUTRE tenant.
+model Contrat {
+  id                 String    @id @default(uuid()) @db.Uuid
+  tenantId           String    @map("tenant_id") @db.Uuid
+  label              String
+  clientName         String?   @map("client_name")
+  /// 'mensuel' | 'trimestriel' | 'semestriel' | 'annuel' — validé côté app par
+  /// Zod, défense en profondeur via CHECK en base.
+  cadence            String
+  /// Montant HT PAR PÉRIODE, en centimes — jamais le total du contrat.
+  amountCents        BigInt?   @map("amount_cents")
+  vatRateBps         Int?      @map("vat_rate_bps")
+  startDate          DateTime? @map("start_date") @db.Date
+  endDate            DateTime? @map("end_date") @db.Date
+  /// Dernière échéance déjà matérialisée en affaire — repère de reprise pour
+  /// le moteur de génération, jamais recalculée a posteriori.
+  lastOccurrenceDate DateTime? @map("last_occurrence_date") @db.Date
+  /// 'ACTIF' | 'SUSPENDU' | 'TERMINE' — validé côté app par Zod, défense en
+  /// profondeur via CHECK en base.
+  status             String    @default("ACTIF")
+  notes              String?
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
+  tenant             Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  affaires           Affaire[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, status])
+  @@map("contrats")
   @@schema("public")
 }

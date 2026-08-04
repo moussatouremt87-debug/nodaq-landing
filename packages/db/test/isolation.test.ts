@@ -67,6 +67,8 @@ let affaireAId: string;
 let affaireBId: string;
 let imputationAId: string;
 let imputationBId: string;
+let contratAId: string;
+let contratBId: string;
 let prospectAId: string;
 let prospectBId: string;
 let interactionAId: string;
@@ -110,6 +112,9 @@ beforeAll(async () => {
   await admin.affaireImputation.deleteMany();
   await admin.affaire.deleteMany();
   await admin.affaireCounter.deleteMany();
+  // 4.2 bloc 2 : les affaires référençant un contrat ont déjà été purgées
+  // ci-dessus (ON DELETE SET NULL de toute façon, mais l'ordre reste clair).
+  await admin.contrat.deleteMany();
   // FK order: chunks before documents.
   await admin.documentChunk.deleteMany();
   await admin.document.deleteMany();
@@ -756,6 +761,37 @@ beforeAll(async () => {
   imputationAId = imputationA.id;
   imputationBId = imputationB.id;
 
+  // Contrats récurrents (4.2 bloc 2) : entretien, maintenance, forfait
+  // mensuel. label/clientName sont des placeholders de test, jamais une
+  // vraie donnée commerciale client.
+  const contratA = await withTenant(tenantA, (tx) =>
+    tx.contrat.create({
+      data: {
+        tenantId: tenantA,
+        label: "Entretien annuel chaudière",
+        clientName: "Client A",
+        cadence: "mensuel",
+        amountCents: 15_000n,
+        vatRateBps: 2000,
+        status: "ACTIF",
+      },
+    }),
+  );
+  const contratB = await withTenant(tenantB, (tx) =>
+    tx.contrat.create({
+      data: {
+        tenantId: tenantB,
+        label: "Maintenance espaces verts",
+        clientName: "Client B",
+        cadence: "trimestriel",
+        amountCents: 45_000n,
+        status: "ACTIF",
+      },
+    }),
+  );
+  contratAId = contratA.id;
+  contratBId = contratB.id;
+
   // Prospects (2.12) : données personnelles de TIERS non clients. Les noms de
   // test restent fictifs — jamais de PII réelle dans un jeu de test.
   const prospectA = await withTenant(tenantA, (tx) =>
@@ -1037,6 +1073,14 @@ describe("garde-fou préalable", () => {
   it("la RLS est activée ET forcée sur tax_deadlines", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'tax_deadlines'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("la RLS est activée ET forcée sur contrats", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'contrats'
     `;
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
@@ -2096,6 +2140,143 @@ describe("isolation tenant (RLS) — affaires et imputations (4.1)", () => {
   });
 });
 
+describe("isolation tenant (RLS) — contrats (4.2 bloc 2)", () => {
+  it("test 1 (contrats) — withTenant(A) ne voit QUE le contrat de A", async () => {
+    const contrats = await withTenant(tenantA, (tx) => tx.contrat.findMany());
+    expect(contrats).toHaveLength(1);
+    expect(contrats[0]?.id).toBe(contratAId);
+    // Le libellé du contrat du voisin est une information commerciale.
+    expect(contrats.some((contrat) => contrat.label === "Maintenance espaces verts")).toBe(false);
+  });
+
+  it("test 2 (contrats) — sans contexte tenant, aucune ligne", async () => {
+    expect(await prisma.contrat.findMany()).toHaveLength(0);
+  });
+
+  it("test 3 (contrats) — lire le contrat de B depuis le contexte A renvoie vide", async () => {
+    const stolen = await withTenant(tenantA, (tx) =>
+      tx.contrat.findUnique({ where: { id: contratBId } }),
+    );
+    expect(stolen).toBeNull();
+  });
+
+  it("test 4 (contrats) — écrire chez B depuis le contexte A est refusé (WITH CHECK)", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.contrat.create({
+          data: { tenantId: tenantB, label: "Injection", cadence: "mensuel" },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 5 (contrats) — une cadence hors catalogue est refusée par le CHECK", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.contrat.create({
+          data: { tenantId: tenantA, label: "Cadence inventée", cadence: "hebdomadaire" },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 6 (contrats) — un statut inconnu est refusé par le CHECK", async () => {
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.contrat.create({
+          data: {
+            tenantId: tenantA,
+            label: "Statut inventé",
+            cadence: "mensuel",
+            status: "RESILIE_PEUT_ETRE",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 7 (contrats) — un montant PAR PÉRIODE négatif est refusé par le CHECK", async () => {
+    // Un montant négatif fabriquerait un chiffre d'affaires récurrent inventé.
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.contrat.create({
+          data: {
+            tenantId: tenantA,
+            label: "Montant négatif",
+            cadence: "mensuel",
+            amountCents: -1_000n,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 8 (contrats) — une affaire ne peut pas pointer le contrat d'un AUTRE tenant", async () => {
+    // Même mécanisme que le test 7bis (prospects) et 7 quater (F6) : la RLS ne
+    // contraint que tenant_id, l'intégrité référentielle la contourne par
+    // conception Postgres. C'est la clé étrangère COMPOSITE (tenant_id,
+    // contrat_id) qui rend le croisement impossible.
+    await expect(
+      withTenant(tenantA, (tx) =>
+        tx.affaire.create({
+          data: {
+            tenantId: tenantA,
+            reference: "2026-888",
+            label: "Contrat volé",
+            contratId: contratBId,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("test 9 (contrats) — le rattachement d'une affaire à un contrat reste FACULTATIF", async () => {
+    // Règle de structure n°1 : tout rattachement est nullable, sans exception.
+    // La majorité des affaires ne viennent d'aucun contrat récurrent.
+    const created = await withTenant(tenantA, (tx) =>
+      tx.affaire.create({
+        data: { tenantId: tenantA, reference: "2026-889", label: "Sans contrat" },
+      }),
+    );
+    expect(created.contratId).toBeNull();
+    await withTenant(tenantA, (tx) => tx.affaire.delete({ where: { id: created.id } }));
+  });
+
+  it("test 10 (contrats) — supprimer un contrat DÉTACHE l'affaire, sans la détruire ni casser tenant_id", async () => {
+    // La preuve du piège corrigé par la LISTE DE COLONNES de la migration :
+    // `ON DELETE SET NULL` sur une clé composite annule TOUTES les colonnes
+    // référençantes si elle n'est pas restreinte à "contrat_id" — y compris
+    // tenant_id, qui est NOT NULL, ce qui transformait la suppression en
+    // RESTRICT déguisé en erreur 500 (voir `20260803190000_set_null_column_lists`).
+    const jetable = await withTenant(tenantA, (tx) =>
+      tx.contrat.create({
+        data: { tenantId: tenantA, label: "Contrat jetable", cadence: "annuel" },
+      }),
+    );
+    const affaireLiee = await withTenant(tenantA, (tx) =>
+      tx.affaire.create({
+        data: {
+          tenantId: tenantA,
+          reference: "2026-890",
+          label: "Échéance du contrat jetable",
+          contratId: jetable.id,
+        },
+      }),
+    );
+
+    await withTenant(tenantA, (tx) => tx.contrat.delete({ where: { id: jetable.id } }));
+
+    const after = await withTenant(tenantA, (tx) =>
+      tx.affaire.findUnique({ where: { id: affaireLiee.id } }),
+    );
+    expect(after).not.toBeNull();
+    expect(after?.contratId).toBeNull();
+    expect(after?.tenantId).toBe(tenantA);
+
+    await withTenant(tenantA, (tx) => tx.affaire.delete({ where: { id: affaireLiee.id } }));
+  });
+});
+
 describe("isolation tenant (RLS) — cost_entries (2.8)", () => {
   it("test 1 (cost_entries) — withTenant(A) ne voit QUE la charge de A", async () => {
     const costs = await withTenant(tenantA, (tx) => tx.costEntry.findMany());
@@ -2297,6 +2478,20 @@ describe("preuve — la protection vient de la RLS, pas d'un WHERE applicatif", 
     }
     const counters = await withTenant(tenantA, (tx) => tx.affaireCounter.findMany());
     expect(counters.every((counter) => counter.tenantId === tenantA)).toBe(true);
+  });
+
+  it("policy désactivée sur contrats => la fuite se produit aussi (les contrats des deux tenants)", async () => {
+    await admin.$executeRawUnsafe(`ALTER TABLE "contrats" DISABLE ROW LEVEL SECURITY`);
+    try {
+      const leaked = await withTenant(tenantA, (tx) => tx.contrat.findMany());
+      expect(leaked.some((contrat) => contrat.tenantId === tenantB)).toBe(true);
+      expect((await prisma.contrat.findMany()).length).toBeGreaterThan(1);
+    } finally {
+      await admin.$executeRawUnsafe(`ALTER TABLE "contrats" ENABLE ROW LEVEL SECURITY`);
+      await admin.$executeRawUnsafe(`ALTER TABLE "contrats" FORCE ROW LEVEL SECURITY`);
+    }
+    const contrats = await withTenant(tenantB, (tx) => tx.contrat.findMany());
+    expect(contrats).toHaveLength(1);
   });
 
   it("policy désactivée sur cost_entries => la fuite se produit aussi (les charges des deux tenants)", async () => {

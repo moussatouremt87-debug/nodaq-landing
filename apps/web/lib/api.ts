@@ -1186,6 +1186,65 @@ export const RegulatoryWatch = z.object({
 });
 export type RegulatoryWatch = z.infer<typeof RegulatoryWatch>;
 
+/* Contrats récurrents (4.2 bloc 2). Le PLAN est calculé par l'API à la lecture :
+ * l'écran ne refait aucun calcul de date, sinon deux moteurs divergeraient. */
+export const ContratPlan = z.object({
+  due: z.array(z.string()),
+  next: z.string().nullable(),
+  truncated: z.boolean(),
+  ended: z.boolean(),
+  reason: z.string().nullable(),
+});
+
+export const Contrat = z.object({
+  id: z.string(),
+  label: z.string(),
+  clientName: z.string().nullable(),
+  cadence: z.string(),
+  amountCents: z.number().nullable(),
+  startDate: z.string().nullable(),
+  endDate: z.string().nullable(),
+  lastOccurrenceDate: z.string().nullable(),
+  status: z.string(),
+  plan: ContratPlan,
+});
+export type Contrat = z.infer<typeof Contrat>;
+
+export const listContrats = (): Promise<{ contrats: Contrat[] }> =>
+  call(z.object({ contrats: z.array(Contrat) }), "/contrats");
+
+export const createContrat = (input: {
+  label: string;
+  clientName?: string | null;
+  cadence: string;
+  amountCents?: number | null;
+  startDate?: string | null;
+}): Promise<Contrat> =>
+  call(Contrat, "/contrats", { method: "POST", body: JSON.stringify(input) });
+
+export const setContratStatus = (id: string, status: string): Promise<Contrat> =>
+  call(Contrat, `/contrats/${id}`, { method: "PATCH", body: JSON.stringify({ status }) });
+
+/** Matérialise les échéances dues en affaires. JAMAIS automatique : un clic. */
+export const materialiserContrat = (
+  id: string,
+): Promise<{
+  created: { id: string; reference: string; startDate: string }[];
+  truncated: boolean;
+  reason: string | null;
+}> =>
+  call(
+    z.object({
+      created: z.array(
+        z.object({ id: z.string(), reference: z.string(), startDate: z.string() }),
+      ),
+      truncated: z.boolean(),
+      reason: z.string().nullable(),
+    }),
+    `/contrats/${id}/occurrences`,
+    { method: "POST" },
+  );
+
 export const getComplianceProfile = (): Promise<ComplianceProfile> =>
   call(ComplianceProfile, "/reglementaire/profil");
 

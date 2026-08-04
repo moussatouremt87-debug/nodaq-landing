@@ -62,3 +62,4 @@ export * from "./moduleCatalog.js";
 export * from "./pendingActionCatalog.js";
 export * from "./affaireMargin.js";
 export * from "./verticalPacks.js";
+export * from "./recurrence.js";
