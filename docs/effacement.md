@@ -214,12 +214,91 @@ persiste non plus — c'est une réponse HTTP, pas une tâche. Une suppression
 irréversible mérite sa confirmation, son écran et son ticket ; ce ticket-là devra
 porter l'affichage du rapport, sans quoi la garde reste théorique.
 
-**Les transcriptions d'agent.** `agent_conversations` persiste les échanges
-complets de l'employé virtuel, qui peuvent citer un chiffre du journal, un nom de
-fournisseur ou un nom de prospect. Aucune des trois purges n'y touche. C'est une
-limite connue, et elle est d'une autre nature : purger une conversation, c'est
-décider ce qu'il advient d'un fil de discussion dont une partie n'a rien à voir
-avec la source effacée. Son propre ticket.
+*(La limite sur les transcriptions d'agent, qui figurait ici, est traitée
+ci-dessous.)*
+
+## Les transcriptions d'agent : effacer une source les efface TOUTES
+
+`agent_conversations.messages` porte le fil **complet**, résultats d'outils
+compris. Un `analyze_margin` y dépose des noms de chantiers et des montants, un
+`list_overdue_invoices` des noms de clients et ce qu'ils doivent, une recherche
+de prospection des coordonnées. C'est la donnée la plus concentrée du produit,
+dans sa forme la moins structurée — et aucune des trois purges n'y touchait.
+
+### Pourquoi toutes, et pas « celles qui citent la source »
+
+Aucun lien n'existe entre un transcript et une source : les résultats d'outils
+sont des chaînes opaques, jamais indexées. Les retrouver imposerait de chercher
+un nom dans du texte libre — exactement l'inférence que la doctrine interdit, et
+en plus peu fiable. Un homonyme, une troncature, une reformulation du modèle, et
+l'effacement se croit complet en laissant la donnée.
+
+*Le coût des deux erreurs est asymétrique.* Ce qu'on détruit en trop : la
+possibilité de **reprendre** une conversation. Ce qu'on laisserait en moins : le
+nom d'une personne qui vient d'exercer son droit à l'effacement.
+
+Et le premier coûte moins qu'il n'y paraît — voir ci-dessous.
+
+### Ce que « reprendre une conversation » vaut réellement
+
+L'identifiant de conversation ne vit que dans un `useRef` de l'écran de chat. Il
+n'est **persisté nulle part** : aucune route ne liste les conversations, aucun
+écran n'en affiche l'historique. Un simple rechargement de page rend donc le
+transcript **définitivement inatteignable** — plus personne, jamais, ne pourra le
+lire par le produit.
+
+Une donnée que personne ne peut plus lire et que rien n'efface n'est pas un
+historique : c'est un dépôt.
+
+### Les trois purges le disent
+
+`DELETE /connectors/fec` et `DELETE /prospects/:id` rendent
+`conversationsEffacees` : effacer les conversations en cours sans un mot ferait
+croire à une panne du chat au prochain message. La suppression d'une pièce du
+classeur garde son `204` — même raisonnement que pour les propositions dérivées,
+une pièce n'en fait naître qu'une poignée et l'écran se rafraîchit seul.
+
+La purge est un `deleteMany({})` **sans clause de tenant** : elle ne tient que
+par la RLS de `withTenant`. Un test d'isolation le vérifie, et il rougit si la
+purge passe un jour par le client admin — la tentation d'un job « global ».
+
+## Rétention des transcriptions (art. 5.1.e)
+
+Effacer une source ne suffit pas : une conversation dont *aucune* source n'est
+jamais effacée restait en base à vie. `CONVERSATION_RETENTION_DAYS` (30 jours,
+config versionnée datée dans `packages/shared/src/conversationRetention.ts`) lui
+donne un terme, et le balayage quotidien existant s'en charge.
+
+**Trente jours est délibérément généreux** au regard de l'usage réel : la reprise
+meurt avec l'onglet, donc la fenêtre utile se compte en heures. La marge couvre
+un poste laissé allumé, un congé, une reprise tardive — sans qu'aucune décision
+de conservation ne repose sur une supposition. Le bon réglage se verra le jour où
+le produit offrira un historique : la fenêtre deviendra alors un vrai choix
+produit, pas une borne de sécurité.
+
+**Supprimée, pas réduite** — l'inverse du choix fait sur la file de validation.
+Une `pending_action` garde sa ligne parce qu'elle porte la trace d'une
+**décision** humaine. Une transcription n'en porte aucune : les actions qu'elle a
+préparées vivent dans la file avec leur propre trace, et la métadonnée
+d'exécution (outils appelés, latence, issue) est déjà tracée hors base. Garder
+une ligne vidée n'apporterait qu'un compteur — une donnée sans finalité, ce que
+l'article 5.1.e interdit précisément.
+
+**L'âge se compte sur la dernière activité**, jamais sur la création : le runtime
+réécrit la ligne à chaque tour, donc une conversation entretenue depuis des mois
+est *active*, pas ancienne. La dater de son premier message la supprimerait sous
+les doigts de l'utilisateur.
+
+**Paginé comme le reste.** Un `deleteMany` sur un arriéré de dizaines de milliers
+de fils serait la plus longue transaction du produit, et son rollback annulerait
+le passage entier — donc les tenants les plus en retard seraient exactement ceux
+qu'on ne balaierait jamais. Ici la pagination n'a pas besoin de curseur : chaque
+page retire ses lignes, donc la suivante avance par construction.
+
+**Le compteur du cockpit change de sens.** `kpis.conversations` compte désormais
+les conversations *récentes*, pas un cumul. Aucun écran ne l'affiche aujourd'hui
+— c'est la seule raison pour laquelle il n'est pas relibellé, et c'est écrit dans
+le code.
 
 ## Tests
 

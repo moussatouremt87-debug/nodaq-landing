@@ -1404,6 +1404,37 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
    *
    * Même patron que `rejectProspectDrafts` (2.12), pour la même raison.
    */
+  /*
+   * TRANSCRIPTIONS D'AGENT — effacer une source les efface TOUTES (art. 17).
+   *
+   * `agent_conversations.messages` porte le fil complet, résultats d'outils
+   * compris : un `analyze_margin` y dépose des noms de chantiers et des
+   * montants, un `list_overdue_invoices` des noms de clients et ce qu'ils
+   * doivent, une recherche de prospection des coordonnées. C'est la donnée la
+   * plus concentrée du produit, dans sa forme la moins structurée.
+   *
+   * POURQUOI TOUTES, ET PAS « CELLES QUI CITENT LA SOURCE ». Aucun lien
+   * n'existe entre un transcript et une source : les résultats d'outils sont
+   * des chaînes opaques, jamais indexées. Les retrouver imposerait de chercher
+   * un nom dans du texte libre — exactement l'inférence que la doctrine
+   * interdit, et en plus peu fiable : un homonyme, une troncature, une
+   * reformulation du modèle, et l'effacement se croit complet en laissant la
+   * donnée.
+   *
+   * Le coût des deux erreurs est très asymétrique. Ce qu'on détruit en trop :
+   * la possibilité de REPRENDRE une conversation — et son identifiant ne vit
+   * que dans un `useRef` de l'écran de chat, donc un simple rechargement de
+   * page l'a déjà perdue. Ce qu'on laisserait en moins : le nom d'une personne
+   * qui vient d'exercer son droit à l'effacement. On efface.
+   *
+   * DANS LA MÊME TRANSACTION que la purge, comme le reste : une source
+   * effacée avec ses dérivés restants est le pire des deux mondes.
+   */
+  async function purgeAgentTranscripts(tx: Prisma.TransactionClient): Promise<number> {
+    const { count } = await tx.agentConversation.deleteMany({});
+    return count;
+  }
+
   async function reduceDerivedProposals(
     tx: Prisma.TransactionClient,
     source: { readonly label: string; readonly sourceRefPrefix: string },
@@ -1484,7 +1515,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           where: { tenantId: request.tenantId, source: "fec" },
         });
         await tx.connector.deleteMany({ where: { type: FEC_CONNECTOR_TYPE } });
-        return { imports: count, proposals, charges: charges.count };
+        const transcripts = await purgeAgentTranscripts(tx);
+        return { imports: count, proposals, charges: charges.count, transcripts };
       });
       if (outcome === null) return reply.code(404).send({ error: "no fec import" });
       // Une purge qui rejette 200 propositions sans un mot contredirait le
@@ -1495,6 +1527,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         propositionsRejetees: outcome.proposals.rejected,
         propositionsReduites: outcome.proposals.reduced,
         chargesDerivees: outcome.charges,
+        // Une purge qui efface les conversations en cours sans le dire ferait
+        // croire à une panne du chat au prochain message.
+        conversationsEffacees: outcome.transcripts,
       });
     },
   );
@@ -2027,6 +2062,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           label: "pièce effacée du classeur",
           sourceRefPrefix: `classeur:${id}`,
         });
+        /*
+         * Le transcript peut porter l'OCR de CETTE pièce — un nom de
+         * fournisseur, un montant, un numéro de facture — déposé là par
+         * l'outil qui l'a lue. Même raisonnement que pour la proposition
+         * dérivée, poussé jusqu'au bout : effacer la photo en laissant sa
+         * transcription est un effacement partiel qui se croit complet.
+         */
+        await purgeAgentTranscripts(tx);
         await tx.classeurDocument.deleteMany({ where: { id, tenantId: request.tenantId } });
         return { deleted: true };
       });
@@ -2309,6 +2352,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     );
     const pendingActions: Record<string, number> = {};
     for (const row of byStatus) pendingActions[row.status] = row._count._all;
+    /*
+     * Conversations RÉCENTES, pas un cumul : la rétention (art. 5.1.e)
+     * supprime les transcriptions dormantes, donc ce nombre redescend. Le
+     * lire comme « conversations depuis toujours » en ferait un chiffre qui
+     * baisse sans raison visible — et aucun écran ne l'affiche aujourd'hui,
+     * ce qui est la seule raison pour laquelle il n'est pas relibellé.
+     */
     const conversations = await withTenant(request.tenantId, (tx) => tx.agentConversation.count());
 
     // Alertes stock (3.2) — métadonnée non financière, visible de tout membre.
@@ -5582,6 +5632,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
          * tiers en silence. Le nombre ne prétend rien sur la personne
          * effacée : il dit combien de contrats l'owner doit relire lui-même.
          */
+        const transcripts = await purgeAgentTranscripts(tx);
         const deleted = await tx.prospect.deleteMany({ where: { id: params.data.id } });
         /*
          * COMPTÉ APRÈS la suppression, et l'ordre porte la justesse du nombre.
@@ -5603,6 +5654,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           contratsAnonymises,
           contratsConserves,
           contratsSansFiche,
+          transcripts,
         };
       });
       if (outcome.count === 0) return reply.code(404).send({ error: "prospect not found" });
@@ -5628,6 +5680,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         // Ce que l'effacement NE PEUT PAS atteindre — sans quoi « effacé » se
         // lirait « il ne reste rien ».
         contratsSansFiche: outcome.contratsSansFiche,
+        conversationsEffacees: outcome.transcripts,
       };
     },
   );

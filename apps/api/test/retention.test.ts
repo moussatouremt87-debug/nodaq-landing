@@ -419,3 +419,86 @@ describe("le balayage AVANCE", () => {
     expect((await read(tenantC, cible)).status).toBe("pending");
   }, 60_000);
 });
+
+/*
+ * TRANSCRIPTIONS D'AGENT (art. 5.1.e).
+ *
+ * `agent_conversations.messages` porte le fil complet, résultats d'outils
+ * compris — la donnée la plus concentrée du produit, dans sa forme la moins
+ * structurée. Et rien ne l'effaçait : son seul usage est de REPRENDRE la
+ * conversation, or l'identifiant ne vit que dans un `useRef` de l'écran de
+ * chat. Un rechargement de page rendait la ligne illisible à vie.
+ */
+describe("transcriptions d'agent — une conversation dormante n'est plus une conversation", () => {
+  async function seedConversation(tenantId: string, at: Date): Promise<string> {
+    const created = await withTenant(tenantId, (tx) =>
+      tx.agentConversation.create({
+        data: {
+          tenantId,
+          employee: "compta",
+          messages: [
+            { role: "user", content: "mes impayés ?" },
+            { role: "tool", content: '{"client":"SARL Dupont","dueCents":450000}' },
+          ],
+        },
+      }),
+    );
+    await admin.$executeRaw`UPDATE agent_conversations SET updated_at = ${at} WHERE id = ${created.id}::uuid`;
+    return created.id;
+  }
+
+  const vit = async (tenantId: string, id: string): Promise<boolean> =>
+    (await withTenant(tenantId, (tx) => tx.agentConversation.findUnique({ where: { id } }))) !==
+    null;
+
+  it("une conversation dormante est SUPPRIMÉE, et le passage le compte", async () => {
+    const vieille = await seedConversation(tenantD, ilYA(40));
+
+    const result = await sweepTenantRetention(tenantD, NOW);
+
+    expect(result.conversationsSupprimees).toBeGreaterThanOrEqual(1);
+    expect(await vit(tenantD, vieille)).toBe(false);
+  }, 60_000);
+
+  it("une conversation ACTIVE survit — l'âge se compte sur la dernière activité", async () => {
+    /*
+     * La dater de sa création la supprimerait sous les doigts de
+     * l'utilisateur : le runtime réécrit la ligne à chaque tour, donc une
+     * conversation entretenue depuis des mois est ACTIVE, pas ancienne.
+     */
+    const recente = await seedConversation(tenantD, ilYA(2));
+
+    await sweepTenantRetention(tenantD, NOW);
+
+    expect(await vit(tenantD, recente)).toBe(true);
+  }, 60_000);
+
+  it("le balayage ne franchit JAMAIS la frontière de tenant", async () => {
+    /*
+     * La suppression est un `DELETE` sans clause de tenant : elle ne tient
+     * QUE par la RLS de `withTenant`. Si ce balayage passait un jour par le
+     * client admin — la tentation d'un job « global » —, il viderait les
+     * conversations de tous les tenants en une nuit, sans un mot.
+     */
+    const voisine = await seedConversation(tenantC, ilYA(40));
+    const cible = await seedConversation(tenantD, ilYA(40));
+
+    await sweepTenantRetention(tenantD, NOW);
+
+    expect(await vit(tenantD, cible)).toBe(false);
+    expect(await vit(tenantC, voisine)).toBe(true);
+  }, 60_000);
+
+  it("l'horizon est celui de la règle partagée, pas un nombre écrit ici", async () => {
+    // Un seuil recopié dans la route dériverait du seuil documenté sans que
+    // personne ne le voie : le passage prend le sien de `@nodaq/shared`.
+    const { CONVERSATION_RETENTION_DAYS } = await import("@nodaq/shared");
+    const juste = await seedConversation(tenantD, ilYA(CONVERSATION_RETENTION_DAYS - 1));
+    const juste2 = await seedConversation(tenantD, ilYA(CONVERSATION_RETENTION_DAYS + 1));
+
+    await sweepTenantRetention(tenantD, NOW);
+
+    expect(await vit(tenantD, juste)).toBe(true);
+    expect(await vit(tenantD, juste2)).toBe(false);
+  }, 60_000);
+});
