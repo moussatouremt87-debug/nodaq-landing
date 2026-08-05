@@ -493,7 +493,8 @@ describe("gardes de la revue — un coût ne s'invente pas", () => {
       url: `/classeur/documents/${document.id}`,
       headers: { cookie: ownerCookie },
     });
-    expect(deleted.statusCode).toBe(204);
+    // 200 depuis que la route dit combien de transcriptions elle a effacées.
+    expect(deleted.statusCode).toBe(200);
 
     const fiche = await app.inject({
       method: "GET",

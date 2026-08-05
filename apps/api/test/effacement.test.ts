@@ -28,6 +28,7 @@ let orgA: string;
  * distingue « invisible parce qu'un autre tenant la détient » de
  * « inexistante ». */
 let autreCookie: string;
+let orgAutre: string;
 let prospectAutreTenant: string;
 
 const RUN = Date.now().toString(36);
@@ -70,12 +71,13 @@ beforeAll(async () => {
     },
   });
   autreCookie = cookiesOf(autreSignup);
-  await app.inject({
+  const orgAutreRes = await app.inject({
     method: "POST",
     url: "/api/auth/organization/create",
     headers: { cookie: autreCookie },
     payload: { name: `Org Autre ${RUN}`, slug: `org-autre-${RUN}` },
   });
+  orgAutre = orgAutreRes.json().id as string;
   const fiche = await app.inject({
     method: "POST",
     url: "/prospects",
@@ -261,7 +263,7 @@ describe("classeur — effacer la pièce efface ce qui en dérive", () => {
       url: `/classeur/documents/${document.id}`,
       headers: { cookie: ownerCookie },
     });
-    expect(res.statusCode).toBe(204);
+    expect(res.statusCode).toBe(200);
 
     const payload = await payloadOf(proposalId);
     expect(payload.reduced).toBe(true);
@@ -931,5 +933,234 @@ describe("effacement — la livraison est un fait de CONSERVATION", () => {
     expect(del.statusCode).toBe(200);
     expect(del.json().affairesAnonymisees).toBe(0);
     expect(del.json().affairesConservees[0].motif).toContain("livrée");
+  });
+});
+
+/*
+ * TRANSCRIPTIONS D'AGENT — le dernier trou de l'article 17.
+ *
+ * `agent_conversations.messages` porte le fil complet, résultats d'outils
+ * compris : noms de clients, montants dus, libellés de compte, coordonnées de
+ * prospects. Aucune des trois purges n'y touchait.
+ *
+ * Et rien ne les effaçait par ailleurs : l'identifiant de conversation ne vit
+ * que dans un `useRef` de l'écran de chat — jamais persisté, aucune route de
+ * liste, aucun écran d'historique. Un rechargement de page rendait le
+ * transcript DÉFINITIVEMENT illisible, et il restait en base à vie.
+ */
+describe("transcriptions d'agent — effacer une source les efface", () => {
+  async function seedTranscript(): Promise<string> {
+    const created = await withTenant(orgA, (tx) =>
+      tx.agentConversation.create({
+        data: {
+          tenantId: orgA,
+          employee: "compta",
+          messages: [
+            { role: "user", content: "quelles factures sont en retard ?" },
+            // Ce que la purge doit faire disparaître : le résultat brut d'un
+            // outil, qui nomme des clients et ce qu'ils doivent.
+            { role: "tool", content: '{"client":"SARL Dupont","dueCents":450000}' },
+          ],
+        },
+      }),
+    );
+    return created.id;
+  }
+
+  const existe = async (id: string): Promise<boolean> =>
+    (await withTenant(orgA, (tx) => tx.agentConversation.findUnique({ where: { id } }))) !== null;
+
+  it("la purge FEC efface les transcriptions, et le DIT", async () => {
+    await withTenant(orgA, (tx) =>
+      tx.fecImport.create({
+        data: {
+          tenantId: orgA,
+          fileHash: `hash-conv-${RUN}`,
+          entryCount: 1,
+          customerCount: 0,
+          invoiceCount: 0,
+          overdueCount: 0,
+          overdueCents: 0,
+          warnings: [],
+        },
+      }),
+    );
+    const conv = await seedTranscript();
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: "/connectors/fec",
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    // Effacer les conversations en cours sans le dire ferait croire à une
+    // panne du chat au prochain message.
+    expect(res.json().conversationsEffacees).toBeGreaterThanOrEqual(1);
+    expect(await existe(conv)).toBe(false);
+  });
+
+  it("l'effacement d'une fiche efface les transcriptions, et le DIT", async () => {
+    const fiche = await app.inject({
+      method: "POST",
+      url: "/prospects",
+      headers: { cookie: ownerCookie },
+      payload: { name: `Karim Benali ${RUN}`, stage: "nouveau", source: "recommandation" },
+    });
+    expect(fiche.statusCode).toBe(201);
+    const conv = await seedTranscript();
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/prospects/${fiche.json().id as string}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(del.statusCode).toBe(200);
+    expect(del.json().conversationsEffacees).toBeGreaterThanOrEqual(1);
+    expect(await existe(conv)).toBe(false);
+  });
+
+  it("supprimer une pièce du classeur efface les transcriptions", async () => {
+    /*
+     * Le transcript peut porter l'OCR de CETTE pièce — nom de fournisseur,
+     * montant, numéro de facture — déposé là par l'outil qui l'a lue. Effacer
+     * la photo en laissant sa transcription est un effacement partiel qui se
+     * croit complet.
+     */
+    const document = await withTenant(orgA, (tx) =>
+      tx.classeurDocument.create({
+        data: {
+          tenantId: orgA,
+          fileName: "facture-conv.jpg",
+          mimeType: "image/jpeg",
+          byteSize: 1024,
+          photo: Buffer.from("photo"),
+          sha256: `conv-${RUN}`,
+        },
+      }),
+    );
+    const conv = await seedTranscript();
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/classeur/documents/${document.id}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(await existe(conv)).toBe(false);
+  });
+
+  it("un 404 ne détruit RIEN — l'existence se contrôle avant d'écrire", async () => {
+    /*
+     * LE DÉFAUT QUE LA REVUE A TROUVÉ, et il était destructeur. La purge
+     * partait AVANT le contrôle d'existence, et le 404 se décidait après le
+     * commit : `DELETE /prospects/<uuid inconnu>` — un double-clic, un rejeu
+     * après un 200 réussi — détruisait toutes les transcriptions du tenant
+     * puis répondait « prospect not found ».
+     *
+     * Les deux autres purges énoncent cet invariant et le respectaient ;
+     * celle-ci le violait, et aucun test ne passait par ce chemin.
+     */
+    const conv = await seedTranscript();
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: "/prospects/00000000-0000-4000-8000-000000000000",
+      headers: { cookie: ownerCookie },
+    });
+    expect(del.statusCode).toBe(404);
+    expect(await existe(conv)).toBe(true);
+  });
+
+  it("l'opposition efface aussi les transcriptions — mêmes coordonnées", async () => {
+    /*
+     * Ce n'est pas l'article 17, mais c'est le même raisonnement :
+     * `list_prospection_followups` a déposé dans le fil les coordonnées que
+     * l'opposition vient d'effacer de la fiche. Minimiser la fiche en laissant
+     * sa copie dans un fil illisible ne minimise rien.
+     */
+    const fiche = await app.inject({
+      method: "POST",
+      url: "/prospects",
+      headers: { cookie: ownerCookie },
+      payload: {
+        name: `Opposé ${RUN}`,
+        stage: "nouveau",
+        source: "recommandation",
+        email: `oppose-${RUN}@example.com`,
+      },
+    });
+    expect(fiche.statusCode).toBe(201);
+    const conv = await seedTranscript();
+
+    const opp = await app.inject({
+      method: "POST",
+      url: `/prospects/${fiche.json().id as string}/opposition`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(opp.statusCode).toBe(200);
+    expect(opp.json().conversationsEffacees).toBeGreaterThanOrEqual(1);
+    expect(await existe(conv)).toBe(false);
+  });
+
+  it("supprimer une pièce le DIT désormais — une opération de ménage n'est pas muette", async () => {
+    /*
+     * C'est la plus banale des routes : corriger une photo prise de travers
+     * n'est pas une demande d'effacement. Détruire au passage les
+     * conversations de toute l'équipe sans un mot, douze fois pour douze
+     * pièces mal classées, c'est le silence que le reste du ticket refuse.
+     */
+    const document = await withTenant(orgA, (tx) =>
+      tx.classeurDocument.create({
+        data: {
+          tenantId: orgA,
+          fileName: "menage.jpg",
+          mimeType: "image/jpeg",
+          byteSize: 1024,
+          photo: Buffer.from("photo"),
+          sha256: `menage-${RUN}`,
+        },
+      }),
+    );
+    await seedTranscript();
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/classeur/documents/${document.id}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().conversationsEffacees).toBeGreaterThanOrEqual(1);
+  });
+
+  it("la purge ne franchit JAMAIS la frontière de tenant", async () => {
+    /*
+     * `deleteMany({})` sans filtre explicite ne tient QUE par la RLS. Si la
+     * purge partait un jour hors `withTenant`, elle effacerait les
+     * conversations de tous les tenants — la pire régression possible, et
+     * parfaitement silencieuse côté tenant qui la déclenche.
+     */
+    const voisine = await withTenant(orgAutre, (tx) =>
+      tx.agentConversation.create({
+        data: { tenantId: orgAutre, employee: "compta", messages: [{ role: "user", content: "x" }] },
+      }),
+    );
+    await seedTranscript();
+
+    const fiche = await app.inject({
+      method: "POST",
+      url: "/prospects",
+      headers: { cookie: ownerCookie },
+      payload: { name: `Purge Voisine ${RUN}`, stage: "nouveau", source: "recommandation" },
+    });
+    await app.inject({
+      method: "DELETE",
+      url: `/prospects/${fiche.json().id as string}`,
+      headers: { cookie: ownerCookie },
+    });
+
+    const survivante = await withTenant(orgAutre, (tx) =>
+      tx.agentConversation.findUnique({ where: { id: voisine.id } }),
+    );
+    expect(survivante).not.toBeNull();
   });
 });

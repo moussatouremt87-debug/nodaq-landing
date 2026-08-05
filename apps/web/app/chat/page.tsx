@@ -126,7 +126,14 @@ export default function ChatPage() {
         if (!agentEvent) continue;
         switch (agentEvent.type) {
           case "conversation":
-            conversationRef.current = agentEvent.conversationId;
+            /*
+             * Un identifiant VIDE veut dire « ce fil n'existe plus » : il a
+             * été effacé pendant le tour (purge art. 17 ou rétention). On
+             * repart d'une conversation neuve au message suivant, sans rien
+             * ressusciter.
+             */
+            conversationRef.current =
+              agentEvent.conversationId === "" ? null : agentEvent.conversationId;
             break;
           case "tool_call":
             push({ kind: "tool", text: `⚙ ${agentEvent.name}…` });
@@ -145,7 +152,21 @@ export default function ChatPage() {
             push({ kind: "assistant", text: agentEvent.content });
             break;
           case "error":
-            push({ kind: "assistant", text: "Une erreur est survenue côté agent." });
+            /*
+             * REMETTRE L'IDENTIFIANT À ZÉRO, sans quoi l'onglet reste cassé.
+             *
+             * Après une purge, l'identifiant en mémoire pointe un fil disparu :
+             * chaque message suivant repartait avec lui, l'API répondait
+             * « conversation not found », et l'écran affichait la même erreur
+             * indéfiniment — jusqu'à un rechargement manuel que rien ne
+             * suggérait. Repartir à neuf est la seule issue qui ne demande
+             * rien à l'utilisateur.
+             */
+            conversationRef.current = null;
+            push({
+              kind: "assistant",
+              text: "Une erreur est survenue côté agent. La conversation repart à zéro.",
+            });
             break;
           case "done":
             break;

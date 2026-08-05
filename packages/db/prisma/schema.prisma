@@ -389,6 +389,9 @@ model AgentConversation {
   tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
+  /// Balayage de rétention : sélection ET tri en une passe, jusqu'à 250 pages
+  /// par tenant et par jour.
+  @@index([tenantId, updatedAt])
   @@map("agent_conversations")
   @@schema("public")
 }

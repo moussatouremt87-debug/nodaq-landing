@@ -73,6 +73,19 @@ export class ComptaAgent {
       );
       if (!existing) throw new Error("conversation not found");
       messages = existing.messages as unknown as LoopMessage[];
+      /*
+       * REPRENDRE EST UNE ACTIVITÉ. `@updatedAt` n'est écrit qu'à la
+       * persistance finale : une conversation dormante depuis 31 jours,
+       * rouverte à l'instant, restait éligible à la rétention pendant tout le
+       * tour — donc supprimable sous les doigts de l'utilisateur, ce que la
+       * règle affirme précisément écarter.
+       */
+      await withTenant(tenantId, (tx) =>
+        tx.agentConversation.update({
+          where: { id: conversationId as string },
+          data: { updatedAt: new Date() },
+        }),
+      );
     } else {
       messages = [{ role: "system", content: COMPTA_SYSTEM_PROMPT }];
     }
@@ -143,12 +156,34 @@ export class ComptaAgent {
       // Persist the transcript under the tenant's RLS context (create or update).
       let finalConversationId: string;
       if (conversationId) {
-        await withTenant(tenantId, (tx) =>
-          tx.agentConversation.update({
+        /*
+         * La conversation a pu être EFFACÉE pendant le tour — purge art. 17 ou
+         * balayage de rétention. Deux règles alors, et elles tirent dans des
+         * sens opposés :
+         *
+         *  - ne pas la RESSUSCITER : un `create` de repli réécrirait, après
+         *    l'effacement, la donnée qu'on venait d'effacer ;
+         *  - ne pas perdre la RÉPONSE : elle est déjà calculée, des
+         *    `pending_action` ont pu être créées pendant le tour, et laisser
+         *    l'erreur remonter les laisserait en file sans que l'utilisateur
+         *    sache pourquoi son message a « échoué ».
+         *
+         * On rend donc la réponse sans transcript, et l'onglet repart sur une
+         * conversation neuve au message suivant (l'écran remet son identifiant
+         * à zéro sur l'erreur comme sur ce cas).
+         */
+        const survivante = await withTenant(tenantId, (tx) =>
+          tx.agentConversation.updateMany({
             where: { id: conversationId as string },
             data: { messages: messages as unknown as object[] },
           }),
         );
+        if (survivante.count === 0) {
+          emit({ type: "conversation", conversationId: "" });
+          emit({ type: "done", iterations: usedIterations });
+          outcome = "ok";
+          return { conversationId: "", answer, iterations: usedIterations };
+        }
         finalConversationId = conversationId;
       } else {
         const created = await withTenant(tenantId, (tx) =>

@@ -1,6 +1,6 @@
 import { prisma, withTenant } from "@nodaq/db";
 import type { Prisma } from "@nodaq/db";
-import { retentionVerdict } from "@nodaq/shared";
+import { conversationCutoff, retentionVerdict } from "@nodaq/shared";
 import type { RetentionCandidate } from "@nodaq/shared";
 
 /*
@@ -41,6 +41,22 @@ export interface RetentionSweepResult {
   readonly scanned: number;
   /** Types hors catalogue rencontrés : signalés, jamais détruits. */
   readonly unclassified: readonly string[];
+  /**
+   * Transcriptions d'agent SUPPRIMÉES (art. 5.1.e).
+   *
+   * `agent_conversations.messages` porte le fil complet, résultats d'outils
+   * compris : noms de clients, montants dus, libellés de compte. Et son seul
+   * usage — reprendre la conversation — meurt avec l'onglet, l'identifiant
+   * n'étant persisté nulle part. Ces lignes devenaient donc illisibles à vie
+   * sans que rien ne les efface.
+   */
+  readonly conversationsSupprimees: number;
+  /**
+   * Des transcriptions dormantes restent, la borne du passage étant atteinte.
+   * Distinct de `truncated`, qui ne parle que des propositions : un seul
+   * drapeau enverrait chercher au mauvais endroit.
+   */
+  readonly conversationsTruncated: boolean;
   /**
    * Le balayage s'est arrêté sur sa borne : des lignes n'ont PAS été
    * examinées. Ce qui n'est pas calculé est DIT — un balayage tronqué qui se
@@ -222,9 +238,19 @@ export async function sweepTenantRetention(
      * callback qui en demanderait une seconde peut épuiser le pool.
      */
     readonly onPageRead?: () => Promise<void>;
+    /** Réglable pour que l'horizon soit testable sans attendre trente jours. */
+    readonly conversationRetentionDays?: number;
+    /**
+     * Réglable pour que la TRONCATURE des transcriptions soit éprouvable :
+     * sans ça, il faudrait semer deux cents fils pour toucher la seule branche
+     * qui décide qu'un tenant reste en retard, et personne ne l'écrirait.
+     */
+    readonly conversationPageSize?: number;
   } = {},
 ): Promise<RetentionSweepResult> {
   const maxPages = options.maxPages ?? RETENTION_MAX_PAGES;
+  const conversationDays = options.conversationRetentionDays;
+  const conversationPageSize = options.conversationPageSize ?? RETENTION_PAGE_SIZE;
   let rejected = 0;
   let reduced = 0;
   let scanned = 0;
@@ -318,7 +344,73 @@ export async function sweepTenantRetention(
     cursor = { createdAt: batch.last.createdAt, id: batch.last.id };
   }
 
-  return { rejected, reduced, scanned, unclassified: [...unclassified], truncated };
+  /*
+   * TRANSCRIPTIONS D'AGENT — supprimées, pas réduites.
+   *
+   * Une `pending_action` garde sa ligne parce qu'elle porte la trace d'une
+   * DÉCISION humaine. Une transcription n'en porte aucune : les actions
+   * qu'elle a préparées vivent dans la file avec leur propre trace, et la
+   * métadonnée d'exécution est déjà tracée hors base. Garder une ligne vidée
+   * n'apporterait qu'un compteur — une donnée sans finalité, ce que l'article
+   * 5.1.e interdit précisément.
+   *
+   * PAGINÉ, comme le reste. `deleteMany` sur un arriéré de plusieurs dizaines
+   * de milliers de fils serait la plus longue transaction du produit, et son
+   * rollback annulerait le passage entier — donc les tenants les plus en
+   * retard seraient exactement ceux qu'on ne balaierait jamais. Ici la
+   * pagination n'a pas besoin de curseur : chaque page RETIRE ses lignes, donc
+   * la suivante avance par construction.
+   */
+  const seuil =
+    conversationDays === undefined ? conversationCutoff(now) : conversationCutoff(now, conversationDays);
+  let conversationsSupprimees = 0;
+  let conversationsTruncated = false;
+  for (let page = 0; page < maxPages; page += 1) {
+    const supprimees = await withTenant(
+      tenantId,
+      (tx) =>
+        tx.$executeRaw`
+          DELETE FROM agent_conversations
+          WHERE id IN (
+            SELECT id FROM agent_conversations
+            WHERE updated_at < ${seuil}
+            ORDER BY updated_at ASC
+            LIMIT ${conversationPageSize}
+          )`,
+      { timeoutMs: PAGE_TIMEOUT_MS },
+    );
+    conversationsSupprimees += supprimees;
+    if (supprimees < conversationPageSize) break;
+    /*
+     * Borne atteinte : reste-t-il vraiment du travail ?
+     *
+     * Un drapeau posé sur « la dernière page était pleine » criait au loup
+     * quand le nombre de lignes éligibles tombait pile sur un multiple de la
+     * page. On SONDE — une ligne suffit. Et le drapeau est distinct de celui
+     * des propositions : partagé, il ferait journaliser « des actions n'ont
+     * pas été examinées » pour un arriéré de transcriptions, c'est-à-dire
+     * envoyer chercher au mauvais endroit.
+     */
+    if (page === maxPages - 1) {
+      const reste = await withTenant(tenantId, (tx) =>
+        tx.agentConversation.findFirst({
+          where: { updatedAt: { lt: seuil } },
+          select: { id: true },
+        }),
+      );
+      conversationsTruncated = reste !== null;
+    }
+  }
+
+  return {
+    rejected,
+    reduced,
+    scanned,
+    unclassified: [...unclassified],
+    truncated,
+    conversationsSupprimees,
+    conversationsTruncated,
+  };
 }
 
 export interface RetentionSweepOptions {
@@ -380,6 +472,8 @@ export function startRetentionSweep(options: RetentionSweepOptions = {}): () => 
       let rejected = 0;
       let reduced = 0;
       let scanned = 0;
+      let conversationsSupprimees = 0;
+      let conversationsTruncated = false;
       let failed = 0;
       let truncated = false;
       const truncatedTenants: string[] = [];
@@ -390,6 +484,8 @@ export function startRetentionSweep(options: RetentionSweepOptions = {}): () => 
           rejected += result.rejected;
           reduced += result.reduced;
           scanned += result.scanned;
+          conversationsSupprimees += result.conversationsSupprimees;
+          conversationsTruncated ||= result.conversationsTruncated;
           truncated ||= result.truncated;
           if (result.truncated) truncatedTenants.push(tenant.id);
           for (const type of result.unclassified) unclassified.add(type);
@@ -410,6 +506,8 @@ export function startRetentionSweep(options: RetentionSweepOptions = {}): () => 
         rejected,
         reduced,
         scanned,
+        conversationsSupprimees,
+        conversationsTruncated,
         truncated,
         truncatedTenants,
         failed,

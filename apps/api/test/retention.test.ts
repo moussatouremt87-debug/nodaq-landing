@@ -419,3 +419,152 @@ describe("le balayage AVANCE", () => {
     expect((await read(tenantC, cible)).status).toBe("pending");
   }, 60_000);
 });
+
+/*
+ * TRANSCRIPTIONS D'AGENT (art. 5.1.e).
+ *
+ * `agent_conversations.messages` porte le fil complet, résultats d'outils
+ * compris — la donnée la plus concentrée du produit, dans sa forme la moins
+ * structurée. Et rien ne l'effaçait : son seul usage est de REPRENDRE la
+ * conversation, or l'identifiant ne vit que dans un `useRef` de l'écran de
+ * chat. Un rechargement de page rendait la ligne illisible à vie.
+ */
+describe("transcriptions d'agent — une conversation dormante n'est plus une conversation", () => {
+  async function seedConversation(tenantId: string, at: Date): Promise<string> {
+    const created = await withTenant(tenantId, (tx) =>
+      tx.agentConversation.create({
+        data: {
+          tenantId,
+          employee: "compta",
+          messages: [
+            { role: "user", content: "mes impayés ?" },
+            { role: "tool", content: '{"client":"SARL Dupont","dueCents":450000}' },
+          ],
+        },
+      }),
+    );
+    await admin.$executeRaw`UPDATE agent_conversations SET updated_at = ${at} WHERE id = ${created.id}::uuid`;
+    return created.id;
+  }
+
+  const vit = async (tenantId: string, id: string): Promise<boolean> =>
+    (await withTenant(tenantId, (tx) => tx.agentConversation.findUnique({ where: { id } }))) !==
+    null;
+
+  it("le passage compte EXACTEMENT ce qu'il a supprimé, et rien de plus", async () => {
+    /*
+     * `toBeGreaterThanOrEqual(1)` restait vert si le balayage supprimait
+     * TOUT — actives comprises. Trois dormantes, deux vivantes, une seule
+     * réponse juste.
+     */
+    const dormantes = [
+      await seedConversation(tenantD, ilYA(40)),
+      await seedConversation(tenantD, ilYA(60)),
+      await seedConversation(tenantD, ilYA(31)),
+    ];
+    const vivantes = [
+      await seedConversation(tenantD, ilYA(2)),
+      await seedConversation(tenantD, ilYA(29)),
+    ];
+
+    const result = await sweepTenantRetention(tenantD, NOW);
+
+    expect(result.conversationsSupprimees).toBe(3);
+    for (const id of dormantes) expect(await vit(tenantD, id)).toBe(false);
+    for (const id of vivantes) expect(await vit(tenantD, id)).toBe(true);
+    // Rien ne reste : le drapeau ne crie pas au loup.
+    expect(result.conversationsTruncated).toBe(false);
+  }, 60_000);
+
+  it("un passage TRONQUÉ le dit, et SÉPARÉMENT des propositions", async () => {
+    /*
+     * Deux propriétés en une. D'abord la troncature est réelle : on SONDE ce
+     * qui reste plutôt que de conclure d'une dernière page pleine — sinon un
+     * nombre de lignes tombant pile sur un multiple de la page criait au loup.
+     * Ensuite elle est portée par son PROPRE drapeau : partagé avec les
+     * propositions, le journal aurait dit « des actions n'ont pas été
+     * examinées » pour un arriéré de transcriptions.
+     */
+    for (let i = 0; i < 3; i += 1) await seedConversation(tenantB, ilYA(40));
+
+    const result = await sweepTenantRetention(tenantB, NOW, {
+      maxPages: 1,
+      conversationRetentionDays: 30,
+      // Une page d'une seule ligne : la troncature devient éprouvable sans
+      // semer deux cents transcriptions.
+      conversationPageSize: 1,
+    });
+
+    expect(result.conversationsSupprimees).toBe(1);
+    expect(result.conversationsTruncated).toBe(true);
+  }, 60_000);
+
+  it("une dernière page PLEINE mais rien derrière ne crie PAS au loup", async () => {
+    /*
+     * Le faux positif que la revue a trouvé. Déduire la troncature de « la
+     * dernière page autorisée était pleine » signalait un arriéré inexistant
+     * dès que le nombre de lignes éligibles tombait pile sur un multiple de la
+     * page — et un drapeau qui se lève pour rien est un drapeau qu'on cesse de
+     * regarder. On SONDE ce qui reste.
+     */
+    const seule = await seedConversation(tenantA, ilYA(40));
+
+    const result = await sweepTenantRetention(tenantA, NOW, {
+      maxPages: 1,
+      conversationPageSize: 1,
+    });
+
+    expect(result.conversationsSupprimees).toBe(1);
+    expect(await vit(tenantA, seule)).toBe(false);
+    expect(result.conversationsTruncated).toBe(false);
+  }, 60_000);
+
+  it("une conversation ACTIVE survit — l'âge se compte sur la dernière activité", async () => {
+    /*
+     * La dater de sa création la supprimerait sous les doigts de
+     * l'utilisateur : le runtime réécrit la ligne à chaque tour, donc une
+     * conversation entretenue depuis des mois est ACTIVE, pas ancienne.
+     */
+    const recente = await seedConversation(tenantD, ilYA(2));
+
+    await sweepTenantRetention(tenantD, NOW);
+
+    expect(await vit(tenantD, recente)).toBe(true);
+  }, 60_000);
+
+  it("le balayage ne franchit JAMAIS la frontière de tenant", async () => {
+    /*
+     * La suppression est un `DELETE` sans clause de tenant : elle ne tient
+     * QUE par la RLS de `withTenant`. Si ce balayage passait un jour par le
+     * client admin — la tentation d'un job « global » —, il viderait les
+     * conversations de tous les tenants en une nuit, sans un mot.
+     */
+    const voisine = await seedConversation(tenantC, ilYA(40));
+    const cible = await seedConversation(tenantD, ilYA(40));
+
+    await sweepTenantRetention(tenantD, NOW);
+
+    expect(await vit(tenantD, cible)).toBe(false);
+    expect(await vit(tenantC, voisine)).toBe(true);
+  }, 60_000);
+
+  it("l'horizon est celui de la règle partagée, pas un nombre écrit ici", async () => {
+    // Un seuil recopié dans la route dériverait du seuil documenté sans que
+    // personne ne le voie : le passage prend le sien de `@nodaq/shared`.
+    const { CONVERSATION_RETENTION_DAYS } = await import("@nodaq/shared");
+    const juste = await seedConversation(tenantD, ilYA(CONVERSATION_RETENTION_DAYS - 1));
+    const juste2 = await seedConversation(tenantD, ilYA(CONVERSATION_RETENTION_DAYS + 1));
+
+    await sweepTenantRetention(tenantD, NOW);
+
+    expect(await vit(tenantD, juste)).toBe(true);
+    expect(await vit(tenantD, juste2)).toBe(false);
+
+    // L'horizon injecté est bien CELUI qui gouverne : sans cette moitié,
+    // l'option de test n'avait aucun appelant et pouvait pourrir sans qu'on
+    // le voie.
+    const recente = await seedConversation(tenantD, ilYA(3));
+    await sweepTenantRetention(tenantD, NOW, { conversationRetentionDays: 1 });
+    expect(await vit(tenantD, recente)).toBe(false);
+  }, 60_000);
+});
