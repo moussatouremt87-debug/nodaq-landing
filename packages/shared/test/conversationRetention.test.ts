@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONVERSATION_RETENTION_DAYS,
   CONVERSATION_RETENTION_VERSION,
-  conversationVerdict,
+  conversationCutoff,
 } from "../src/index.js";
 
 /*
@@ -10,16 +10,21 @@ import {
  *
  * Ce que ces lignes contiennent : le fil complet, résultats d'outils compris —
  * noms de clients, montants dus, libellés de compte, coordonnées de prospects.
- * La donnée la plus concentrée du produit, dans sa forme la moins structurée.
  *
  * Ce qui rend le cas tranché : l'identifiant de conversation ne vit que dans un
  * `useRef` de l'écran de chat. Aucune route ne les liste, aucun écran ne les
  * affiche. Un rechargement de page rend le transcript DÉFINITIVEMENT illisible
  * — et rien ne l'effaçait.
+ *
+ * CE QUE CE FICHIER NE FAIT PLUS. Une première version portait un
+ * `conversationVerdict` réimplémentant en TypeScript la règle que le balayage
+ * exécute en SQL. Les deux divergeaient sur la borne exacte, et ces tests
+ * étaient verts contre du code que la production n'exécutait pas. Une règle
+ * « versionnée datée » qui s'applique à deux endroits n'est pas une règle,
+ * c'est deux règles. Il ne reste que le seuil — celui que le SQL consomme.
  */
 
 const NOW = new Date("2026-08-05T12:00:00.000Z");
-const jours = (n: number): Date => new Date(NOW.getTime() - n * 86_400_000);
 
 describe("config versionnée datée", () => {
   it("porte une version datée", () => {
@@ -27,47 +32,19 @@ describe("config versionnée datée", () => {
   });
 });
 
-describe("l'âge se compte sur la dernière ACTIVITÉ", () => {
-  it("une conversation encore dans son horizon est gardée", () => {
-    const v = conversationVerdict({ updatedAt: jours(CONVERSATION_RETENTION_DAYS - 1) }, NOW);
-    expect(v.action).toBe("garder");
+describe("le seuil de dormance", () => {
+  it("recule d'exactement l'horizon", () => {
+    const seuil = conversationCutoff(NOW);
+    expect(NOW.getTime() - seuil.getTime()).toBe(CONVERSATION_RETENTION_DAYS * 86_400_000);
   });
 
-  it("une conversation dormante au-delà de l'horizon est SUPPRIMÉE", () => {
-    const v = conversationVerdict({ updatedAt: jours(CONVERSATION_RETENTION_DAYS + 1) }, NOW);
-    expect(v.action).toBe("supprimer");
-    // Un refus comme une suppression est une RÉPONSE motivée.
-    expect(v.reason).toContain("dormante");
+  it("est paramétrable — les tests n'attendent pas trente jours", () => {
+    expect(NOW.getTime() - conversationCutoff(NOW, 1).getTime()).toBe(86_400_000);
   });
 
-  it("une conversation reprise hier est vivante, même née il y a un an", () => {
-    /*
-     * La dater de sa création la ferait supprimer sous les doigts de
-     * l'utilisateur : le runtime réécrit la ligne à chaque tour, donc une
-     * conversation entretenue pendant des mois est ACTIVE, pas ancienne.
-     */
-    const v = conversationVerdict({ updatedAt: jours(1) }, NOW);
-    expect(v.action).toBe("garder");
-  });
-
-  it("la borne est franche, pas approximative", () => {
-    // Exactement l'horizon : encore dedans. Le strictement-plus-vieux sort.
-    expect(conversationVerdict({ updatedAt: jours(CONVERSATION_RETENTION_DAYS) }, NOW).action).toBe(
-      "supprimer",
-    );
-    const juste = new Date(NOW.getTime() - CONVERSATION_RETENTION_DAYS * 86_400_000 + 1);
-    expect(conversationVerdict({ updatedAt: juste }, NOW).action).toBe("garder");
-  });
-
-  it("une conversation datée du FUTUR est gardée, jamais supprimée par erreur", () => {
-    // Décalage d'horloge entre l'API et la base : l'âge devient négatif. Une
-    // suppression sur un âge négatif détruirait une conversation en cours.
-    const v = conversationVerdict({ updatedAt: new Date(NOW.getTime() + 3_600_000) }, NOW);
-    expect(v.action).toBe("garder");
-  });
-
-  it("l'horizon est paramétrable — les tests n'attendent pas trente jours", () => {
-    expect(conversationVerdict({ updatedAt: jours(2) }, NOW, 1).action).toBe("supprimer");
-    expect(conversationVerdict({ updatedAt: jours(2) }, NOW, 5).action).toBe("garder");
+  it("un horizon nul rend l'instant présent, jamais le futur", () => {
+    // Garde-fou d'un réglage à zéro : le seuil ne doit pas dépasser `now`,
+    // sinon le balayage emporterait une conversation en cours d'écriture.
+    expect(conversationCutoff(NOW, 0).getTime()).toBe(NOW.getTime());
   });
 });

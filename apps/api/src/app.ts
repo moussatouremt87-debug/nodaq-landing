@@ -1430,8 +1430,19 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
    * DANS LA MÊME TRANSACTION que la purge, comme le reste : une source
    * effacée avec ses dérivés restants est le pire des deux mondes.
    */
-  async function purgeAgentTranscripts(tx: Prisma.TransactionClient): Promise<number> {
-    const { count } = await tx.agentConversation.deleteMany({});
+  async function purgeAgentTranscripts(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+  ): Promise<number> {
+    /*
+     * `tenantId` EXPLICITE, en plus de la RLS. Un `deleteMany({})` nu ne tient
+     * que par une seule couche, alors que toutes les suppressions voisines des
+     * mêmes blocs filtrent (`fecImport.deleteMany({ where: { tenantId } })`).
+     * Et cette signature accepte n'importe quelle transaction — `withOps`, un
+     * `$transaction` nu : rien au niveau du type n'empêcherait un futur
+     * appelant de vider tous les tenants. Le filtre coûte un mot.
+     */
+    const { count } = await tx.agentConversation.deleteMany({ where: { tenantId } });
     return count;
   }
 
@@ -1515,7 +1526,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           where: { tenantId: request.tenantId, source: "fec" },
         });
         await tx.connector.deleteMany({ where: { type: FEC_CONNECTOR_TYPE } });
-        const transcripts = await purgeAgentTranscripts(tx);
+        const transcripts = await purgeAgentTranscripts(tx, request.tenantId);
         return { imports: count, proposals, charges: charges.count, transcripts };
       });
       if (outcome === null) return reply.code(404).send({ error: "no fec import" });
@@ -2069,12 +2080,22 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
          * dérivée, poussé jusqu'au bout : effacer la photo en laissant sa
          * transcription est un effacement partiel qui se croit complet.
          */
-        await purgeAgentTranscripts(tx);
+        const transcripts = await purgeAgentTranscripts(tx, request.tenantId);
         await tx.classeurDocument.deleteMany({ where: { id, tenantId: request.tenantId } });
-        return { deleted: true };
+        return { conversationsEffacees: transcripts };
       });
       if (outcome === null) return reply.code(404).send({ error: "not found" });
-      return reply.code(204).send();
+      /*
+       * 200 plutôt que 204, et c'est la revue qui a eu raison.
+       *
+       * C'est la plus BANALE des trois routes : corriger une photo prise de
+       * travers n'est pas une demande d'effacement. Détruire au passage les
+       * conversations de toute l'équipe sans un mot, douze fois de suite pour
+       * douze pièces mal classées, c'est exactement le silence que le reste du
+       * ticket refuse. Le compteur reste à zéro le plus souvent — auquel cas
+       * la réponse ne dit rien de plus qu'avant.
+       */
+      return reply.send(outcome);
     },
   );
 
@@ -2356,10 +2377,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
      * Conversations RÉCENTES, pas un cumul : la rétention (art. 5.1.e)
      * supprime les transcriptions dormantes, donc ce nombre redescend. Le
      * lire comme « conversations depuis toujours » en ferait un chiffre qui
-     * baisse sans raison visible — et aucun écran ne l'affiche aujourd'hui,
-     * ce qui est la seule raison pour laquelle il n'est pas relibellé.
+     * baisse sans raison visible. Le NOM le dit — « aucun écran ne l'affiche
+     * aujourd'hui » n'était pas une raison suffisante de ne pas le relibeller :
+     * l'argument périme au premier écran qui l'affiche.
      */
-    const conversations = await withTenant(request.tenantId, (tx) => tx.agentConversation.count());
+    const conversationsRecentes = await withTenant(request.tenantId, (tx) =>
+      tx.agentConversation.count(),
+    );
 
     // Alertes stock (3.2) — métadonnée non financière, visible de tout membre.
     // Compté côté SQL (comparaison colonne à colonne, RLS scelle au tenant) :
@@ -2419,7 +2443,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         await toolset?.close().catch(() => undefined);
       }
     }
-    return { pendingActions, conversations, stockAlerts, treasury, sales };
+    return { pendingActions, conversationsRecentes, stockAlerts, treasury, sales };
   });
 
   app.get("/notes", { preHandler: businessRoute }, async (request) => {
@@ -5417,7 +5441,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       // brouillon : la laisser en file, c'est garder — et pouvoir approuver —
       // une prospection à laquelle elle vient de s'opposer.
       await rejectProspectDrafts(tx, prospect.id);
-      return { alreadyOptedOut: false, hashed: hashes.length > 0 };
+      /*
+       * Les transcriptions portent les MÊMES coordonnées que celles qu'on
+       * vient d'effacer : `list_prospection_followups` les y a déposées. Ce
+       * n'est pas l'article 17, mais c'est le même raisonnement — minimiser
+       * la fiche en laissant sa copie dans un fil illisible ne minimise rien.
+       */
+      const transcripts = await purgeAgentTranscripts(tx, request.tenantId);
+      return { alreadyOptedOut: false, hashed: hashes.length > 0, conversationsEffacees: transcripts };
     });
     if (result === null) return reply.code(404).send({ error: "prospect not found" });
     return { optedOut: true, ...result };
@@ -5433,6 +5464,22 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       if (!params.success) return reply.code(400).send({ error: "invalid payload" });
       void reply.header("cache-control", "private, no-store");
       const outcome = await withTenant(request.tenantId, async (tx) => {
+        /*
+         * EXISTENCE D'ABORD — un 404 ne doit RIEN avoir effacé au passage.
+         *
+         * Le 404 se décide après le commit (sur `count === 0`), donc la
+         * transaction n'est jamais annulée : sans ce contrôle en tête,
+         * `DELETE /prospects/<uuid inconnu>` — un double-clic, un rejeu après
+         * un 200 réussi — détruisait TOUTES les transcriptions du tenant puis
+         * répondait « prospect not found ». Les deux autres purges énoncent
+         * cet invariant et le respectent ; celle-ci le violait.
+         */
+        const cible = await tx.prospect.findUnique({
+          where: { id: params.data.id },
+          select: { id: true },
+        });
+        if (cible === null) return null;
+
         // La cascade FK emporte le journal, mais pas la file : un brouillon
         // nominatif y survivrait à l'effacement, qui ne serait donc que
         // partiel. On le retire dans la MÊME transaction.
@@ -5632,7 +5679,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
          * tiers en silence. Le nombre ne prétend rien sur la personne
          * effacée : il dit combien de contrats l'owner doit relire lui-même.
          */
-        const transcripts = await purgeAgentTranscripts(tx);
+        const transcripts = await purgeAgentTranscripts(tx, request.tenantId);
         const deleted = await tx.prospect.deleteMany({ where: { id: params.data.id } });
         /*
          * COMPTÉ APRÈS la suppression, et l'ordre porte la justesse du nombre.
@@ -5657,7 +5704,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           transcripts,
         };
       });
-      if (outcome.count === 0) return reply.code(404).send({ error: "prospect not found" });
+      if (outcome === null) return reply.code(404).send({ error: "prospect not found" });
       return {
         deleted: true,
         affairesAnonymisees: outcome.anonymisees,

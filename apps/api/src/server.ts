@@ -98,12 +98,30 @@ const stopRetentionSweep = startRetentionSweep({
         "retention sweep truncated — some actions were not examined",
       );
     }
+    /*
+     * Troncature des CONVERSATIONS, annoncée à part.
+     *
+     * Partager le drapeau ferait journaliser « some actions were not
+     * examined » pour un arriéré qui ne concerne que des transcriptions —
+     * un message qui envoie chercher au mauvais endroit.
+     */
+    if (result.conversationsTruncated) {
+      app.log.warn(
+        { tenants: result.tenants, conversationsSupprimees: result.conversationsSupprimees },
+        "retention sweep truncated — transcripts remain",
+      );
+    }
     // Un passage qui n'a RIEN fait ne se journalise pas… sauf s'il a échoué
     // quelque part : un échec silencieux et un tenant propre se ressemblent
     // trop pour qu'on les confonde.
     if (
       result.rejected === 0 &&
       result.reduced === 0 &&
+      // La SEULE opération destructive du balayage : l'omettre ici faisait
+      // sortir en silence un passage ayant supprimé cinquante mille
+      // transcriptions sans en réduire une seule. Le seul compteur qui compte
+      // des lignes DÉTRUITES était le seul à ne pas être journalisé.
+      result.conversationsSupprimees === 0 &&
       result.failed === 0 &&
       result.unclassified.length === 0
     ) {
@@ -116,6 +134,7 @@ const stopRetentionSweep = startRetentionSweep({
         scanned: result.scanned,
         rejected: result.rejected,
         reduced: result.reduced,
+        conversationsSupprimees: result.conversationsSupprimees,
         // Types d'action qu'aucun groupe ne réclame : ils ne sont PAS balayés,
         // et le dire est la seule façon qu'ils finissent par l'être.
         unclassified: result.unclassified,

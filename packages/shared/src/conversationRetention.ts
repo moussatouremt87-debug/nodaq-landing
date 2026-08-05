@@ -49,31 +49,28 @@ export const CONVERSATION_RETENTION_DAYS = 30;
  * qu'un compteur, c'est-à-dire une donnée sans finalité : exactement ce que
  * l'article 5.1.e interdit.
  */
-export interface ConversationRetentionCandidate {
-  /** Dernière ACTIVITÉ, jamais la création — voir `conversationVerdict`. */
-  readonly updatedAt: Date;
-}
-
-export type ConversationVerdict =
-  | { readonly action: "garder"; readonly reason: string }
-  | { readonly action: "supprimer"; readonly reason: string };
 
 /**
- * L'âge se compte sur la dernière ACTIVITÉ, jamais sur la création.
+ * L'INSTANT avant lequel une transcription est dormante. PURE.
  *
- * Une conversation reprise pendant des semaines est vivante : la dater de son
- * premier message la ferait supprimer sous les doigts de l'utilisateur. Le
- * runtime écrit `updatedAt` à chaque tour (`@updatedAt`), donc « dormante
- * depuis N jours » est exactement ce qu'on veut dire.
+ * Une seule forme, parce qu'il n'y a qu'un seul consommateur : le balayage
+ * supprime en SQL (`updated_at < seuil`), et une deuxième expression de la
+ * même règle en TypeScript aurait divergé — la première version le faisait
+ * déjà, en désaccord sur la borne exacte. Une règle « versionnée datée » qui
+ * s'exécute à deux endroits n'est pas une règle, c'est deux règles.
+ *
+ * L'ÂGE SE COMPTE SUR LA DERNIÈRE ACTIVITÉ, jamais sur la création : le
+ * runtime réécrit la ligne à chaque tour — et la touche aussi à la REPRISE,
+ * sans quoi une conversation dormante rouverte à l'instant restait éligible
+ * pendant tout le tour, c'est-à-dire supprimable sous les doigts de
+ * l'utilisateur.
+ *
+ * La borne est STRICTE : à exactement l'horizon, la ligne est gardée. Une
+ * suppression ne se décide pas sur une égalité de milliseconde.
  */
-export function conversationVerdict(
-  candidate: ConversationRetentionCandidate,
+export function conversationCutoff(
   now: Date,
   retentionDays: number = CONVERSATION_RETENTION_DAYS,
-): ConversationVerdict {
-  const ageDays = (now.getTime() - candidate.updatedAt.getTime()) / 86_400_000;
-  if (ageDays < retentionDays) {
-    return { action: "garder", reason: "conversation encore dans son horizon" };
-  }
-  return { action: "supprimer", reason: `dormante depuis ${retentionDays} jours` };
+): Date {
+  return new Date(now.getTime() - retentionDays * 86_400_000);
 }

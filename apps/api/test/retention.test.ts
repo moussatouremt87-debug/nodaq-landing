@@ -451,13 +451,72 @@ describe("transcriptions d'agent — une conversation dormante n'est plus une co
     (await withTenant(tenantId, (tx) => tx.agentConversation.findUnique({ where: { id } }))) !==
     null;
 
-  it("une conversation dormante est SUPPRIMÉE, et le passage le compte", async () => {
-    const vieille = await seedConversation(tenantD, ilYA(40));
+  it("le passage compte EXACTEMENT ce qu'il a supprimé, et rien de plus", async () => {
+    /*
+     * `toBeGreaterThanOrEqual(1)` restait vert si le balayage supprimait
+     * TOUT — actives comprises. Trois dormantes, deux vivantes, une seule
+     * réponse juste.
+     */
+    const dormantes = [
+      await seedConversation(tenantD, ilYA(40)),
+      await seedConversation(tenantD, ilYA(60)),
+      await seedConversation(tenantD, ilYA(31)),
+    ];
+    const vivantes = [
+      await seedConversation(tenantD, ilYA(2)),
+      await seedConversation(tenantD, ilYA(29)),
+    ];
 
     const result = await sweepTenantRetention(tenantD, NOW);
 
-    expect(result.conversationsSupprimees).toBeGreaterThanOrEqual(1);
-    expect(await vit(tenantD, vieille)).toBe(false);
+    expect(result.conversationsSupprimees).toBe(3);
+    for (const id of dormantes) expect(await vit(tenantD, id)).toBe(false);
+    for (const id of vivantes) expect(await vit(tenantD, id)).toBe(true);
+    // Rien ne reste : le drapeau ne crie pas au loup.
+    expect(result.conversationsTruncated).toBe(false);
+  }, 60_000);
+
+  it("un passage TRONQUÉ le dit, et SÉPARÉMENT des propositions", async () => {
+    /*
+     * Deux propriétés en une. D'abord la troncature est réelle : on SONDE ce
+     * qui reste plutôt que de conclure d'une dernière page pleine — sinon un
+     * nombre de lignes tombant pile sur un multiple de la page criait au loup.
+     * Ensuite elle est portée par son PROPRE drapeau : partagé avec les
+     * propositions, le journal aurait dit « des actions n'ont pas été
+     * examinées » pour un arriéré de transcriptions.
+     */
+    for (let i = 0; i < 3; i += 1) await seedConversation(tenantB, ilYA(40));
+
+    const result = await sweepTenantRetention(tenantB, NOW, {
+      maxPages: 1,
+      conversationRetentionDays: 30,
+      // Une page d'une seule ligne : la troncature devient éprouvable sans
+      // semer deux cents transcriptions.
+      conversationPageSize: 1,
+    });
+
+    expect(result.conversationsSupprimees).toBe(1);
+    expect(result.conversationsTruncated).toBe(true);
+  }, 60_000);
+
+  it("une dernière page PLEINE mais rien derrière ne crie PAS au loup", async () => {
+    /*
+     * Le faux positif que la revue a trouvé. Déduire la troncature de « la
+     * dernière page autorisée était pleine » signalait un arriéré inexistant
+     * dès que le nombre de lignes éligibles tombait pile sur un multiple de la
+     * page — et un drapeau qui se lève pour rien est un drapeau qu'on cesse de
+     * regarder. On SONDE ce qui reste.
+     */
+    const seule = await seedConversation(tenantA, ilYA(40));
+
+    const result = await sweepTenantRetention(tenantA, NOW, {
+      maxPages: 1,
+      conversationPageSize: 1,
+    });
+
+    expect(result.conversationsSupprimees).toBe(1);
+    expect(await vit(tenantA, seule)).toBe(false);
+    expect(result.conversationsTruncated).toBe(false);
   }, 60_000);
 
   it("une conversation ACTIVE survit — l'âge se compte sur la dernière activité", async () => {
@@ -500,5 +559,12 @@ describe("transcriptions d'agent — une conversation dormante n'est plus une co
 
     expect(await vit(tenantD, juste)).toBe(true);
     expect(await vit(tenantD, juste2)).toBe(false);
+
+    // L'horizon injecté est bien CELUI qui gouverne : sans cette moitié,
+    // l'option de test n'avait aucun appelant et pouvait pourrir sans qu'on
+    // le voie.
+    const recente = await seedConversation(tenantD, ilYA(3));
+    await sweepTenantRetention(tenantD, NOW, { conversationRetentionDays: 1 });
+    expect(await vit(tenantD, recente)).toBe(false);
   }, 60_000);
 });

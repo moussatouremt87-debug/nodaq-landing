@@ -250,17 +250,39 @@ lire par le produit.
 Une donnée que personne ne peut plus lire et que rien n'efface n'est pas un
 historique : c'est un dépôt.
 
-### Les trois purges le disent
+### Les quatre chemins le disent
 
-`DELETE /connectors/fec` et `DELETE /prospects/:id` rendent
-`conversationsEffacees` : effacer les conversations en cours sans un mot ferait
-croire à une panne du chat au prochain message. La suppression d'une pièce du
-classeur garde son `204` — même raisonnement que pour les propositions dérivées,
-une pièce n'en fait naître qu'une poignée et l'écran se rafraîchit seul.
+`DELETE /connectors/fec`, `DELETE /prospects/:id`, `POST /prospects/:id/opposition`
+et `DELETE /classeur/documents/:id` rendent tous `conversationsEffacees`.
 
-La purge est un `deleteMany({})` **sans clause de tenant** : elle ne tient que
-par la RLS de `withTenant`. Un test d'isolation le vérifie, et il rougit si la
-purge passe un jour par le client admin — la tentation d'un job « global ».
+La suppression d'une pièce a **cessé de rendre `204`** pour cela, et c'est la
+revue qui a eu raison : c'est la plus banale des quatre — corriger une photo
+prise de travers n'est pas une demande d'effacement — et détruire au passage les
+conversations de toute l'équipe sans un mot, douze fois pour douze pièces mal
+classées, était le seul silence que ce ticket avait laissé passer.
+
+**L'opposition n'est pas l'article 17**, mais c'est le même raisonnement :
+`list_prospection_followups` a déposé dans le fil les coordonnées que
+l'opposition vient d'effacer de la fiche. Minimiser la fiche en laissant sa copie
+dans un fil illisible ne minimise rien.
+
+### Un 404 ne détruit rien
+
+`DELETE /prospects/:id` décide son 404 **après** le commit. La purge partait
+avant le contrôle d'existence : un `DELETE` sur un identifiant inconnu — un
+double-clic, un rejeu après un 200 réussi — détruisait toutes les transcriptions
+du tenant puis répondait « prospect not found ». Les deux autres routes énonçaient
+cet invariant et le respectaient ; celle-ci le violait, et aucun test ne passait
+par ce chemin. Il en existe un désormais.
+
+### Deux couches, pas une
+
+La purge filtre sur `tenantId` **en plus** de la RLS. Un `deleteMany({})` nu ne
+tenait que par une seule couche, alors que toutes les suppressions voisines des
+mêmes blocs filtrent déjà — et la signature accepte n'importe quelle transaction,
+donc rien au niveau du type n'aurait empêché un futur appelant de vider tous les
+tenants. Deux tests d'isolation le vérifient, et ils rougissent si la purge passe
+un jour par le client admin — la tentation d'un job « global ».
 
 ## Rétention des transcriptions (art. 5.1.e)
 
@@ -286,8 +308,19 @@ l'article 5.1.e interdit précisément.
 
 **L'âge se compte sur la dernière activité**, jamais sur la création : le runtime
 réécrit la ligne à chaque tour, donc une conversation entretenue depuis des mois
-est *active*, pas ancienne. La dater de son premier message la supprimerait sous
-les doigts de l'utilisateur.
+est *active*, pas ancienne.
+
+Et **reprendre est une activité**. `@updatedAt` n'était écrit qu'à la persistance
+finale : une conversation dormante depuis 31 jours, rouverte à l'instant, restait
+éligible pendant tout le tour — donc supprimable sous les doigts de
+l'utilisateur, précisément ce que la règle affirmait écarter. Le runtime touche
+désormais la ligne à la reprise.
+
+**Une seule expression de la règle.** Une première version portait un
+`conversationVerdict` en TypeScript pendant que le balayage supprimait en SQL :
+les deux divergeaient sur la borne exacte, et les tests du moteur pur étaient
+verts contre du code que la production n'exécutait pas. Il ne reste que
+`conversationCutoff`, que le SQL consomme.
 
 **Paginé comme le reste.** Un `deleteMany` sur un arriéré de dizaines de milliers
 de fils serait la plus longue transaction du produit, et son rollback annulerait
@@ -295,10 +328,45 @@ le passage entier — donc les tenants les plus en retard seraient exactement ce
 qu'on ne balaierait jamais. Ici la pagination n'a pas besoin de curseur : chaque
 page retire ses lignes, donc la suivante avance par construction.
 
-**Le compteur du cockpit change de sens.** `kpis.conversations` compte désormais
-les conversations *récentes*, pas un cumul. Aucun écran ne l'affiche aujourd'hui
-— c'est la seule raison pour laquelle il n'est pas relibellé, et c'est écrit dans
-le code.
+**Le compteur du cockpit change de sens, donc de nom** : `kpis.conversationsRecentes`.
+« Aucun écran ne l'affiche aujourd'hui » n'était pas une raison suffisante de
+garder l'ancien nom — l'argument périme au premier écran qui l'affiche.
+
+**La troncature des transcriptions a son propre drapeau.** Partagé avec celui des
+propositions, le journal aurait dit « des actions n'ont pas été examinées » pour
+un arriéré de transcriptions — envoyer chercher au mauvais endroit. Et il se pose
+sur un **sondage** de ce qui reste, pas sur « la dernière page était pleine » :
+un nombre de lignes tombant pile sur un multiple de la page aurait crié au loup.
+
+**Le passage se journalise dès qu'il supprime.** Le garde-fou « un passage qui n'a
+rien fait ne se journalise pas » ignorait `conversationsSupprimees` : un passage
+détruisant cinquante mille transcriptions sans réduire une seule proposition
+sortait sans laisser de trace. Le seul compteur qui compte des lignes *détruites*
+était le seul à ne pas être écrit.
+
+## Une conversation effacée pendant un tour d'agent
+
+Le transcript est chargé au début du tour et écrit à la fin. Une purge ou un
+balayage intercalé fait donc disparaître la ligne sous le tour en cours. Deux
+règles s'appliquent alors, et elles tirent en sens opposés :
+
+- **ne pas la ressusciter** : un `create` de repli réécrirait, *après*
+  l'effacement, la donnée qu'on venait d'effacer ;
+- **ne pas perdre la réponse** : elle est déjà calculée, des `pending_action` ont
+  pu être créées pendant le tour, et laisser l'erreur remonter les laisserait en
+  file sans que l'utilisateur sache pourquoi son message a « échoué ».
+
+Le runtime rend donc la réponse **sans transcript**, et l'écran repart sur une
+conversation neuve. Il remet aussi son identifiant à zéro sur toute erreur :
+sans cela, après une purge, chaque message suivant du même onglet repartait avec
+un identifiant mort et l'écran affichait la même erreur indéfiniment, jusqu'à un
+rechargement manuel que rien ne suggérait.
+
+**Ce qui reste ouvert** : un tour *sans* identifiant qui se termine par un
+`create` après une purge écrit une transcription contenant la donnée qu'on vient
+d'effacer. La fenêtre est celle d'un tour d'agent. La fermer demande de pouvoir
+invalider un tour en vol — c'est ce que le bus d'événements du ticket 4.4
+apporterait. C'est dit ici plutôt que corrigé au jugé.
 
 ## Tests
 

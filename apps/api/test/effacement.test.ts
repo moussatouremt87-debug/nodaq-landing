@@ -263,7 +263,7 @@ describe("classeur — effacer la pièce efface ce qui en dérive", () => {
       url: `/classeur/documents/${document.id}`,
       headers: { cookie: ownerCookie },
     });
-    expect(res.statusCode).toBe(204);
+    expect(res.statusCode).toBe(200);
 
     const payload = await payloadOf(proposalId);
     expect(payload.reduced).toBe(true);
@@ -1045,8 +1045,91 @@ describe("transcriptions d'agent — effacer une source les efface", () => {
       url: `/classeur/documents/${document.id}`,
       headers: { cookie: ownerCookie },
     });
-    expect(res.statusCode).toBe(204);
+    expect(res.statusCode).toBe(200);
     expect(await existe(conv)).toBe(false);
+  });
+
+  it("un 404 ne détruit RIEN — l'existence se contrôle avant d'écrire", async () => {
+    /*
+     * LE DÉFAUT QUE LA REVUE A TROUVÉ, et il était destructeur. La purge
+     * partait AVANT le contrôle d'existence, et le 404 se décidait après le
+     * commit : `DELETE /prospects/<uuid inconnu>` — un double-clic, un rejeu
+     * après un 200 réussi — détruisait toutes les transcriptions du tenant
+     * puis répondait « prospect not found ».
+     *
+     * Les deux autres purges énoncent cet invariant et le respectaient ;
+     * celle-ci le violait, et aucun test ne passait par ce chemin.
+     */
+    const conv = await seedTranscript();
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: "/prospects/00000000-0000-4000-8000-000000000000",
+      headers: { cookie: ownerCookie },
+    });
+    expect(del.statusCode).toBe(404);
+    expect(await existe(conv)).toBe(true);
+  });
+
+  it("l'opposition efface aussi les transcriptions — mêmes coordonnées", async () => {
+    /*
+     * Ce n'est pas l'article 17, mais c'est le même raisonnement :
+     * `list_prospection_followups` a déposé dans le fil les coordonnées que
+     * l'opposition vient d'effacer de la fiche. Minimiser la fiche en laissant
+     * sa copie dans un fil illisible ne minimise rien.
+     */
+    const fiche = await app.inject({
+      method: "POST",
+      url: "/prospects",
+      headers: { cookie: ownerCookie },
+      payload: {
+        name: `Opposé ${RUN}`,
+        stage: "nouveau",
+        source: "recommandation",
+        email: `oppose-${RUN}@example.com`,
+      },
+    });
+    expect(fiche.statusCode).toBe(201);
+    const conv = await seedTranscript();
+
+    const opp = await app.inject({
+      method: "POST",
+      url: `/prospects/${fiche.json().id as string}/opposition`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(opp.statusCode).toBe(200);
+    expect(opp.json().conversationsEffacees).toBeGreaterThanOrEqual(1);
+    expect(await existe(conv)).toBe(false);
+  });
+
+  it("supprimer une pièce le DIT désormais — une opération de ménage n'est pas muette", async () => {
+    /*
+     * C'est la plus banale des routes : corriger une photo prise de travers
+     * n'est pas une demande d'effacement. Détruire au passage les
+     * conversations de toute l'équipe sans un mot, douze fois pour douze
+     * pièces mal classées, c'est le silence que le reste du ticket refuse.
+     */
+    const document = await withTenant(orgA, (tx) =>
+      tx.classeurDocument.create({
+        data: {
+          tenantId: orgA,
+          fileName: "menage.jpg",
+          mimeType: "image/jpeg",
+          byteSize: 1024,
+          photo: Buffer.from("photo"),
+          sha256: `menage-${RUN}`,
+        },
+      }),
+    );
+    await seedTranscript();
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/classeur/documents/${document.id}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().conversationsEffacees).toBeGreaterThanOrEqual(1);
   });
 
   it("la purge ne franchit JAMAIS la frontière de tenant", async () => {

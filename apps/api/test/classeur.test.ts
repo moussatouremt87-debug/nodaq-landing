@@ -338,7 +338,10 @@ describe("capture et extraction", () => {
       url: `/classeur/documents/${docId}`,
       headers: { cookie: ownerCookie },
     });
-    expect(owner.statusCode).toBe(204);
+    // 200 depuis que la route DIT combien de transcriptions elle a effacées :
+    // détruire les conversations de l'équipe en silence sur une opération de
+    // ménage était le seul silence que ce ticket avait laissé passer.
+    expect(owner.statusCode).toBe(200);
     expect(await admin.classeurDocument.findUnique({ where: { id: docId } })).toBeNull();
   });
 });

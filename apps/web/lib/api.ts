@@ -90,7 +90,10 @@ export type PendingActionSummary = z.infer<typeof PendingActionSummary>;
 
 export const CockpitKpis = z.object({
   pendingActions: z.record(z.number()),
-  conversations: z.number(),
+  /* RÉCENTES, pas un cumul : la rétention supprime les transcriptions
+   * dormantes, donc ce nombre redescend. Le nom le dit, plutôt qu'un
+   * commentaire que le premier écran à l'afficher ne lira pas. */
+  conversationsRecentes: z.number(),
   /** Articles sous leur seuil d'alerte (3.2) — visible de tout membre. */
   stockAlerts: z.number(),
   treasury: z
@@ -1046,6 +1049,10 @@ export const ProspectDeletion = z.object({
    * hors de portée de tout effacement, et le déduire par correspondance de
    * noms serait l'inférence que la doctrine interdit. */
   contratsSansFiche: z.number(),
+  /* Les transcriptions d'agent partent avec la fiche : sans ce champ, Zod le
+   * retirait en silence et l'écran ne pouvait pas prévenir que le chat
+   * repartirait à zéro. */
+  conversationsEffacees: z.number(),
 });
 export type ProspectDeletion = z.infer<typeof ProspectDeletion>;
 
