@@ -203,8 +203,9 @@ un nom définitivement hors de portée en croyant n'avoir pas le choix.
 
 ## Ce que ce ticket ne livre pas
 
-**Le bouton de suppression d'une fiche — donc le rapport n'a pas de
-destinataire.** L'écran Prospection dit à l'owner que *N fiches dépassent la
+~~**Le bouton de suppression d'une fiche — donc le rapport n'a pas de
+destinataire.**~~ — LIVRÉ, voir « L'écran » ci-dessous. Ce qui suit reste écrit
+comme trace de ce qui manquait : L'écran Prospection dit à l'owner que *N fiches dépassent la
 durée de conservation recommandée* et ne lui offre aucun moyen de les supprimer :
 `DELETE /prospects/:id` n'est appelée par aucun écran aujourd'hui. Il faut le
 dire franchement, parce que ça mord sur le choix ci-dessus : le signalement des
@@ -368,9 +369,57 @@ d'effacer. La fenêtre est celle d'un tour d'agent. La fermer demande de pouvoir
 invalider un tour en vol — c'est ce que le bus d'événements du ticket 4.4
 apporterait. C'est dit ici plutôt que corrigé au jugé.
 
+## L'écran, enfin
+
+`DELETE /prospects/:id` a existé pendant quatre tickets sans qu'**aucun écran
+ne l'appelle**. L'API savait effacer la fiche, anonymiser les affaires qui en
+dérivent, tarir la recopie des contrats, purger les transcriptions — et rendre
+la liste **motivée** de ce qu'elle avait dû conserver. Ce compte rendu est toute
+la justification de ne pas trancher sur les cas ambigus, et il n'avait pas de
+destinataire : la garde restait théorique.
+
+**La confirmation dit ce qui va se passer**, pas « êtes-vous sûr ». Les cinq
+effets sont énumérés avant le clic — y compris celui qui surprendrait tout le
+monde : les conversations avec l'assistant sont effacées, donc le chat repart à
+zéro pour l'équipe entière. Le taire ferait passer un effacement volontaire pour
+une panne au message suivant.
+
+**Le compte rendu reste à l'écran** jusqu'à ce que l'owner le referme : chantiers
+conservés avec leur référence et leur motif, contrats conservés, contrats hors de
+portée, conversations effacées. Il n'est **pas persisté** — c'est une réponse
+HTTP, pas une tâche — et l'écran le dit, plutôt que de laisser un rechargement
+emporter une liste à traiter à la main.
+
+**Le bouton existe aussi sur une fiche opposée.** L'opposition minimise (on garde
+de quoi ne plus contacter), l'effacement supprime : une personne qui s'est
+opposée puis demande son effacement ne doit pas buter sur un écran qui ne lui
+offre plus rien.
+
+### Un compteur qui envoyait chercher sans dire où
+
+L'encart annonçait « N fiches sans contact depuis plus de 36 mois : à supprimer »
+sans jamais dire lesquelles. Les fiches périmées sont maintenant **signalées dans
+la liste**, là où se trouve le bouton.
+
+Et il a fallu **réviser une décision du 2.12**. Les fiches opposées ET périmées
+étaient comptées mais jamais identifiées, au motif que « les nommer contredirait
+l'exclusion ». C'était juste des **noms** — une liste nominative d'opposés est la
+porte par laquelle ils reviennent dans une campagne — mais faux des
+**identifiants**, et le compte seul ne résolvait qu'à moitié le problème qu'il
+énonçait : « 3 fiches opposées sont périmées » sans moyen de dire lesquelles
+n'est pas un signalement, c'est une inquiétude. `expiredOptedOut` rend donc les
+ids, exactement comme `retentionAlerts` et pour la même raison. Un test vérifie
+qu'aucun nom n'y figure.
+
 ## Tests
 
-`apps/api/test/effacement.test.ts`. Le fil n'est pas « la ligne est-elle partie »
+`apps/api/test/effacement.test.ts` côté API, et
+`apps/web/test/effacement-fiche.test.ts` côté écran — une garde **statique**,
+comme `freshness-wiring` : elle ne prouve pas que l'écran s'affiche, elle prouve
+que le branchement et l'affichage du compte rendu n'ont pas disparu du code.
+C'est exactement la régression qui se produirait sans bruit : l'appel retiré au
+détour d'un refactor, l'API toujours verte, et plus personne pour lire ce qui
+reste. Le fil n'est pas « la ligne est-elle partie »
 mais « le produit tient-il ce qu'il affirme » : chaque test vérifie qu'un dérivé
 précis (libellé, montant, adresse, coordonnées) a bien disparu, et que ce qui
 survit — la trace d'une décision, une affaire sous contrat — survit **pour une

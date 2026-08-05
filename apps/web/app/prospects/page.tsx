@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
   createProspect,
+  deleteProspect,
   getProspectionPlan,
   getProspects,
   logProspectInteraction,
@@ -12,7 +13,7 @@ import {
   PROSPECT_STAGES,
   updateProspect,
 } from "../../lib/api";
-import type { Prospect, ProspectionPlan } from "../../lib/api";
+import type { Prospect, ProspectDeletion, ProspectionPlan } from "../../lib/api";
 import { useViewRefresh } from "../../lib/useFreshness";
 import { emitDomainEvent } from "../../lib/freshness";
 
@@ -22,6 +23,16 @@ import { emitDomainEvent } from "../../lib/freshness";
  *  - la PROVENANCE est un champ obligatoire du formulaire, pas une option ;
  *  - l'OPPOSITION est un bouton présent sur chaque fiche, et son effet est
  *    annoncé avant d'être déclenché (il n'est pas réversible ici).
+ *
+ * S'y ajoute l'EFFACEMENT (art. 17). `DELETE /prospects/:id` existait depuis
+ * quatre tickets et n'était appelée par AUCUN écran : l'API savait effacer une
+ * fiche, anonymiser les affaires qui en dérivent, tarir la recopie des
+ * contrats, purger les transcriptions — et rendre la liste motivée de ce
+ * qu'elle avait dû CONSERVER. Ce compte rendu est toute la justification de ne
+ * pas trancher sur les cas ambigus, et il n'avait pas de destinataire.
+ *
+ * L'écran est ce destinataire. Ce qui reste à faire à la main s'affiche, avec
+ * son motif, jusqu'à ce que l'owner le referme.
  */
 
 const STAGE_LABELS: Record<string, string> = {
@@ -62,6 +73,15 @@ export default function ProspectsPage() {
   const [company, setCompany] = useState("");
   const [email, setEmail] = useState("");
   const [source, setSource] = useState("");
+  /*
+   * L'effacement est réservé au dirigeant (`ownerRoute`). Optimiste, comme
+   * ailleurs : on montre le bouton, et un 403 le retire. Le cacher d'emblée
+   * demanderait un appel de plus au chargement de chaque écran.
+   */
+  const [isOwner, setIsOwner] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  /** Compte rendu du dernier effacement — il RESTE tant qu'on ne le ferme pas. */
+  const [rapport, setRapport] = useState<{ nom: string; res: ProspectDeletion } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -126,6 +146,45 @@ export default function ProspectsPage() {
     }
   }
 
+  async function effacer(prospect: Prospect): Promise<void> {
+    /*
+     * Ce que la confirmation DOIT dire : pas « êtes-vous sûr » mais ce qui va
+     * se passer. L'effacement touche quatre choses au-delà de la fiche, et
+     * l'une d'elles — les conversations de l'agent — surprendrait tout le
+     * monde si elle n'était pas annoncée : le chat repart à zéro pour
+     * l'équipe entière.
+     */
+    const confirmed = window.confirm(
+      `Effacer définitivement la fiche de ${prospect.name} ?\n\n` +
+        "• sa fiche et son journal de contacts sont supprimés\n" +
+        "• son nom et son adresse sont retirés des chantiers jamais contractés\n" +
+        "• les chantiers portant une trace d'exécution sont CONSERVÉS, et listés ensuite\n" +
+        "• les contrats liés perdent son nom, pour qu'il ne revienne pas\n" +
+        "• les conversations avec l'assistant sont effacées : le chat repart à zéro\n\n" +
+        "Cette action ne peut pas être annulée.",
+    );
+    if (!confirmed) return;
+    setBusyId(prospect.id);
+    setError(null);
+    try {
+      const res = await deleteProspect(prospect.id);
+      setRapport({ nom: prospect.name, res });
+      await refresh();
+      // Un effacement périme les affaires, les contrats et le cockpit : sans
+      // cet événement, un autre onglet continuerait d'afficher le nom effacé.
+      emitDomainEvent("prospect.efface");
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        setIsOwner(false);
+        setError("Réservé au dirigeant.");
+      } else {
+        setError(err instanceof ApiError ? err.message : "effacement impossible");
+      }
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function logContact(prospect: Prospect, kind: string): Promise<void> {
     try {
       await logProspectInteraction(prospect.id, { kind, occurredAt: today() });
@@ -145,6 +204,17 @@ export default function ProspectsPage() {
       setError(err instanceof ApiError ? err.message : "étape non modifiée");
     }
   }
+
+  /*
+   * Les fiches dont la conservation est dépassée, marquées LÀ OÙ ON AGIT.
+   * L'écran annonçait « N fiches à supprimer » dans un encart séparé sans
+   * jamais dire lesquelles : le compteur envoyait chercher, il n'aidait pas.
+   */
+  const perimees = new Set(
+    [...(plan?.retentionAlerts ?? []), ...(plan?.expiredOptedOut ?? [])].map(
+      (alerte) => alerte.id,
+    ),
+  );
 
   return (
     <div className="page">
@@ -217,15 +287,93 @@ export default function ProspectsPage() {
           </p>
           {plan.retentionAlerts.length > 0 && (
             <p className="warn">
-              {plan.retentionAlerts.length} fiche(s) sans contact depuis plus de 36 mois : à
-              supprimer, la durée de conservation recommandée est dépassée.
+              {plan.retentionAlerts.length} fiche(s) sans contact depuis plus de 36 mois : la
+              durée de conservation recommandée est dépassée. Elles sont signalées dans la liste
+              ci-dessous, avec le bouton pour les effacer.
               {plan.expiredOptedOutCount > 0 &&
-                ` S'y ajoutent ${plan.expiredOptedOutCount} fiche(s) opposée(s) également périmée(s).`}
+                ` S'y ajoutent ${plan.expiredOptedOutCount} fiche(s) opposée(s) également périmée(s), signalée(s) elles aussi.`}
             </p>
           )}
           <p className="warn">
             {plan.label} (règles du {plan.rulesVersion})
           </p>
+        </section>
+      )}
+
+      {rapport !== null && (
+        <section className="card">
+          <h2>Fiche de {rapport.nom} effacée</h2>
+          {/* CE QUI A ÉTÉ FAIT — des nombres, jamais un « c'est bon ». */}
+          <ul className="device-list">
+            <li className="device-row">
+              {rapport.res.affairesAnonymisees} chantier(s) anonymisé(s) — nom, adresse et
+              coordonnées retirés.
+            </li>
+            <li className="device-row">
+              {rapport.res.contratsAnonymises} contrat(s) anonymisé(s) — le nom ne reviendra
+              plus à la prochaine matérialisation.
+            </li>
+            <li className="device-row">
+              {rapport.res.conversationsEffacees} conversation(s) avec l&apos;assistant
+              effacée(s) — le chat repart à zéro.
+            </li>
+          </ul>
+
+          {/*
+            CE QU'IL RESTE, ET POURQUOI. C'est la raison d'être de tout ce
+            ticket : sans cette liste, une conservation motivée devient une
+            conservation muette, et personne ne sait qu'il reste du travail.
+          */}
+          {rapport.res.affairesConservees.length > 0 && (
+            <>
+              <p className="warn">
+                {rapport.res.affairesConservees.length} chantier(s) CONSERVÉ(S) — à relire :
+              </p>
+              <ul className="device-list">
+                {rapport.res.affairesConservees.map((affaire) => (
+                  <li key={affaire.id} className="device-row">
+                    <strong>{affaire.reference}</strong> {affaire.label}
+                    <br />
+                    <span className="muted">{affaire.motif}</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {rapport.res.contratsConserves.length > 0 && (
+            <>
+              <p className="warn">
+                {rapport.res.contratsConserves.length} contrat(s) CONSERVÉ(S) — à relire :
+              </p>
+              <ul className="device-list">
+                {rapport.res.contratsConserves.map((contrat) => (
+                  <li key={contrat.id} className="device-row">
+                    <strong>{contrat.label}</strong>
+                    <br />
+                    <span className="muted">{contrat.motif}</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {rapport.res.contratsSansFiche > 0 && (
+            <p className="warn">
+              {rapport.res.contratsSansFiche} contrat(s) portent un nom de client sans lien vers
+              une fiche : aucun effacement ne peut les atteindre. Rattachez-les depuis l&apos;écran
+              Contrats.
+            </p>
+          )}
+
+          {/*
+            Le compte rendu n'est PAS persisté : c'est une réponse HTTP, pas une
+            tâche. Le taire ferait perdre au premier rechargement une liste que
+            l'owner est censé traiter à la main.
+          */}
+          <p className="warn">
+            Ce compte rendu n&apos;est pas conservé : notez ce qu&apos;il reste à faire avant de
+            quitter cet écran.
+          </p>
+          <button onClick={() => setRapport(null)}>Fermer</button>
         </section>
       )}
 
@@ -253,12 +401,38 @@ export default function ProspectsPage() {
                     </span>
                   </>
                 )}
+                {perimees.has(prospect.id) && (
+                  <>
+                    <br />
+                    <span className="warn">
+                      Sans contact depuis plus de 36 mois — durée de conservation dépassée.
+                    </span>
+                  </>
+                )}
                 {prospect.optedOut ? (
                   <>
                     <br />
                     <span className="warn">
                       Opposée à la prospection — conservée uniquement pour ne plus la recontacter.
                     </span>
+                    {/*
+                      L'effacement reste possible sur une fiche OPPOSÉE, et
+                      c'est délibéré : l'opposition minimise (on garde de quoi
+                      ne plus contacter), l'effacement supprime. Une personne
+                      qui s'est opposée puis demande son effacement ne doit pas
+                      buter sur un écran qui ne lui offre plus rien.
+                    */}
+                    {isOwner && (
+                      <>
+                        {" "}
+                        <button
+                          disabled={busyId === prospect.id}
+                          onClick={() => void effacer(prospect)}
+                        >
+                          Effacer définitivement
+                        </button>
+                      </>
+                    )}
                   </>
                 ) : (
                   <>
@@ -278,7 +452,15 @@ export default function ProspectsPage() {
                         + {label}
                       </button>
                     ))}{" "}
-                    <button onClick={() => void oppose(prospect)}>Ne plus contacter</button>
+                    <button onClick={() => void oppose(prospect)}>Ne plus contacter</button>{" "}
+                    {isOwner && (
+                      <button
+                        disabled={busyId === prospect.id}
+                        onClick={() => void effacer(prospect)}
+                      >
+                        Effacer définitivement
+                      </button>
+                    )}
                   </>
                 )}
               </div>

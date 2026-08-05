@@ -163,12 +163,23 @@ describe("rétention — garder sans le dire est une faute", () => {
   it("une fiche OPPOSÉE périmée est comptée : sortir du pipeline ne vaut pas droit d'être gardé pour toujours", () => {
     // Sans ce compteur, l'opposé était conservé indéfiniment SANS jamais être
     // signalé — l'exact contraire de « ne jamais garder sans le dire ».
-    const plan = buildProspectionPlan(
-      [prospect({ optedOut: true, createdAt: daysAgo(RETENTION_DAYS + 10) })],
-      [],
-      NOW,
-    );
+    const fiche = prospect({ optedOut: true, createdAt: daysAgo(RETENTION_DAYS + 10) });
+    const plan = buildProspectionPlan([fiche], [], NOW);
     expect(plan.expiredOptedOutCount).toBe(1);
+    /*
+     * Et on peut dire LAQUELLE. La version d'origine ne rendait qu'un compte,
+     * en faisant valoir que nommer un opposé contredirait son exclusion — vrai
+     * des NOMS, faux des identifiants. Le compte seul ne résolvait qu'à moitié
+     * le problème qu'il énonce : « 3 fiches opposées sont périmées » sans
+     * moyen de dire lesquelles n'est pas un signalement, c'est une inquiétude.
+     */
+    expect(plan.expiredOptedOut).toHaveLength(1);
+    // L'identifiant RÉEL, pas une place vide : c'est lui qui permet à l'écran
+    // de marquer la bonne ligne. Sans cette assertion, un `id: ""` passait.
+    expect(plan.expiredOptedOut[0]?.id).toBe(fiche.id);
+    expect(plan.expiredOptedOut[0]?.daysSinceContact).toBeGreaterThan(1_080);
+    // Toujours AUCUN nom : c'est la moitié de la décision d'origine qui tient.
+    expect(JSON.stringify(plan.expiredOptedOut)).not.toContain("name");
     expect(plan.retentionAlerts).toEqual([]);
   });
 
