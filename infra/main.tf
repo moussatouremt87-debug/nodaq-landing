@@ -197,7 +197,24 @@ resource "scaleway_container" "api" {
   cpu_limit          = 1000
   memory_limit_bytes = 2147483648 # 2 GiB
   min_scale          = 1
-  max_scale          = 2
+  # UNE SEULE RÉPLIQUE, et c'est une contrainte de CORRECTION, pas de coût.
+  #
+  # Le bus d'événements (4.4) tient son registre d'abonnés SSE en mémoire du
+  # processus, et son relais marque `delivered_at` après avoir dépêché. À deux
+  # instances, l'instance A sert ses abonnés puis marque l'événement transmis :
+  # les navigateurs branchés sur B ne reçoivent JAMAIS rien, et aucun compteur
+  # ne le dit. C'est la panne de fraîcheur du 2.21 restaurée pour une fraction
+  # des utilisateurs, en silence.
+  #
+  # Le code le documentait déjà en affirmant « le déploiement est
+  # mono-réplique » — c'était faux, ce fichier autorisait 2. Un commentaire ne
+  # garde rien ; cette ligne, si.
+  #
+  # CE QUI LÈVERA LA CONTRAINTE : un canal partagé (`LISTEN/NOTIFY` PostgreSQL)
+  # qui rend le registre en mémoire inutile. Un verrou entre répliques ne
+  # suffirait PAS — la réplique gagnante marquerait les événements transmis
+  # sans servir les abonnés de l'autre.
+  max_scale          = 1
   privacy            = "public"
   # Même politique que litellm : le moteur natif Prisma (lib .so) tourne dans
   # la sandbox v2 (micro-VM), compatibilité maximale.

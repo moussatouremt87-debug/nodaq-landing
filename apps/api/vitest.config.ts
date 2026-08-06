@@ -25,5 +25,15 @@ export default defineConfig({
   test: {
     environment: "node",
     fileParallelism: false,
+    /*
+     * Ouvre la porte du battement injectable — UNIQUEMENT ici.
+     *
+     * La route lit `ALLOW_TEST_HEARTBEAT`, jamais `NODE_ENV` : une garde dont
+     * l'oubli ouvre est une garde à l'envers, et `NODE_ENV` n'est pas posé
+     * partout (un `node dist/server.js` lancé à la main, une démo). Ici on
+     * l'ouvre explicitement, dans le seul fichier qui décrit l'exécution des
+     * tests.
+     */
+    env: { ALLOW_TEST_HEARTBEAT: "1" },
   },
 });

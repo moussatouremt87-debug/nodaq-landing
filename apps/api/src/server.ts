@@ -168,9 +168,16 @@ const stopOutboxRelay = startOutboxRelay({
   // Des compteurs, jamais un type d'objet ni un identifiant : ce journal
   // tourne toutes les 2 s, et il ne doit rien apprendre à qui le lit.
   onRelay: (result) => {
-    if (result.failed > 0 || result.truncated) {
+    if (result.failed > 0 || result.truncated || result.tenants === 0) {
       app.log.warn(
-        { relayed: result.relayed, failed: result.failed, truncated: result.truncated },
+        {
+          relayed: result.relayed,
+          failed: result.failed,
+          truncated: result.truncated,
+          // `tenants` était calculé, remonté… et jamais journalisé. C'est ce
+          // compteur-là qui aurait révélé la découverte aveuglée par la RLS.
+          tenants: result.tenants,
+        },
         "outbox relay incomplete",
       );
     }

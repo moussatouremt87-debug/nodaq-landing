@@ -333,9 +333,25 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
    */
   const STREAM_HEARTBEAT_MS = 25_000;
   const heartbeatMsFor = (request: FastifyRequest): number => {
-    if (process.env.NODE_ENV === "production") return STREAM_HEARTBEAT_MS;
+    /*
+     * OPT-IN EXPLICITE, pas opt-out sur `NODE_ENV`.
+     *
+     * La première version ouvrait la porte partout où `NODE_ENV` n'était pas
+     * `"production"` — un `node dist/server.js` lancé à la main, une démo, un
+     * conteneur hors Terraform. C'est-à-dire une garde dont l'OUBLI ouvre,
+     * exactement ce que le même commit reprochait au rôle par défaut de
+     * `subscribeOutbox`. Ici il faut poser la variable pour ouvrir.
+     *
+     * PLANCHER À 1 s. Sans borne inférieure, un en-tête à `1` faisait tourner
+     * deux lectures en base par milliseconde et par flux, sans attendre le
+     * tour précédent : quatre flux suffisaient à épuiser le pool Prisma du
+     * processus, donc à mettre à genoux TOUS les tenants depuis un compte
+     * membre ordinaire.
+     */
+    if (process.env.ALLOW_TEST_HEARTBEAT !== "1") return STREAM_HEARTBEAT_MS;
     const raw = Number(request.headers["x-test-heartbeat-ms"]);
-    return Number.isFinite(raw) && raw > 0 ? raw : STREAM_HEARTBEAT_MS;
+    if (!Number.isFinite(raw) || raw < 1_000) return STREAM_HEARTBEAT_MS;
+    return Math.min(raw, STREAM_HEARTBEAT_MS);
   };
   const openStreams = new Map<string, number>();
   /** Au-delà, on coupe : `EventSource` reconnecte et refait toute la chaîne. */
@@ -381,8 +397,6 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     if (ouverts >= MAX_STREAMS_PER_USER) {
       return reply.code(429).send({ error: "trop de flux ouverts" });
     }
-    openStreams.set(streamKey, ouverts + 1);
-
     reply.raw.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
@@ -391,6 +405,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       // livré par paquets de 4 ko — donc en rien du tout.
       "x-accel-buffering": "no",
     });
+    // Incrémenté APRÈS `writeHead` : si celui-ci jette, le compteur ne doit
+    // pas garder un slot pour un flux qui n'a jamais existé — l'utilisateur
+    // serait verrouillé à quatre flux définitivement.
+    openStreams.set(streamKey, ouverts + 1);
 
     let closed = false;
     /*
@@ -804,8 +822,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     },
   );
 
+  /*
+   * `decide` n'a plus qu'un appelant, `/reject`. Garder un paramètre
+   * `decision` qui écrit le statut mais ne pilote plus le type d'événement
+   * était un piège : un futur `decide("approved")` aurait écrit le bon statut
+   * et émis le mauvais événement. Le paramètre part avec la branche.
+   */
   const decide =
-    (decision: "approved" | "rejected") => async (request: FastifyRequest, reply: FastifyReply) => {
+    () => async (request: FastifyRequest, reply: FastifyReply) => {
       const params = z.object({ id: Uuid }).safeParse(request.params);
       if (!params.success) {
         return reply.code(400).send({ error: "invalid pending action id" });
@@ -823,7 +847,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         const claimed = await tx.pendingAction.updateMany({
           where: { id: params.data.id, status: "pending" },
           data: {
-            status: decision,
+            status: "rejected",
             validatedBy: request.authSession.user.id,
             validatedAt: new Date(),
           },
@@ -896,9 +920,23 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
        * message de commit affirmait l'atomicité pour ce chemin ; elle n'était
        * vraie que du dernier tiers.
        *
-       * Deux événements pour une approbation, donc — et c'est correct : le
-       * consommateur d'invalidation est idempotent, recharger deux fois rend
-       * la même chose.
+       * CE QUE ÇA COUVRE, ET CE QUE ÇA NE COUVRE PAS. Le message de commit
+       * précédent affirmait que cela fermait aussi le cas « l'exécuteur a
+       * écrit puis a planté » : c'EST FAUX, et la revue l'a montré. Cet
+       * événement part AVANT que l'exécuteur n'écrive, donc les écrans
+       * relisent des chiffres encore anciens ; si l'exécuteur écrit puis
+       * plante avant la transaction finale, aucun événement ne périmera ses
+       * écritures. Fermer ce cas-là demande que CHAQUE exécuteur émette dans
+       * SA propre transaction d'écriture — c'est un travail de PR B, pas une
+       * ligne à ajouter ici.
+       *
+       * Ce qui est couvert : un crash entre la revendication et la fin laisse
+       * une action sortie du compteur « à valider », et les écrans le savent.
+       *
+       * COÛT ASSUMÉ : deux vagues d'invalidation de 13 vues par approbation,
+       * dont la première n'apprend rien sur les effets de l'exécuteur.
+       * « Idempotent » n'est pas « gratuit » — mais une invalidation en trop
+       * coûte un rechargement, une invalidation manquante coûte un écran faux.
        */
       const { count } = await withTenant(request.tenantId, async (tx) => {
         const claimed = await tx.pendingAction.updateMany({
@@ -1003,7 +1041,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.post(
     "/pending-actions/:id/reject",
     { preHandler: [...businessRoute, requireRole(["owner"])] },
-    decide("rejected"),
+    decide(),
   );
 
   /**

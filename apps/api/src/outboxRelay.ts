@@ -243,6 +243,19 @@ export async function runOutboxRelayOnce(
      * `outbox` ici contournerait une table scellée et, en pratique, ne
      * rendrait rien du tout.
      */
+    /*
+     * COÛT ASSUMÉ : un `withTenant` par tenant à chaque passage, même pour un
+     * tenant sans événement — soit, à mille tenants et 2 s d'intervalle,
+     * plusieurs centaines de transactions par seconde dont l'essentiel ne rend
+     * rien. La version qui « optimisait » en interrogeant `outbox` directement
+     * a été retirée : hors `withTenant`, la RLS rendait ZÉRO ligne et le
+     * relais ne transmettait plus rien, en silence.
+     *
+     * La bonne optimisation passe par un compteur non transactionnel hors du
+     * plan métier (une table de réveil en plan auth, ou `LISTEN/NOTIFY`), pas
+     * par un contournement de la RLS. Tant qu'elle n'est pas faite, le
+     * dépassement d'intervalle se verrait au journal ci-dessus.
+     */
     const tenants = await prisma.tenant.findMany({ select: { id: true } });
     let relayed = 0;
     let failed = 0;
@@ -286,7 +299,22 @@ export function startOutboxRelay(options: OutboxRelayOptions = {}): () => void {
     running = true;
     try {
       const result = await runOutboxRelayOnce(onError);
-      if (result.relayed > 0 || result.failed > 0) options.onRelay?.(result);
+      /*
+       * UN PASSAGE QUI NE DÉCOUVRE AUCUN TENANT EST ANORMAL, et c'est
+       * exactement le silence qui a caché la pire régression de ce ticket : la
+       * découverte aveuglée par la RLS rendait zéro tenant, donc zéro
+       * événement relayé, donc aucun journal. Le bug a été corrigé ; le
+       * silence qui l'a rendu indétectable ne l'était pas.
+       *
+       * Un produit vivant a toujours au moins un tenant. Zéro veut dire que la
+       * découverte est cassée, pas que personne n'écrit.
+       */
+      if (result.tenants === 0) {
+        onError("outbox relay: aucun tenant découvert — la découverte est cassée");
+      }
+      if (result.relayed > 0 || result.failed > 0 || result.tenants === 0) {
+        options.onRelay?.(result);
+      }
     } catch (error) {
       onError(error instanceof Error ? error.name : "unknown");
     } finally {

@@ -517,19 +517,30 @@ describe("l'autorisation est revérifiée pendant la vie du flux", () => {
       });
       const tenantId = org.json().id as string;
 
-      // Connexion réelle, battement à 40 ms.
+      /*
+       * Connexion réelle, battement au plancher (1 s). On SONDE au lieu
+       * d'attendre une durée fixe : deux `setTimeout` nus autour d'un
+       * battement qui fait deux lectures en base par tour, c'est un faux
+       * rouge garanti sur une CI chargée.
+       */
       const stream = app.inject({
         method: "GET",
         url: "/events",
-        headers: { cookie, "x-test-heartbeat-ms": "40" },
+        headers: { cookie, "x-test-heartbeat-ms": "1000" },
       });
-      await new Promise((r) => setTimeout(r, 200));
-      expect(outboxSubscriberCount(tenantId)).toBeGreaterThan(0);
+      const jusqua = async (predicat: () => boolean, limiteMs: number): Promise<boolean> => {
+        const fin = Date.now() + limiteMs;
+        while (Date.now() < fin) {
+          if (predicat()) return true;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        return predicat();
+      };
+      expect(await jusqua(() => outboxSubscriberCount(tenantId) > 0, 5_000)).toBe(true);
 
       // On révoque l'appartenance : le prochain battement doit couper.
       await admin.membership.deleteMany({ where: { tenantId } });
-      await new Promise((r) => setTimeout(r, 400));
-      expect(outboxSubscriberCount(tenantId)).toBe(0);
+      expect(await jusqua(() => outboxSubscriberCount(tenantId) === 0, 10_000)).toBe(true);
       await stream.catch(() => undefined);
     } finally {
       await app.close();

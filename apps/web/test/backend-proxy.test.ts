@@ -52,11 +52,22 @@ function usedPrefixes(): Set<string> {
       const prefix = match[1];
       if (prefix) used.add(prefix);
     }
-    // `call(Schema, "/xxx/...")` — la forme majoritaire. Le chemin est le
-    // second argument, littéral ou gabarit.
-    for (const match of source.matchAll(/\bcall\s*\([^,]+,\s*["'`]\/([a-z0-9-]+)/g)) {
-      const prefix = match[1];
-      if (prefix) used.add(prefix);
+    /*
+     * `call(Schema, "/xxx/...")` — la forme majoritaire.
+     *
+     * Le motif ne peut PAS s'arrêter à la première virgule : dès que le
+     * premier argument en contient une (`z.union([A, B])`), l'appel devient
+     * invisible. Mesuré : 26 préfixes vus sur 27, le manquant étant
+     * `rapports`, appelé avec un `z.union` en premier argument. C'est la
+     * classe de cécité exacte qui avait caché `brief` pendant des mois.
+     *
+     * On prend donc une FENÊTRE après `call(` et on y cherche le premier
+     * chemin littéral, quel que soit ce qui précède.
+     */
+    for (const match of source.matchAll(/\bcall\s*\(/g)) {
+      const fenetre = source.slice(match.index, match.index + 300);
+      const chemin = /["'`]\/([a-z0-9-]+)/.exec(fenetre);
+      if (chemin?.[1]) used.add(chemin[1]);
     }
   }
   return used;
@@ -70,6 +81,16 @@ function usedPrefixes(): Set<string> {
  * finit ignorée.
  */
 const HANDLED_ELSEWHERE = new Set(["webhooks"]);
+
+/**
+ * Sous-chemins réellement proxifiés du bloc webhooks.
+ *
+ * Exempter le PRÉFIXE entier réintroduisait le défaut de `brief` : un futur
+ * `call(X, "/webhooks/deliveries")` tomberait sur le 404 de Next et la garde
+ * resterait verte. On vérifie donc que les sous-chemins appelés sont bien
+ * parmi ceux que la configuration déclare.
+ */
+const WEBHOOK_ALLOWED = ["webhooks/endpoints", "webhooks/events"];
 
 function declaredPrefixes(): Set<string> {
   const config = readFileSync(join(WEB, "next.config.ts"), "utf8");
@@ -91,6 +112,20 @@ describe("tout chemin /backend appelé par le code est proxifié", () => {
     expect(manquants, `préfixes appelés mais non proxifiés : ${manquants.join(", ")}`).toEqual([]);
   });
 
+  it("aucun sous-chemin webhook n'est appelé hors des deux déclarés", () => {
+    // L'exemption porte sur un préfixe ; la configuration ne déclare que deux
+    // sous-chemins. Sans cette vérification, l'exemption serait un trou.
+    const appeles = new Set<string>();
+    for (const source of sources()) {
+      for (const match of source.matchAll(/["'`]\/(webhooks\/[a-z0-9-]+)/g)) {
+        const chemin = match[1];
+        if (chemin) appeles.add(chemin);
+      }
+    }
+    const hors = [...appeles].filter((chemin) => !WEBHOOK_ALLOWED.includes(chemin));
+    expect(hors, `sous-chemins webhook non proxifiés : ${hors.join(", ")}`).toEqual([]);
+  });
+
   it("la garde VOIT les appels faits via `call()`, pas seulement les fetch directs", () => {
     /*
      * Sans cette assertion, la garde pouvait redevenir aveugle sans que rien
@@ -100,7 +135,10 @@ describe("tout chemin /backend appelé par le code est proxifié", () => {
     const used = usedPrefixes();
     expect(used.has("affaires")).toBe(true);
     expect(used.has("contrats")).toBe(true);
-    // …et le flux, atteint par un `fetch` direct.
+    // …le flux, atteint par un `fetch` direct…
     expect(used.has("events")).toBe(true);
+    // …et un appel dont le PREMIER argument contient une virgule, la forme
+    // qui échappait à la version précédente.
+    expect(used.has("rapports")).toBe(true);
   });
 });
