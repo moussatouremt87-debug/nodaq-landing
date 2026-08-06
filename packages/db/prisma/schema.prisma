@@ -63,6 +63,7 @@ model Tenant {
 
   @@map("tenants")
   @@schema("public")
+  outboxEvents      OutboxEvent[]
 }
 
 /// Tables d'authentification (better-auth) : users, sessions, accounts, verifications.
@@ -377,6 +378,28 @@ model PendingAction {
 /// runtime), enabling resume-after-restart. Sealed by RLS (see the migration
 /// `agent_runtime`) — `messages` is the full transcript and may contain sensitive
 /// client content, exactly like `notes`.
+model OutboxEvent {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  /// Type d'événement de domaine — valeurs du registre partagé `@nodaq/shared`.
+  type          String
+  /// Nature de l'objet touché. Jamais son contenu.
+  objectType    String    @map("object_type")
+  objectId      String?   @map("object_id")
+  /// Des NOMS de champs, jamais des valeurs : un événement circule dans des
+  /// files, des journaux et des rejeux.
+  changedFields String[]  @map("changed_fields")
+  occurredAt    DateTime  @default(now()) @map("occurred_at")
+  correlationId String?   @map("correlation_id")
+  /// `null` = à relayer. Posé par le relais ; un rejeu reprend où il en était.
+  deliveredAt   DateTime? @map("delivered_at")
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, occurredAt])
+  @@map("outbox")
+  @@schema("public")
+}
+
 model AgentConversation {
   id        String   @id @default(uuid()) @db.Uuid
   tenantId  String   @map("tenant_id") @db.Uuid

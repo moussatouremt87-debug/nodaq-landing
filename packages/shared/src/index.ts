@@ -65,3 +65,4 @@ export * from "./verticalPacks.js";
 export * from "./recurrence.js";
 export * from "./revenusAcquis.js";
 export * from "./conversationRetention.js";
+export * from "./freshnessRules.js";
