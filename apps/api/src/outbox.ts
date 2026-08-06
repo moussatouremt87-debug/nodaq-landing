@@ -66,8 +66,40 @@ const FORBIDDEN_FIELD_HINTS = [
   "payload",
 ] as const;
 
+/**
+ * Natures d'objet admises — registre FERMÉ.
+ *
+ * `objectType` et `objectId` sont les deux seules chaînes libres du format, et
+ * ce sont précisément celles qui partent vers TOUS les abonnés du tenant sur
+ * un canal long. Le commentaire d'origine affirmait « identifiant opaque »
+ * sans rien vérifier : un appelant passant un nom de fournisseur ou un e-mail
+ * en `objectId` aurait diffusé de la PII sans qu'aucune garde ne bronche.
+ */
+const OBJECT_TYPES = [
+  "pending_action",
+  "affaire",
+  "contrat",
+  "prospect",
+  "classeur_document",
+  "stock_item",
+  "employe",
+  "echeance",
+  "cost_entry",
+  "immobilisation",
+  "avis",
+  "facture",
+  "connecteur",
+  "module",
+  "profil",
+  "note",
+  "fec_import",
+] as const;
+
 /** Levée quand un appelant tente de faire porter de la donnée à un événement. */
 export class OutboxContentError extends Error {}
+
+/** UUID ou identifiant court sans espace : jamais un libellé. */
+const OPAQUE_ID = /^[A-Za-z0-9_:.-]{1,64}$/;
 
 /**
  * Vérifie qu'un événement ne transporte que de quoi RELIRE. PURE.
@@ -91,6 +123,16 @@ export function assertNoBusinessData(emit: OutboxEmit): void {
         `champ « ${field} » refusé : son nom seul apparaîtrait dans les journaux et les rejeux`,
       );
     }
+  }
+  if (!(OBJECT_TYPES as readonly string[]).includes(emit.objectType)) {
+    throw new OutboxContentError(
+      `objectType « ${emit.objectType} » hors registre : seule une nature connue voyage sur le bus`,
+    );
+  }
+  if (emit.objectId !== undefined && emit.objectId !== null && !OPAQUE_ID.test(emit.objectId)) {
+    throw new OutboxContentError(
+      "objectId doit être un identifiant OPAQUE : un libellé diffuserait de la donnée à tous les abonnés",
+    );
   }
   // Un type inconnu du registre ne périmerait aucune vue : l'événement serait
   // écrit, relayé, et n'aurait aucun effet. Un silence, pas une erreur — donc

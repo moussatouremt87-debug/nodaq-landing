@@ -35,7 +35,7 @@
  */
 
 /** Bump à chaque ajout de vue ou d'événement. */
-export const FRESHNESS_RULES_VERSION = "2026-08-04.1";
+export const FRESHNESS_RULES_VERSION = "2026-08-06";
 
 /** Vues de données rafraîchissables. */
 export const VIEW_KEYS = [
@@ -69,6 +69,7 @@ export type DomainEvent =
   | "action.preparee"
   | "action.validee"
   | "action.rejetee"
+  | "action.echouee"
   | "document.ajoute"
   | "document.rattache"
   | "document.modifie"
@@ -112,6 +113,29 @@ export const EVENT_VIEWS: Record<DomainEvent, readonly ViewKey[]> = {
   // les agrégats qui s'en dérivent. Le classeur en est absent parce qu'AUCUN
   // exécuteur n'y écrit ; rafraîchir tout à chaque événement, c'est un cockpit
   // qui clignote et des requêtes pour rien.
+  /*
+   * Un exécuteur qui ÉCHOUE a pu écrire avant d'échouer : stock sorti puis
+   * erreur, immobilisation créée puis erreur. Le ranger dans `action.rejetee`
+   * — qui ne périme que la file — laissait ces écrans faux, et effaçait pour
+   * tous les consommateurs futurs la différence entre « le patron a refusé »
+   * et « ça a planté ». Mêmes vues que la réussite : on ne sait pas ce qui a
+   * été écrit, donc on ne parie pas.
+   */
+  "action.echouee": [
+    "nav",
+    "cockpit",
+    "brief",
+    "validation",
+    "tresorerie",
+    "impayes",
+    "marge",
+    "stocks",
+    "immobilisations",
+    "prospects",
+    "avis",
+    "factures",
+    "affaires",
+  ],
   "action.validee": [
     "nav",
     "cockpit",

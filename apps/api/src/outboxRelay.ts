@@ -4,6 +4,20 @@ import type { DomainEvent } from "@nodaq/shared";
 /*
  * Bus d'événements (4.4, PR A) — LE RELAIS et ses abonnés.
  *
+ * CONTRAINTE DE DÉPLOIEMENT — UNE SEULE RÉPLIQUE D'API.
+ *
+ * Le registre d'abonnés ET le relais vivent dans le processus. Avec deux
+ * instances, l'instance A dépêche à SES abonnés puis marque `delivered_at` :
+ * les navigateurs connectés à l'instance B ne reçoivent jamais rien, et
+ * AUCUN compteur ne le dirait. Ce serait le bug 2.21 restauré, invisible.
+ *
+ * C'est le prix de l'écart ci-dessous, et il est payable aujourd'hui : le
+ * déploiement est mono-réplique. Le jour où il faudra scaler, ce n'est pas le
+ * relais qu'il faudra dupliquer mais le canal — `LISTEN/NOTIFY` PostgreSQL
+ * suffirait, sans introduire Redis. Tant que ce n'est pas fait, monter à deux
+ * répliques casse la fraîcheur SANS RIEN CASSER D'AUTRE, donc sans alerte :
+ * d'où cet avertissement ici plutôt que dans un ticket.
+ *
  * PAS DE FILE DISTRIBUÉE, et c'est un écart assumé au ticket. Redis tourne
  * dans `docker-compose` mais aucun paquet du dépôt ne s'y connecte, alors que
  * le produit a déjà trois ordonnanceurs en processus (`push.ts`,
@@ -31,7 +45,34 @@ export interface OutboxDelivery {
 
 type Subscriber = (delivery: OutboxDelivery) => void;
 
-const subscribers = new Map<string, Set<Subscriber>>();
+/**
+ * Événements réservés au DIRIGEANT.
+ *
+ * Le bus était clé par tenant seulement : tout membre recevait tout. Sans
+ * conséquence tant que seul `pending_action` est émis (la file est ouverte aux
+ * membres), mais le registre accepte déjà `rh.modifie` — et les routes `/rh/*`
+ * sont owner-only parce qu'elles portent des données de salariés. Le jour où
+ * le moteur de règles émet, un membre apprendrait l'identifiant d'un salarié
+ * modifié et la chronologie des changements RH : une fuite par CANAL
+ * AUXILIAIRE, sans qu'aucune route n'ait été ouverte.
+ *
+ * On borne donc AVANT que ces émetteurs existent. La liste suit les gardes
+ * `ownerRoute` du produit : trésorerie, marge, RH, revenus, coûts.
+ */
+const OWNER_ONLY_EVENTS: ReadonlySet<string> = new Set([
+  "rh.modifie",
+  "cout.modifie",
+  "immobilisation.modifiee",
+  "echeance.modifiee",
+]);
+
+interface Registration {
+  readonly deliver: Subscriber;
+  /** Rôle de l'abonné, relu à chaque revalidation — jamais figé à la connexion. */
+  role: string;
+}
+
+const subscribers = new Map<string, Set<Registration>>();
 
 /**
  * Abonne une connexion (SSE) aux événements d'UN tenant.
@@ -42,17 +83,26 @@ const subscribers = new Map<string, Set<Subscriber>>();
  * abonné ne survit pas à un redémarrage, et n'a pas à y survivre : sa
  * connexion non plus.
  */
-export function subscribeOutbox(tenantId: string, subscriber: Subscriber): () => void {
-  const set = subscribers.get(tenantId) ?? new Set<Subscriber>();
-  set.add(subscriber);
+export function subscribeOutbox(
+  tenantId: string,
+  subscriber: Subscriber,
+  role = "owner",
+): { unsubscribe: () => void; setRole: (role: string) => void } {
+  const registration: Registration = { deliver: subscriber, role };
+  const set = subscribers.get(tenantId) ?? new Set<Registration>();
+  set.add(registration);
   subscribers.set(tenantId, set);
-  return () => {
-    set.delete(subscriber);
+  const unsubscribe = (): void => {
+    set.delete(registration);
     // `subscribers.get(tenantId) === set` : un désabonnement rejoué après
     // qu'un nouvel abonné a installé un ensemble neuf effacerait des abonnés
     // VIVANTS — même garde que le bus côté navigateur.
     if (set.size === 0 && subscribers.get(tenantId) === set) subscribers.delete(tenantId);
   };
+  // Le rôle peut CHANGER pendant la vie du flux (promotion, rétrogradation) :
+  // le figer à la connexion rejouerait, sur un canal long, le défaut que
+  // `requireMembership` corrige à chaque requête ailleurs.
+  return { unsubscribe, setRole: (next: string) => (registration.role = next) };
 }
 
 /** Nombre d'abonnés d'un tenant — pour les tests et la journalisation. */
@@ -116,9 +166,11 @@ export async function relayTenantOutbox(
         objectId: event.objectId,
         occurredAt: event.occurredAt.toISOString(),
       };
-      for (const subscriber of subscribers.get(tenantId) ?? []) {
+      const ownerOnly = OWNER_ONLY_EVENTS.has(event.type);
+      for (const registration of subscribers.get(tenantId) ?? []) {
+        if (ownerOnly && registration.role !== "owner") continue;
         try {
-          subscriber(delivery);
+          registration.deliver(delivery);
         } catch {
           /* une connexion morte n'empêche pas les autres d'être servies */
         }
@@ -169,7 +221,20 @@ export function startOutboxRelay(options: OutboxRelayOptions = {}): () => void {
     if (running) return;
     running = true;
     try {
-      const tenants = await prisma.tenant.findMany({ select: { id: true } });
+      /*
+       * Ne parcourir QUE les tenants qui ont des non-transmis.
+       *
+       * La première version ouvrait au moins une transaction `withTenant` par
+       * tenant toutes les 2 secondes, même sans abonné et même sans le
+       * moindre événement : à mille tenants, des centaines de transactions par
+       * seconde dont l'essentiel ne rend rien. Une seule requête agrégée
+       * remplace tout ça — elle traverse la RLS par nécessité (elle ne lit
+       * aucune donnée, seulement des identifiants de tenant à réveiller) et
+       * c'est le même plan d'autorisation que `prisma.tenant.findMany`.
+       */
+      const pending = await prisma.$queryRaw<{ tenant_id: string }[]>`
+        SELECT DISTINCT tenant_id FROM outbox WHERE delivered_at IS NULL`;
+      const tenants = pending.map((row) => ({ id: row.tenant_id }));
       let relayed = 0;
       let failed = 0;
       let truncated = false;

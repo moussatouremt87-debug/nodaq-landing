@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
@@ -183,8 +184,8 @@ describe("le relais transmet, et il transmet AU MOINS une fois", () => {
     const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
     const recusA: string[] = [];
     const recusB: string[] = [];
-    const offA = subscribeOutbox(tenantA, (d) => recusA.push(d.type));
-    const offB = subscribeOutbox(tenantB, (d) => recusB.push(d.type));
+    const { unsubscribe: offA } = subscribeOutbox(tenantA, (d) => recusA.push(d.type));
+    const { unsubscribe: offB } = subscribeOutbox(tenantB, (d) => recusB.push(d.type));
     try {
       await withTenant(tenantA, (tx) =>
         emitOutbox(tx, tenantA, { type: "rh.modifie", objectType: "employe" }),
@@ -209,7 +210,7 @@ describe("le relais transmet, et il transmet AU MOINS une fois", () => {
      */
     const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
     const recus: string[] = [];
-    const off = subscribeOutbox(tenantA, (d) => recus.push(d.id));
+    const { unsubscribe: off } = subscribeOutbox(tenantA, (d) => recus.push(d.id));
     try {
       await withTenant(tenantA, (tx) =>
         emitOutbox(tx, tenantA, { type: "avis.modifie", objectType: "avis" }),
@@ -248,10 +249,10 @@ describe("le relais transmet, et il transmet AU MOINS une fois", () => {
   it("un abonné qui JETTE n'empêche pas les autres d'être servis", async () => {
     const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
     const recus: string[] = [];
-    const offCasse = subscribeOutbox(tenantA, () => {
+    const { unsubscribe: offCasse } = subscribeOutbox(tenantA, () => {
       throw new Error("connexion morte");
     });
-    const offSain = subscribeOutbox(tenantA, (d) => recus.push(d.type));
+    const { unsubscribe: offSain } = subscribeOutbox(tenantA, (d) => recus.push(d.type));
     try {
       await withTenant(tenantA, (tx) =>
         emitOutbox(tx, tenantA, { type: "echeance.modifiee", objectType: "echeance" }),
@@ -270,7 +271,7 @@ describe("le relais transmet, et il transmet AU MOINS une fois", () => {
     // rouvrirait le trou par l'autre bout.
     const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
     const livraisons: Record<string, unknown>[] = [];
-    const off = subscribeOutbox(tenantA, (d) => livraisons.push({ ...d }));
+    const { unsubscribe: off } = subscribeOutbox(tenantA, (d) => livraisons.push({ ...d }));
     try {
       await withTenant(tenantA, (tx) =>
         emitOutbox(tx, tenantA, { type: "cout.modifie", objectType: "cost_entry" }),
@@ -326,7 +327,7 @@ describe("le relais transmet, et il transmet AU MOINS une fois", () => {
       "../src/outboxRelay.js"
     );
     const recus: string[] = [];
-    const off = subscribeOutbox(tenantA, (d) => recus.push(d.type));
+    const { unsubscribe: off } = subscribeOutbox(tenantA, (d) => recus.push(d.type));
     off();
     expect(outboxSubscriberCount(tenantA)).toBe(0);
     await withTenant(tenantA, (tx) =>
@@ -387,7 +388,7 @@ describe("le bout en bout : valider une action périme les écrans des AUTRES", 
       );
 
       const recus: string[] = [];
-      const off = subscribeOutbox(tenantId, (d) => recus.push(d.type));
+      const { unsubscribe: off } = subscribeOutbox(tenantId, (d) => recus.push(d.type));
       try {
         const rejet = await app.inject({
           method: "POST",
@@ -409,4 +410,202 @@ describe("le bout en bout : valider une action périme les écrans des AUTRES", 
       await app.close();
     }
   }, 60_000);
+});
+
+describe("la route /events — la surface réellement exposée", () => {
+  async function withApp<T>(
+    run: (app: { inject: (opts: object) => Promise<{ statusCode: number }> }) => Promise<T>,
+  ): Promise<T> {
+    const { buildApp } = await import("../src/app.js");
+    const app = buildApp();
+    await app.ready();
+    try {
+      return await run(app as never);
+    } finally {
+      await app.close();
+    }
+  }
+
+  it("sans session, le flux est REFUSÉ", async () => {
+    /*
+     * L'isolation était prouvée au niveau du registre en mémoire et de la RLS,
+     * jamais au niveau HTTP — c'est pourtant la seule surface exposée. Un flux
+     * ouvert sans session diffuserait les événements d'un tenant à qui n'a pas
+     * de session du tout.
+     */
+    await withApp(async (app) => {
+      const res = await app.inject({ method: "GET", url: "/events" });
+      expect([401, 403]).toContain(res.statusCode);
+    });
+  }, 60_000);
+
+  it("le flux est lié au tenant de la SESSION, pas à un paramètre", async () => {
+    // Une route qui accepterait un tenant en query rejouerait la faute que
+    // toute la chaîne d'autorisation existe pour empêcher.
+    const { buildApp } = await import("../src/app.js");
+    const app = buildApp();
+    await app.ready();
+    try {
+      const signup = await app.inject({
+        method: "POST",
+        url: "/api/auth/sign-up/email",
+        payload: {
+          email: `events-${RUN}@example.com`,
+          password: "a-strong-password-123",
+          name: "Events",
+        },
+      });
+      const raw = signup.headers["set-cookie"];
+      const cookie = (Array.isArray(raw) ? raw : [raw])
+        .map((c) => String(c).split(";")[0])
+        .join("; ");
+      // Sans organisation active, la chaîne refuse : le tenant ne peut pas
+      // être suppléé par le client.
+      const sansOrg = await app.inject({
+        method: "GET",
+        url: `/events?tenantId=${tenantA}`,
+        headers: { cookie },
+      });
+      expect([400, 403]).toContain(sansOrg.statusCode);
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
+});
+
+describe("l'autorisation est revérifiée pendant la vie du flux", () => {
+  it("le battement RELIT l'appartenance et le rôle", async () => {
+    /*
+     * LE BLOQUANT DE LA REVUE. `businessRoute` tranchait à la connexion, puis
+     * plus jamais : ni révocation d'appartenance, ni déconnexion, ni
+     * expiration de session ne fermaient le flux, et aucune durée de vie
+     * maximale n'était posée. Un utilisateur exclu de l'organisation
+     * continuait de recevoir les événements de ses anciens collègues jusqu'à
+     * fermer l'onglet. Toutes les autres routes du produit recontrôlent
+     * l'appartenance à CHAQUE requête ; celle-ci ne le faisait jamais.
+     *
+     * On éprouve ici la garde par sa surface testable : le battement doit
+     * interroger `membership` et refléter le rôle relu sur l'abonnement.
+     */
+    const source = readFileSync(
+      new URL("../src/app.ts", import.meta.url).pathname,
+      "utf8",
+    );
+    const start = source.indexOf('app.get("/events"');
+    expect(start).toBeGreaterThan(-1);
+    const bloc = source.slice(start, source.indexOf("\n  app.get(\"/me\"", start));
+
+    // L'appartenance est RELUE, pas supposée.
+    expect(bloc).toMatch(/membership[\s\S]*findUnique/);
+    // Un membership disparu FERME le flux — sinon relire ne servirait à rien.
+    expect(bloc).toMatch(/if \(!membership\) \{[\s\S]*fermer\(\)/);
+    // Le rôle relu est propagé : une rétrogradation coupe les événements
+    // owner-only sans attendre une reconnexion.
+    expect(bloc).toContain("registration.setRole(membership.role)");
+    // Et le plafond de flux existe : sans lui, un onglet qui recharge en
+    // boucle épuise le processus sans franchir aucune garde.
+    expect(bloc).toContain("MAX_STREAMS_PER_USER");
+  });
+});
+
+describe("le filtre de rôle — une fuite par canal auxiliaire", () => {
+  it("un MEMBRE ne reçoit pas les événements owner-only", async () => {
+    /*
+     * Le bus était clé par tenant seulement : tout membre recevait tout. Sans
+     * conséquence tant que seul `pending_action` est émis — la file est
+     * ouverte aux membres — mais le registre accepte déjà `rh.modifie`, et les
+     * routes `/rh/*` sont owner-only parce qu'elles portent des données de
+     * salariés. Le jour où le moteur de règles émet, un membre apprendrait
+     * l'identifiant d'un salarié modifié et la chronologie des changements RH,
+     * sans qu'aucune route n'ait été ouverte.
+     */
+    const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
+    const vusParMembre: string[] = [];
+    const vusParOwner: string[] = [];
+    const membre = subscribeOutbox(tenantA, (d) => vusParMembre.push(d.type), "member");
+    const owner = subscribeOutbox(tenantA, (d) => vusParOwner.push(d.type), "owner");
+    try {
+      await withTenant(tenantA, (tx) =>
+        emitOutbox(tx, tenantA, { type: "rh.modifie", objectType: "employe" }),
+      );
+      await relayTenantOutbox(tenantA);
+      expect(vusParOwner).toContain("rh.modifie");
+      expect(vusParMembre).not.toContain("rh.modifie");
+    } finally {
+      membre.unsubscribe();
+      owner.unsubscribe();
+    }
+  });
+
+  it("une RÉTROGRADATION coupe les événements sans attendre une reconnexion", async () => {
+    // Le rôle figé à la connexion rejouerait, sur un canal long, le défaut que
+    // `requireMembership` corrige à chaque requête ailleurs.
+    const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
+    const recus: string[] = [];
+    const abonne = subscribeOutbox(tenantA, (d) => recus.push(d.type), "owner");
+    try {
+      abonne.setRole("member");
+      await withTenant(tenantA, (tx) =>
+        emitOutbox(tx, tenantA, { type: "cout.modifie", objectType: "cost_entry" }),
+      );
+      await relayTenantOutbox(tenantA);
+      expect(recus).not.toContain("cout.modifie");
+    } finally {
+      abonne.unsubscribe();
+    }
+  });
+
+  it("un MEMBRE reçoit bien ce qui le concerne — le filtre ne coupe pas tout", async () => {
+    // Une garde qui couperait tout serait « sûre » et inutile : la file de
+    // validation est ouverte aux membres, et c'est elle qui portait le bug.
+    const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
+    const recus: string[] = [];
+    const membre = subscribeOutbox(tenantA, (d) => recus.push(d.type), "member");
+    try {
+      await withTenant(tenantA, (tx) =>
+        emitOutbox(tx, tenantA, {
+          type: "action.validee",
+          objectType: "pending_action",
+        }),
+      );
+      await relayTenantOutbox(tenantA);
+      expect(recus).toContain("action.validee");
+    } finally {
+      membre.unsubscribe();
+    }
+  });
+});
+
+describe("les chaînes libres du format sont bornées", () => {
+  it("un objectType hors registre est REFUSÉ", () => {
+    expect(() =>
+      assertNoBusinessData({ type: "affaire.modifiee", objectType: "SARL Dupont" }),
+    ).toThrow(OutboxContentError);
+  });
+
+  it("un objectId qui ressemble à un LIBELLÉ est refusé", () => {
+    /*
+     * `objectId` et `objectType` sont les deux seules chaînes libres, et ce
+     * sont précisément celles qui partent vers tous les abonnés du tenant sur
+     * un canal long. Le commentaire d'origine affirmait « identifiant opaque »
+     * sans rien vérifier.
+     */
+    expect(() =>
+      assertNoBusinessData({
+        type: "affaire.modifiee",
+        objectType: "affaire",
+        objectId: "Jean Dupont <jean@example.com>",
+      }),
+    ).toThrow(OutboxContentError);
+  });
+
+  it("un UUID passe", () => {
+    expect(() =>
+      assertNoBusinessData({
+        type: "affaire.modifiee",
+        objectType: "affaire",
+        objectId: "0f1e2d3c-4b5a-4c6d-8e9f-0a1b2c3d4e5f",
+      }),
+    ).not.toThrow();
+  });
 });

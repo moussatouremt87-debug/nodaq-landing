@@ -76,11 +76,42 @@ describe("registre des mutations", () => {
     for (const effect of Object.values(MUTATION_EFFECTS)) {
       if (Array.isArray(effect)) for (const event of effect) emitted.add(event);
     }
-    // Le chat/cockpit émettent ceux des outils d'écriture, et les connecteurs
-    // émettent la purge FEC — sources hors registre HTTP.
-    const fromCode = readFileSync(join(WEB, "lib", "freshness.ts"), "utf-8");
+    /*
+     * Le chat/cockpit émettent ceux des outils d'écriture, et les connecteurs
+     * émettent la purge FEC — sources hors registre HTTP. Le registre vivant
+     * désormais dans `@nodaq/shared`, on lit la RÈGLE là où elle est.
+     */
+    const fromRules = readFileSync(
+      join(WEB, "..", "..", "packages", "shared", "src", "freshnessRules.ts"),
+      "utf-8",
+    );
     for (const event of Object.keys(EVENT_VIEWS) as DomainEvent[]) {
-      if (fromCode.includes(`: "${event}"`)) emitted.add(event);
+      if (fromRules.includes(`: "${event}"`)) emitted.add(event);
+    }
+    /*
+     * ET LE SERVEUR ÉMET AUSSI (4.4). Depuis que le bus d'événements existe,
+     * un événement peut n'avoir AUCUN émetteur côté navigateur et être
+     * parfaitement câblé : `action.echouee` naît d'un exécuteur qui échoue,
+     * que seule l'API observe. Ne scanner que le front ferait de cette garde
+     * un obstacle à contourner plutôt qu'une preuve — et la première réaction
+     * serait de retirer l'événement du registre, donc de reperdre
+     * l'invalidation.
+     */
+    const apiSrc = join(WEB, "..", "api", "src");
+    const walkApi = (dir: string): string[] => {
+      const out: string[] = [];
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) out.push(...walkApi(full));
+        else if (entry.name.endsWith(".ts")) out.push(full);
+      }
+      return out;
+    };
+    for (const file of walkApi(apiSrc)) {
+      const source = readFileSync(file, "utf-8");
+      for (const event of Object.keys(EVENT_VIEWS) as DomainEvent[]) {
+        if (source.includes(`"${event}"`)) emitted.add(event);
+      }
     }
     for (const file of pageFiles(APP)) {
       const source = readFileSync(file, "utf-8");

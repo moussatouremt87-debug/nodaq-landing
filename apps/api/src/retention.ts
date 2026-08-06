@@ -1,6 +1,13 @@
 import { prisma, withTenant } from "@nodaq/db";
 import type { Prisma } from "@nodaq/db";
 import { conversationCutoff, retentionVerdict } from "@nodaq/shared";
+
+/**
+ * Horizon des événements TRANSMIS. Court : leur seule utilité résiduelle est
+ * le diagnostic d'un incident récent, et ils portent des identifiants d'objets
+ * qui ont pu être effacés depuis.
+ */
+export const OUTBOX_RETENTION_DAYS = 7;
 import type { RetentionCandidate } from "@nodaq/shared";
 
 /*
@@ -57,6 +64,15 @@ export interface RetentionSweepResult {
    * drapeau enverrait chercher au mauvais endroit.
    */
   readonly conversationsTruncated: boolean;
+  /**
+   * Événements TRANSMIS supprimés (art. 5.1.e).
+   *
+   * `outbox` ne perdait jamais une ligne : le relais posait `delivered_at` et
+   * s'arrêtait là. La table grossissait donc sans fin, en conservant les
+   * `object_id` d'objets par ailleurs effacés — « effacer une source efface ce
+   * qui en DÉRIVE » vaut aussi pour un journal d'événements.
+   */
+  readonly outboxSupprimes: number;
   /**
    * Le balayage s'est arrêté sur sa borne : des lignes n'ont PAS été
    * examinées. Ce qui n'est pas calculé est DIT — un balayage tronqué qui se
@@ -363,6 +379,7 @@ export async function sweepTenantRetention(
    */
   const seuil =
     conversationDays === undefined ? conversationCutoff(now) : conversationCutoff(now, conversationDays);
+  const outboxSeuil = new Date(now.getTime() - OUTBOX_RETENTION_DAYS * 86_400_000);
   let conversationsSupprimees = 0;
   let conversationsTruncated = false;
   for (let page = 0; page < maxPages; page += 1) {
@@ -402,10 +419,36 @@ export async function sweepTenantRetention(
     }
   }
 
+  /*
+   * Un événement TRANSMIS a fini son office : il n'a plus d'abonné à servir,
+   * et le rejeu ne remonte jamais au-delà de la dernière page. Les
+   * non-transmis ne sont JAMAIS supprimés — les effacer serait perdre une
+   * invalidation qu'on n'a pas encore su livrer.
+   */
+  let outboxSupprimes = 0;
+  for (let page = 0; page < maxPages; page += 1) {
+    const supprimes = await withTenant(
+      tenantId,
+      (tx) =>
+        tx.$executeRaw`
+          DELETE FROM outbox
+          WHERE id IN (
+            SELECT id FROM outbox
+            WHERE delivered_at IS NOT NULL AND delivered_at < ${outboxSeuil}
+            ORDER BY delivered_at ASC
+            LIMIT ${RETENTION_PAGE_SIZE}
+          )`,
+      { timeoutMs: PAGE_TIMEOUT_MS },
+    );
+    outboxSupprimes += supprimes;
+    if (supprimes < RETENTION_PAGE_SIZE) break;
+  }
+
   return {
     rejected,
     reduced,
     scanned,
+    outboxSupprimes,
     unclassified: [...unclassified],
     truncated,
     conversationsSupprimees,
@@ -474,6 +517,7 @@ export function startRetentionSweep(options: RetentionSweepOptions = {}): () => 
       let scanned = 0;
       let conversationsSupprimees = 0;
       let conversationsTruncated = false;
+      let outboxSupprimes = 0;
       let failed = 0;
       let truncated = false;
       const truncatedTenants: string[] = [];
@@ -486,6 +530,7 @@ export function startRetentionSweep(options: RetentionSweepOptions = {}): () => 
           scanned += result.scanned;
           conversationsSupprimees += result.conversationsSupprimees;
           conversationsTruncated ||= result.conversationsTruncated;
+          outboxSupprimes += result.outboxSupprimes;
           truncated ||= result.truncated;
           if (result.truncated) truncatedTenants.push(tenant.id);
           for (const type of result.unclassified) unclassified.add(type);
@@ -508,6 +553,7 @@ export function startRetentionSweep(options: RetentionSweepOptions = {}): () => 
         scanned,
         conversationsSupprimees,
         conversationsTruncated,
+        outboxSupprimes,
         truncated,
         truncatedTenants,
         failed,

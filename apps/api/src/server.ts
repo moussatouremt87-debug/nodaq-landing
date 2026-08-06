@@ -122,6 +122,7 @@ const stopRetentionSweep = startRetentionSweep({
       // transcriptions sans en réduire une seule. Le seul compteur qui compte
       // des lignes DÉTRUITES était le seul à ne pas être journalisé.
       result.conversationsSupprimees === 0 &&
+      result.outboxSupprimes === 0 &&
       result.failed === 0 &&
       result.unclassified.length === 0
     ) {
@@ -135,6 +136,7 @@ const stopRetentionSweep = startRetentionSweep({
         rejected: result.rejected,
         reduced: result.reduced,
         conversationsSupprimees: result.conversationsSupprimees,
+        outboxSupprimes: result.outboxSupprimes,
         // Types d'action qu'aucun groupe ne réclame : ils ne sont PAS balayés,
         // et le dire est la seule façon qu'ils finissent par l'être.
         unclassified: result.unclassified,

@@ -207,7 +207,21 @@ export function Shell({ children }: { children: ReactNode }) {
    * d'ailleurs — l'agent, un autre onglet, un collègue — laissait l'écran
    * afficher des chiffres périmés sans le dire.
    */
-  useEffect(() => startLiveEvents(), []);
+  useEffect(() => {
+    /*
+     * LE FLUX SUIT LA SESSION ET L'ORGANISATION ACTIVE.
+     *
+     * Ouvert une fois pour la vie de la coquille, il avait deux défauts
+     * silencieux. Sur `/login`, il partait AVANT toute session : 401, et
+     * `EventSource` n'a pas le droit de reprendre sur un statut != 200 — donc
+     * mort définitif, jamais rouvert après connexion. Et après un changement
+     * d'organisation active, il restait attaché au tenant PRÉCÉDENT :
+     * invalidations parasites d'un côté, aucun événement de la nouvelle
+     * organisation de l'autre.
+     */
+    if (!me?.activeOrganizationId) return;
+    return startLiveEvents();
+  }, [me?.activeOrganizationId]);
 
   const activeOrg = me?.memberships.find((m) => m.tenantId === me.activeOrganizationId);
   // Fail-closed for real: business pages only mount once the session is
