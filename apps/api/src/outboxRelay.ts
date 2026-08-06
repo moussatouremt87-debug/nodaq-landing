@@ -152,9 +152,20 @@ export interface OutboxRelayResult {
  * TOUS LES TENANTS SONT TRAITÉS, y compris ceux dont personne n'écoute. Ne
  * traiter que les tenants abonnés laisserait un arriéré grossir sans fin chez
  * les autres, et le premier abonné à se connecter recevrait trois jours
- * d'invalidations d'un coup. Un écran fermé n'a rien à périmer : il relira au
- * moment où il s'ouvrira. Marquer transmis sans abonné est donc la sémantique
- * juste, pas un raccourci.
+ * d'invalidations d'un coup.
+ *
+ * MARQUER TRANSMIS SANS ABONNÉ EST UNE PERTE, et il faut la nommer : ces
+ * événements ne seront JAMAIS représentés. « Au moins une fois » vaut pour la
+ * ligne d'outbox, pas pour l'écran. Un écran fermé n'a rien à périmer — mais
+ * un écran OUVERT dont le flux est momentanément coupé (reconnexion des 30
+ * min, redéploiement, tunnel) resterait faux indéfiniment.
+ *
+ * Ce qui rend la perte acceptable n'est donc pas ici, c'est chez le
+ * consommateur : le client recharge TOUTES ses vues à chaque ouverture de flux
+ * (`apps/web/lib/liveEvents.ts`). Sans cette contrepartie, cette ligne
+ * fabriquerait des cockpits qui mentent. Un curseur `Last-Event-ID` serait
+ * l'autre réponse — plus fine, plus chère, et inutile tant qu'un rechargement
+ * complet coûte quelques requêtes.
  *
  * `deliveredAt` NE SERT QUE CE CONSOMMATEUR. Le moteur de règles (PR B) aura
  * ses propres besoins de garantie — un seul drapeau ne peut pas servir deux
@@ -278,7 +289,12 @@ export async function runOutboxRelayOnce(
 export interface OutboxRelayOptions {
   /** Cadence. Le critère du ticket est « moins de 5 s » : 2 s laisse la marge. */
   intervalMs?: number;
-  /** Reçoit le NOM de l'erreur et le tenant — jamais le message, qui pourrait citer une donnée. */
+  /**
+   * Reçoit le NOM de l'erreur (ou un code d'anomalie du relais) et le tenant —
+   * jamais un message d'exception, qui pourrait citer une donnée. Ce contrat
+   * avait déjà été entamé par son propre auteur, qui y passait une phrase
+   * complète : la phrase appartient au journal, pas au canal.
+   */
   onError?: (name: string, tenantId?: string) => void;
   onRelay?: (result: OutboxRelayResult & { tenants: number; failed: number }) => void;
 }
@@ -293,6 +309,17 @@ export function startOutboxRelay(options: OutboxRelayOptions = {}): () => void {
   const intervalMs = options.intervalMs ?? 2_000;
   const onError = options.onError ?? (() => undefined);
   let running = false;
+  /*
+   * Passages consécutifs sans aucun tenant. Journaliser DÈS le premier faisait
+   * crier la garde toutes les 2 s — ~86 000 lignes par jour — sur une base
+   * fraîche, où zéro tenant est la vérité : staging tout juste provisionné,
+   * `pnpm dev` avant `seed:demo`, avant la première inscription. Une garde qui
+   * crie pour rien finit ignorée, et c'est précisément CE signal qui doit
+   * rester audible : c'est lui qui manquait quand la RLS aveuglait la
+   * découverte. On le dit donc au premier passage, puis toutes les 5 minutes.
+   */
+  let zeroStreak = 0;
+  const ZERO_LOG_EVERY = Math.max(1, Math.round(300_000 / intervalMs));
 
   const tick = async (): Promise<void> => {
     if (running) return;
@@ -300,19 +327,24 @@ export function startOutboxRelay(options: OutboxRelayOptions = {}): () => void {
     try {
       const result = await runOutboxRelayOnce(onError);
       /*
-       * UN PASSAGE QUI NE DÉCOUVRE AUCUN TENANT EST ANORMAL, et c'est
+       * UN PASSAGE QUI NE DÉCOUVRE AUCUN TENANT MÉRITE D'ÊTRE DIT, et c'est
        * exactement le silence qui a caché la pire régression de ce ticket : la
        * découverte aveuglée par la RLS rendait zéro tenant, donc zéro
        * événement relayé, donc aucun journal. Le bug a été corrigé ; le
        * silence qui l'a rendu indétectable ne l'était pas.
        *
-       * Un produit vivant a toujours au moins un tenant. Zéro veut dire que la
-       * découverte est cassée, pas que personne n'écrit.
+       * Mais zéro tenant n'est PAS la preuve d'une panne : sur une base
+       * fraîche, c'est la vérité. On rapporte donc les deux lectures possibles
+       * — c'est un refus motivé, pas un diagnostic inventé — et on le fait au
+       * premier passage puis épisodiquement, jamais en boucle.
        */
-      if (result.tenants === 0) {
-        onError("outbox relay: aucun tenant découvert — la découverte est cassée");
+      const zero = result.tenants === 0;
+      zeroStreak = zero ? zeroStreak + 1 : 0;
+      const ditZero = zero && (zeroStreak === 1 || zeroStreak % ZERO_LOG_EVERY === 0);
+      if (ditZero) {
+        onError("outbox_relay_zero_tenants");
       }
-      if (result.relayed > 0 || result.failed > 0 || result.tenants === 0) {
+      if (result.relayed > 0 || result.failed > 0 || ditZero) {
         options.onRelay?.(result);
       }
     } catch (error) {

@@ -374,10 +374,10 @@ model PendingAction {
   @@schema("public")
 }
 
-/// Persisted conversation transcripts of virtual employees (blueprint agentic
-/// runtime), enabling resume-after-restart. Sealed by RLS (see the migration
-/// `agent_runtime`) — `messages` is the full transcript and may contain sensitive
-/// client content, exactly like `notes`.
+/// Domain event outbox (ticket 4.4) — written INSIDE the business transaction,
+/// so the event exists if and only if the write was committed. Carries what is
+/// needed to RE-READ (type, object kind, opaque id), never business values.
+/// Sealed by RLS (see the migration `outbox`).
 model OutboxEvent {
   id            String    @id @default(uuid()) @db.Uuid
   tenantId      String    @map("tenant_id") @db.Uuid
@@ -395,11 +395,20 @@ model OutboxEvent {
   deliveredAt   DateTime? @map("delivered_at")
   tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  @@index([tenantId, occurredAt])
+  /// ATTENTION — l'index réel est PARTIEL (`WHERE delivered_at IS NULL`) et vit
+  /// dans la migration `20260806090000_outbox` : Prisma ne sait pas exprimer un
+  /// index partiel. Le déclarer ici en index plein créait une DÉRIVE muette —
+  /// le prochain `migrate dev` aurait proposé un index plein sur une table qui
+  /// grossit sans fin, en supprimant le partiel qui sert le relais. Il n'est
+  /// donc PAS déclaré ; c'est un test de `packages/db` qui garantit sa présence.
   @@map("outbox")
   @@schema("public")
 }
 
+/// Persisted conversation transcripts of virtual employees (blueprint agentic
+/// runtime), enabling resume-after-restart. Sealed by RLS (see the migration
+/// `agent_runtime`) — `messages` is the full transcript and may contain sensitive
+/// client content, exactly like `notes`.
 model AgentConversation {
   id        String   @id @default(uuid()) @db.Uuid
   tenantId  String   @map("tenant_id") @db.Uuid

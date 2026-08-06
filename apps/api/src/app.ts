@@ -356,6 +356,18 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const openStreams = new Map<string, number>();
   /** Au-delà, on coupe : `EventSource` reconnecte et refait toute la chaîne. */
   const STREAM_MAX_LIFETIME_MS = 30 * 60_000;
+  /**
+   * Même porte que le battement : une durée de vie de trente minutes est
+   * intestable en l'état, et une branche non testée est une branche dont on
+   * ignore si elle marche. Le gate a montré que `STREAM_MAX_LIFETIME_MS`
+   * pouvait être supprimé sans qu'un seul test rougisse.
+   */
+  const lifetimeMsFor = (request: FastifyRequest): number => {
+    if (process.env.ALLOW_TEST_HEARTBEAT !== "1") return STREAM_MAX_LIFETIME_MS;
+    const raw = Number(request.headers["x-test-lifetime-ms"]);
+    if (!Number.isFinite(raw) || raw < 100) return STREAM_MAX_LIFETIME_MS;
+    return Math.min(raw, STREAM_MAX_LIFETIME_MS);
+  };
   /*
    * Registre des flux ouverts, pour l'ARRÊT PROPRE. Une requête SSE n'est
    * jamais « idle » : avec le défaut Fastify, `app.close()` attendait
@@ -405,6 +417,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       // livré par paquets de 4 ko — donc en rien du tout.
       "x-accel-buffering": "no",
     });
+    /*
+     * DÉLAI DE REPRISE DIT, pas laissé au navigateur. Chaque intervalle sans
+     * flux est une fenêtre d'invalidations émises pour personne (le relais
+     * marque transmis sans abonné) ; le client la referme en rechargeant tout
+     * à la reconnexion, mais plus elle est courte, moins il recharge. Les
+     * navigateurs choisissent seuls entre 3 s et un recul exponentiel après
+     * plusieurs échecs : on fixe la valeur au lieu de la subir.
+     */
+    reply.raw.write("retry: 3000\n\n");
     // Incrémenté APRÈS `writeHead` : si celui-ci jette, le compteur ne doit
     // pas garder un slot pour un flux qui n'a jamais existé — l'utilisateur
     // serait verrouillé à quatre flux définitivement.
@@ -448,7 +469,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
      *
      * On relit donc le membership à chaque battement — et on relit aussi le
      * RÔLE, pour qu'une rétrogradation coupe les événements owner-only sans
-     * attendre une reconnexion.
+     * attendre une reconnexion. Le délai est celui du battement : en
+     * production, un propriétaire rétrogradé peut recevoir des événements
+     * owner-only pendant AU PLUS 25 s. Ce n'est pas une garantie immédiate, et
+     * un besoin d'immédiateté passerait par une révocation poussée, pas par un
+     * battement plus rapide.
      */
     const heartbeat = setInterval(() => {
       void (async () => {
@@ -472,9 +497,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
          * tiers du défaut annoncé corrigé : une déconnexion, une session
          * expirée ou révoquée laissaient le flux vivant tant que
          * l'appartenance existait — c'est-à-dire dans le cas le plus banal.
+         *
+         * `disableRefresh` N'EST PAS UN DÉTAIL. Sans lui, better-auth REPOUSSE
+         * l'expiration de la session à chaque lecture passé `updateAge` : un
+         * onglet laissé ouvert, qui relit toutes les 25 s, maintiendrait sa
+         * session vivante indéfiniment. Le contrôle censé DURCIR la route
+         * aurait supprimé l'expiration par inactivité pour tout poste non
+         * verrouillé — on relit l'autorisation, on ne la renouvelle pas.
          */
         const session = await auth.api
-          .getSession({ headers: toWebHeaders(request) })
+          .getSession({ headers: toWebHeaders(request), query: { disableRefresh: true } })
           .catch(() => null);
         if (!session) {
           fermer();
@@ -507,11 +539,18 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
     /*
      * DURÉE DE VIE ABSOLUE. Même revalidé, un flux qui vit des jours accumule
-     * un état que rien ne remet à zéro. `EventSource` reconnecte tout seul :
-     * couper périodiquement ne coûte qu'une reconnexion et rejoue toute la
-     * chaîne d'autorisation depuis le début.
+     * un état que rien ne remet à zéro. `EventSource` reconnecte tout seul et
+     * rejoue toute la chaîne d'autorisation depuis le début.
+     *
+     * CE QUE ÇA COÛTE VRAIMENT — la version précédente de ce commentaire
+     * disait « une reconnexion », ce qui était faux. Pendant les ~3 s de
+     * reprise, le relais marque transmis des événements que PERSONNE ne
+     * reçoit, et ne les représentera jamais. La coupure coûte donc aussi un
+     * rechargement complet des vues montées, que le client déclenche à chaque
+     * ouverture de flux (`liveEvents.ts`). Sans lui, cette ligne fabriquerait
+     * un écran faux toutes les trente minutes.
      */
-    const maxLife = setTimeout(fermer, STREAM_MAX_LIFETIME_MS);
+    const maxLife = setTimeout(fermer, lifetimeMsFor(request));
     maxLife.unref();
 
     request.raw.on("close", fermer);

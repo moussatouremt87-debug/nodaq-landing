@@ -568,3 +568,96 @@ describe("transcriptions d'agent — une conversation dormante n'est plus une co
     expect(await vit(tenantD, recente)).toBe(false);
   }, 60_000);
 });
+
+/*
+ * PURGE DE L'OUTBOX (4.4) — la seule opération destructive du balayage qui
+ * n'avait aucun test.
+ *
+ * Le gate l'a relevée pour ce qu'elle est : un `DELETE` non couvert, dans un
+ * ticket dont un audit précédent avait déjà eu pour bloquant un `DELETE`
+ * exécuté avant sa garde. L'invariant qui compte — « un événement NON transmis
+ * n'est jamais supprimé » — ne tenait que par la relecture du code.
+ */
+describe("les événements transmis s'effacent, les autres JAMAIS", () => {
+  const JOUR_MS = 86_400_000;
+
+  /** Sème un événement et POSITIONNE `delivered_at` (Prisma ne le remonte pas). */
+  async function seedEvent(tenantId: string, deliveredAt: Date | null): Promise<string> {
+    const created = await withTenant(tenantId, (tx) =>
+      tx.outboxEvent.create({
+        data: { tenantId, type: "action.validee", objectType: "pending_action" },
+      }),
+    );
+    await admin.$executeRaw`UPDATE outbox SET delivered_at = ${deliveredAt} WHERE id = ${created.id}::uuid`;
+    return created.id;
+  }
+
+  const vitEvent = async (tenantId: string, id: string): Promise<boolean> =>
+    (await withTenant(tenantId, (tx) => tx.outboxEvent.findUnique({ where: { id } }))) !== null;
+
+  it("un événement NON transmis survit, même très ancien", async () => {
+    /*
+     * L'invariant porteur. L'effacer serait perdre une invalidation qu'on n'a
+     * pas encore su livrer — c'est-à-dire laisser un écran mentir pour
+     * toujours, ce que tout ce ticket existe pour empêcher.
+     */
+    const jamaisTransmis = await seedEvent(tenantC, null);
+
+    await sweepTenantRetention(tenantC, NOW);
+
+    expect(await vitEvent(tenantC, jamaisTransmis)).toBe(true);
+  }, 60_000);
+
+  it("un événement transmis RÉCEMMENT survit — l'horizon est de sept jours", async () => {
+    const recent = await seedEvent(tenantC, new Date(NOW.getTime() - 2 * JOUR_MS));
+
+    await sweepTenantRetention(tenantC, NOW);
+
+    expect(await vitEvent(tenantC, recent)).toBe(true);
+  }, 60_000);
+
+  it("un événement transmis HORS DÉLAI est supprimé, et compté", async () => {
+    const vieux = await seedEvent(tenantD, new Date(NOW.getTime() - 30 * JOUR_MS));
+
+    const result = await sweepTenantRetention(tenantD, NOW);
+
+    expect(await vitEvent(tenantD, vieux)).toBe(false);
+    expect(result.outboxSupprimes).toBeGreaterThanOrEqual(1);
+  }, 60_000);
+
+  it("la troncature est DITE — un arriéré muet est de la donnée conservée hors durée", async () => {
+    /*
+     * Cette boucle s'arrêtait en silence à la borne du passage, contrairement
+     * à ses deux voisines dans la même fonction. Un drapeau qui manque ne se
+     * voit pas : la table paraît balayée, et des lignes hors durée restent.
+     */
+    for (let i = 0; i < 3; i += 1) await seedEvent(tenantB, new Date(NOW.getTime() - 30 * JOUR_MS));
+
+    const result = await sweepTenantRetention(tenantB, NOW, { maxPages: 1, outboxPageSize: 1 });
+
+    expect(result.outboxSupprimes).toBe(1);
+    expect(result.outboxTruncated).toBe(true);
+  }, 60_000);
+
+  it("une dernière page PLEINE mais rien derrière ne crie PAS au loup", async () => {
+    const seul = await seedEvent(tenantA, new Date(NOW.getTime() - 30 * JOUR_MS));
+
+    const result = await sweepTenantRetention(tenantA, NOW, { maxPages: 1, outboxPageSize: 1 });
+
+    expect(await vitEvent(tenantA, seul)).toBe(false);
+    expect(result.outboxTruncated).toBe(false);
+  }, 60_000);
+
+  it("la purge ne franchit JAMAIS la frontière de tenant", async () => {
+    /*
+     * Le `DELETE` n'a pas de clause de tenant : il ne tient QUE par la RLS de
+     * `withTenant`. Passé un jour au client admin — la tentation d'un job
+     * « global » —, il viderait l'outbox de tous les tenants en une nuit.
+     */
+    const chezB = await seedEvent(tenantB, new Date(NOW.getTime() - 30 * JOUR_MS));
+
+    await sweepTenantRetention(tenantA, NOW);
+
+    expect(await vitEvent(tenantB, chezB)).toBe(true);
+  }, 60_000);
+});

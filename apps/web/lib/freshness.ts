@@ -67,6 +67,35 @@ export function emitDomainEvent(event: DomainEvent): void {
   }
 }
 
+/**
+ * Périme TOUTES les vues abonnées — le remède aux LACUNES du flux.
+ *
+ * Le relais serveur marque un événement « transmis » même si personne n'était
+ * branché à cet instant, et il ne le représente jamais. Toute coupure du flux
+ * — la reconnexion programmée toutes les 30 min, un redéploiement, un tunnel —
+ * est donc une fenêtre pendant laquelle des invalidations sont émises pour
+ * personne et PERDUES. Un écran ouvert resterait alors faux indéfiniment, sans
+ * horloge ni bandeau : la panne du 2.21, reconstituée par le mécanisme censé
+ * la corriger.
+ *
+ * Ne sachant pas ce qui a été manqué, on recharge tout : c'est la seule
+ * réponse correcte, et c'est celle qu'on tient déjà au retour de focus.
+ *
+ * On copie les ensembles avant d'itérer : un écran qui se désabonne pendant
+ * son propre rechargement muterait la collection en cours de parcours.
+ */
+export function refreshAllViews(): void {
+  for (const set of [...listeners.values()]) {
+    for (const listener of [...set]) {
+      try {
+        listener();
+      } catch {
+        /* un écran cassé ne périme pas les autres */
+      }
+    }
+  }
+}
+
 // --- Horodatage « à jour il y a X » -----------------------------------------
 
 const MINUTE = 60_000;

@@ -3,6 +3,9 @@ import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
 import type { PrismaClient } from "@prisma/client";
 import { assertNoBusinessData, emitOutbox, OutboxContentError } from "../src/outbox.js";
+import type { buildApp } from "../src/app.js";
+
+type TestApp = ReturnType<typeof buildApp>;
 
 /*
  * Bus d'événements (4.4, PR A) — l'ATOMICITÉ et la MINIMISATION.
@@ -681,4 +684,196 @@ describe("les chaînes libres du format sont bornées", () => {
       }),
     ).not.toThrow();
   });
+});
+
+/*
+ * LES BRANCHES QUE LE QUATRIÈME PASSAGE DU GATE A TROUVÉES NUES.
+ *
+ * Trois gardes du flux étaient écrites, commentées, et supprimables sans
+ * qu'un seul test rougisse : la relecture de SESSION (jamais atteinte, le
+ * membership étant contrôlé d'abord), le plafond de flux par utilisateur, et
+ * la durée de vie absolue. Une branche non testée est une branche dont on
+ * ignore si elle marche — et celles-ci portent de l'autorisation.
+ */
+
+/** Ouvre un compte + une organisation, et rend le cookie de session. */
+async function compte(
+  app: TestApp,
+  suffixe: string,
+): Promise<{ cookie: string; tenantId: string; userId: string }> {
+  const signup = await app.inject({
+    method: "POST",
+    url: "/api/auth/sign-up/email",
+    payload: {
+      email: `${suffixe}-${RUN}@example.com`,
+      password: "a-strong-password-123",
+      name: suffixe,
+    },
+  });
+  const raw = signup.headers["set-cookie"];
+  const cookie = (Array.isArray(raw) ? raw : [raw]).map((c) => String(c).split(";")[0]).join("; ");
+  const org = await app.inject({
+    method: "POST",
+    url: "/api/auth/organization/create",
+    headers: { cookie },
+    payload: { name: `Org ${suffixe} ${RUN}`, slug: `org-${suffixe}-${RUN}` },
+  });
+  const user = await admin.user.findFirstOrThrow({
+    where: { email: `${suffixe}-${RUN}@example.com` },
+    select: { id: true },
+  });
+  return { cookie, tenantId: org.json().id as string, userId: user.id };
+}
+
+const jusqua = async (predicat: () => boolean, limiteMs: number): Promise<boolean> => {
+  const fin = Date.now() + limiteMs;
+  while (Date.now() < fin) {
+    if (predicat()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return predicat();
+};
+
+describe("les gardes du flux s'exécutent, elles ne sont pas seulement écrites", () => {
+  it("une SESSION révoquée ferme le flux, appartenance intacte", async () => {
+    /*
+     * Mutation qui restait verte avant ce test : supprimer entièrement la
+     * relecture de session du battement. Le membership est contrôlé D'ABORD,
+     * donc le seul test existant (révocation d'appartenance) n'atteignait
+     * jamais cette branche — c'est-à-dire jamais le cas le plus banal :
+     * déconnexion, session expirée, session révoquée depuis un autre poste.
+     */
+    const { buildApp } = await import("../src/app.js");
+    const { outboxSubscriberCount } = await import("../src/outboxRelay.js");
+    const app = buildApp();
+    await app.ready();
+    try {
+      const { cookie, tenantId, userId } = await compte(app, "sess-revoke");
+      const stream = app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie, "x-test-heartbeat-ms": "1000" },
+      });
+      expect(await jusqua(() => outboxSubscriberCount(tenantId) > 0, 5_000)).toBe(true);
+
+      // L'appartenance reste INTACTE : seule la session disparaît.
+      await admin.session.deleteMany({ where: { userId } });
+      expect(
+        await admin.membership.count({ where: { tenantId, userId } }),
+        "l'appartenance doit rester : sinon c'est l'autre garde qu'on teste",
+      ).toBe(1);
+      expect(await jusqua(() => outboxSubscriberCount(tenantId) === 0, 10_000)).toBe(true);
+      await stream.catch(() => undefined);
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
+
+  it("le battement NE PROLONGE PAS la session — relire n'est pas renouveler", async () => {
+    /*
+     * Sans `disableRefresh`, better-auth repousse l'expiration à chaque
+     * lecture passé `updateAge` (24 h). Un onglet ouvert relit toutes les
+     * 25 s : la session serait repoussée à +7 jours, indéfiniment, sans la
+     * moindre action de l'utilisateur. Le contrôle censé DURCIR la route
+     * aurait supprimé l'expiration par inactivité pour tout poste non
+     * verrouillé.
+     *
+     * ON ISOLE LE BATTEMENT. La REQUÊTE d'ouverture passe par `requireAuth`,
+     * qui relit la session sans `disableRefresh` — et c'est voulu : une
+     * requête est une action de l'utilisateur, la fenêtre glissante est là
+     * pour ça. Positionner l'expiration AVANT la connexion mesurait donc ce
+     * rafraîchissement-là, pas celui qu'on veut interdire (mesuré : +2 jours,
+     * dus à `requireAuth`). On ouvre d'abord, on repositionne ensuite.
+     *
+     * L'expiration est placée DANS la fenêtre de renouvellement (moins de 6
+     * jours restants) : sans la garde, le premier battement la déplace.
+     */
+    const { buildApp } = await import("../src/app.js");
+    const { outboxSubscriberCount } = await import("../src/outboxRelay.js");
+    const app = buildApp();
+    await app.ready();
+    try {
+      const { cookie, tenantId, userId } = await compte(app, "sess-renew");
+      const stream = app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie, "x-test-heartbeat-ms": "1000" },
+      });
+      expect(await jusqua(() => outboxSubscriberCount(tenantId) > 0, 5_000)).toBe(true);
+
+      const cible = new Date(Date.now() + 5 * 86_400_000);
+      await admin.session.updateMany({ where: { userId }, data: { expiresAt: cible } });
+      // Laisser passer plusieurs battements : c'est leur répétition qui rend
+      // le renouvellement pernicieux — l'utilisateur, lui, ne fait rien.
+      await new Promise((r) => setTimeout(r, 3_500));
+
+      const session = await admin.session.findFirstOrThrow({
+        where: { userId },
+        select: { expiresAt: true },
+      });
+      expect(
+        session.expiresAt.getTime(),
+        "le battement a repoussé l'expiration : un onglet ouvert rendrait la session éternelle",
+      ).toBe(cible.getTime());
+      // NE PAS attendre le flux : rien ne le coupe ici — session valide,
+      // appartenance valide, durée de vie à trente minutes. C'est `app.close()`
+      // qui le draine, dans le `finally` ; l'attendre avant le bloquerait.
+      void stream.catch(() => undefined);
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
+
+  it("le PLAFOND de flux par utilisateur refuse le cinquième", async () => {
+    /*
+     * Mutation qui restait verte : remplacer `>= MAX_STREAMS_PER_USER` par
+     * `>= 10_000`. Chaque flux retient un socket, une minuterie et une entrée
+     * de registre : sans plafond, un onglet qui recharge en boucle épuise le
+     * processus sans jamais franchir une garde d'authentification.
+     */
+    const { buildApp } = await import("../src/app.js");
+    const { outboxSubscriberCount } = await import("../src/outboxRelay.js");
+    const app = buildApp();
+    await app.ready();
+    try {
+      const { cookie, tenantId } = await compte(app, "plafond");
+      const flux = [0, 1, 2, 3].map(() =>
+        app.inject({ method: "GET", url: "/events", headers: { cookie } }),
+      );
+      expect(await jusqua(() => outboxSubscriberCount(tenantId) >= 4, 10_000)).toBe(true);
+
+      const refuse = await app.inject({ method: "GET", url: "/events", headers: { cookie } });
+      expect(refuse.statusCode).toBe(429);
+      for (const f of flux) void f.catch(() => undefined);
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
+
+  it("la DURÉE DE VIE absolue coupe le flux, même parfaitement autorisé", async () => {
+    /*
+     * Mutation qui restait verte : supprimer le `setTimeout(fermer, …)`. La
+     * coupure périodique est ce qui empêche un flux de vivre des jours avec
+     * un état que rien ne remet à zéro — et c'est aussi elle qui impose au
+     * client de tout recharger à la reconnexion.
+     */
+    const { buildApp } = await import("../src/app.js");
+    const { outboxSubscriberCount } = await import("../src/outboxRelay.js");
+    const app = buildApp();
+    await app.ready();
+    try {
+      const { cookie, tenantId } = await compte(app, "duree-vie");
+      const stream = app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie, "x-test-lifetime-ms": "300" },
+      });
+      expect(await jusqua(() => outboxSubscriberCount(tenantId) > 0, 5_000)).toBe(true);
+      // Rien n'est révoqué : c'est la seule garde qui puisse couper ici.
+      expect(await jusqua(() => outboxSubscriberCount(tenantId) === 0, 10_000)).toBe(true);
+      await stream.catch(() => undefined);
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
 });

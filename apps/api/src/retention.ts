@@ -1,6 +1,7 @@
 import { prisma, withTenant } from "@nodaq/db";
 import type { Prisma } from "@nodaq/db";
 import { conversationCutoff, retentionVerdict } from "@nodaq/shared";
+import type { RetentionCandidate } from "@nodaq/shared";
 
 /**
  * Horizon des événements TRANSMIS. Court : leur seule utilité résiduelle est
@@ -8,7 +9,6 @@ import { conversationCutoff, retentionVerdict } from "@nodaq/shared";
  * qui ont pu être effacés depuis.
  */
 export const OUTBOX_RETENTION_DAYS = 7;
-import type { RetentionCandidate } from "@nodaq/shared";
 
 /*
  * Rétention de la file de validation (RGPD art. 5.1.e — limitation de la
@@ -73,6 +73,12 @@ export interface RetentionSweepResult {
    * qui en DÉRIVE » vaut aussi pour un journal d'événements.
    */
   readonly outboxSupprimes: number;
+  /**
+   * Des événements transmis restent hors durée, la borne du passage étant
+   * atteinte. Drapeau distinct des deux autres : partagé, il enverrait
+   * chercher un arriéré de propositions là où il n'y a qu'un journal.
+   */
+  readonly outboxTruncated: boolean;
   /**
    * Le balayage s'est arrêté sur sa borne : des lignes n'ont PAS été
    * examinées. Ce qui n'est pas calculé est DIT — un balayage tronqué qui se
@@ -262,11 +268,18 @@ export async function sweepTenantRetention(
      * qui décide qu'un tenant reste en retard, et personne ne l'écrirait.
      */
     readonly conversationPageSize?: number;
+    /**
+     * Même raison, troisième boucle. Cette purge est la seule opération
+     * DESTRUCTIVE du balayage à n'avoir eu aucun test : le gate l'a relevée
+     * après qu'un `DELETE` non gardé eut été le bloquant d'un audit précédent.
+     */
+    readonly outboxPageSize?: number;
   } = {},
 ): Promise<RetentionSweepResult> {
   const maxPages = options.maxPages ?? RETENTION_MAX_PAGES;
   const conversationDays = options.conversationRetentionDays;
   const conversationPageSize = options.conversationPageSize ?? RETENTION_PAGE_SIZE;
+  const outboxPageSize = options.outboxPageSize ?? RETENTION_PAGE_SIZE;
   let rejected = 0;
   let reduced = 0;
   let scanned = 0;
@@ -426,6 +439,7 @@ export async function sweepTenantRetention(
    * invalidation qu'on n'a pas encore su livrer.
    */
   let outboxSupprimes = 0;
+  let outboxTruncated = false;
   for (let page = 0; page < maxPages; page += 1) {
     const supprimes = await withTenant(
       tenantId,
@@ -436,12 +450,27 @@ export async function sweepTenantRetention(
             SELECT id FROM outbox
             WHERE delivered_at IS NOT NULL AND delivered_at < ${outboxSeuil}
             ORDER BY delivered_at ASC
-            LIMIT ${RETENTION_PAGE_SIZE}
+            LIMIT ${outboxPageSize}
           )`,
       { timeoutMs: PAGE_TIMEOUT_MS },
     );
     outboxSupprimes += supprimes;
-    if (supprimes < RETENTION_PAGE_SIZE) break;
+    if (supprimes < outboxPageSize) break;
+    /*
+     * Même sondage que ses deux voisines, et pour la même raison : cette
+     * boucle s'arrêtait EN SILENCE à la borne du passage. Un arriéré qui reste
+     * sans qu'un mot le dise, c'est de la donnée conservée hors durée en
+     * croyant l'avoir balayée — « ce qui n'est pas calculé est DIT ».
+     */
+    if (page === maxPages - 1) {
+      const reste = await withTenant(tenantId, (tx) =>
+        tx.outboxEvent.findFirst({
+          where: { deliveredAt: { not: null, lt: outboxSeuil } },
+          select: { id: true },
+        }),
+      );
+      outboxTruncated = reste !== null;
+    }
   }
 
   return {
@@ -449,6 +478,7 @@ export async function sweepTenantRetention(
     reduced,
     scanned,
     outboxSupprimes,
+    outboxTruncated,
     unclassified: [...unclassified],
     truncated,
     conversationsSupprimees,
@@ -518,6 +548,7 @@ export function startRetentionSweep(options: RetentionSweepOptions = {}): () => 
       let conversationsSupprimees = 0;
       let conversationsTruncated = false;
       let outboxSupprimes = 0;
+      let outboxTruncated = false;
       let failed = 0;
       let truncated = false;
       const truncatedTenants: string[] = [];
@@ -531,6 +562,7 @@ export function startRetentionSweep(options: RetentionSweepOptions = {}): () => 
           conversationsSupprimees += result.conversationsSupprimees;
           conversationsTruncated ||= result.conversationsTruncated;
           outboxSupprimes += result.outboxSupprimes;
+          outboxTruncated ||= result.outboxTruncated;
           truncated ||= result.truncated;
           if (result.truncated) truncatedTenants.push(tenant.id);
           for (const type of result.unclassified) unclassified.add(type);
@@ -554,6 +586,7 @@ export function startRetentionSweep(options: RetentionSweepOptions = {}): () => 
         conversationsSupprimees,
         conversationsTruncated,
         outboxSupprimes,
+        outboxTruncated,
         truncated,
         truncatedTenants,
         failed,

@@ -44,6 +44,34 @@ function sources(): string[] {
  * appelés par `call()` donc étaient INVISIBLES à la garde. Elle n'aurait pas
  * trouvé ce qu'elle prétendait garder, et ne trouvera pas le prochain.
  */
+/**
+ * Fenêtre de recherche après `call(`. Mesuré sur les sources actuelles : le
+ * plus long premier argument (un schéma `z.object` en ligne) tient en 239
+ * caractères. La marge est donc mince — et c'est pourquoi le dépassement doit
+ * ÉCHOUER, pas passer inaperçu (voir `callsSansChemin`).
+ */
+const FENETRE = 300;
+
+/**
+ * Appels `call(` dont aucun chemin n'a pu être extrait.
+ *
+ * La version précédente faisait `if (chemin?.[1])` et passait son chemin :
+ * un appel hors fenêtre disparaissait EN SILENCE de l'ensemble gardé, ce qui
+ * est exactement la cécité que ce fichier existe pour empêcher. Une garde doit
+ * échouer FERMÉE : trois champs de plus dans un schéma en ligne, et le
+ * prochain `brief` redevenait invisible.
+ */
+function callsSansChemin(): number {
+  let orphelins = 0;
+  for (const source of sources()) {
+    for (const match of source.matchAll(/\bcall\s*\(/g)) {
+      const fenetre = source.slice(match.index, match.index + FENETRE);
+      if (!/["'`]\/([a-z0-9-]+)/.test(fenetre)) orphelins += 1;
+    }
+  }
+  return orphelins;
+}
+
 function usedPrefixes(): Set<string> {
   const used = new Set<string>();
   for (const source of sources()) {
@@ -65,7 +93,7 @@ function usedPrefixes(): Set<string> {
      * chemin littéral, quel que soit ce qui précède.
      */
     for (const match of source.matchAll(/\bcall\s*\(/g)) {
-      const fenetre = source.slice(match.index, match.index + 300);
+      const fenetre = source.slice(match.index, match.index + FENETRE);
       const chemin = /["'`]\/([a-z0-9-]+)/.exec(fenetre);
       if (chemin?.[1]) used.add(chemin[1]);
     }
@@ -140,5 +168,20 @@ describe("tout chemin /backend appelé par le code est proxifié", () => {
     // …et un appel dont le PREMIER argument contient une virgule, la forme
     // qui échappait à la version précédente.
     expect(used.has("rapports")).toBe(true);
+  });
+
+  it("la garde échoue FERMÉE : aucun `call()` ne lui échappe en silence", () => {
+    /*
+     * La fenêtre après `call(` est une heuristique, et la marge mesurée est de
+     * 61 caractères. Sans cette assertion, la dépasser ne rougissait RIEN :
+     * l'appel disparaissait simplement de l'ensemble gardé, et le prochain
+     * préfixe manquant repassait inaperçu — le défaut que ce fichier existe
+     * pour empêcher, reconstitué par sa propre correction.
+     */
+    const orphelins = callsSansChemin();
+    expect(
+      orphelins,
+      `${orphelins} appel(s) call() sans chemin détecté — élargis FENETRE ou sors le schéma de l'appel`,
+    ).toBe(0);
   });
 });

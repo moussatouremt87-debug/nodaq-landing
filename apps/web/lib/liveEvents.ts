@@ -1,4 +1,4 @@
-import { emitDomainEvent, EVENT_VIEWS } from "./freshness";
+import { emitDomainEvent, EVENT_VIEWS, refreshAllViews } from "./freshness";
 import type { DomainEvent } from "./freshness";
 
 /*
@@ -43,24 +43,71 @@ function isKnownEvent(type: string): type is DomainEvent {
 }
 
 /**
+ * Délai avant de retenter APRÈS un abandon définitif d'`EventSource`.
+ *
+ * `EventSource` reprend tout seul sur une coupure réseau, mais PAS sur un
+ * statut != 200 : il passe en `CLOSED` et ne rouvre jamais. Un cinquième
+ * onglet refusé par le plafond de flux (429) restait donc muet pour toute la
+ * vie de la page, alors que le refus est transitoire par nature — il suffit
+ * qu'un autre onglet se ferme.
+ */
+const REOPEN_MS = 30_000;
+
+/** `EventSource.CLOSED` — la constante n'existe pas sur toutes les cibles. */
+const CLOSED = 2;
+
+/**
  * Ouvre le flux et réinjecte les événements dans le bus local.
  *
- * Rend la fonction d'arrêt. `EventSource` reconnecte tout seul en cas de
- * coupure — c'est précisément pourquoi on ne construit rien de plus ici : un
- * mécanisme de reprise maison serait un second chemin à maintenir, et un
- * battement de cœur côté serveur suffit à garder la connexion ouverte à
- * travers les proxys.
+ * Rend la fonction d'arrêt.
+ *
+ * TOUTE (RÉ)OUVERTURE RECHARGE TOUT. C'est le point non négociable : le relais
+ * serveur marque un événement transmis même sans abonné branché, et ne le
+ * représente jamais. Chaque intervalle sans flux — reconnexion programmée
+ * toutes les 30 min, redéploiement, tunnel, 429 — est donc une fenêtre
+ * d'invalidations PERDUES. Ne rien faire à l'ouverture laissait un écran
+ * ouvert afficher des chiffres faux pour toujours. On ne sait pas ce qui a été
+ * manqué : on recharge tout, y compris à la première ouverture, qui suit le
+ * chargement des écrans et porte donc la même fenêtre.
  */
-export function startLiveEvents(url = "/backend/events"): () => void {
+export function startLiveEvents(url = "/backend/events", reopenMs = REOPEN_MS): () => void {
   if (typeof EventSource === "undefined") return () => undefined;
-  const source = new EventSource(url, { withCredentials: true });
-  source.onmessage = (message: MessageEvent<string>) => {
-    try {
-      const delivery = JSON.parse(message.data) as LiveDelivery;
-      if (isKnownEvent(delivery.type)) emitDomainEvent(delivery.type);
-    } catch {
-      /* une trame illisible ne doit pas couper l'écoute des suivantes */
-    }
+  let stopped = false;
+  let source: EventSource | null = null;
+  let reopen: ReturnType<typeof setTimeout> | null = null;
+
+  const open = (): void => {
+    if (stopped) return;
+    const current = new EventSource(url, { withCredentials: true });
+    source = current;
+    current.onopen = () => {
+      refreshAllViews();
+    };
+    current.onmessage = (message: MessageEvent<string>) => {
+      try {
+        const delivery = JSON.parse(message.data) as LiveDelivery;
+        if (isKnownEvent(delivery.type)) emitDomainEvent(delivery.type);
+      } catch {
+        /* une trame illisible ne doit pas couper l'écoute des suivantes */
+      }
+    };
+    current.onerror = () => {
+      // `CLOSED` = abandon définitif. Sur les autres états, `EventSource`
+      // reprend seul : le doubler d'une reprise maison ouvrirait deux flux.
+      if (current.readyState !== CLOSED) return;
+      current.close();
+      if (stopped || reopen !== null) return;
+      reopen = setTimeout(() => {
+        reopen = null;
+        open();
+      }, reopenMs);
+    };
   };
-  return () => source.close();
+
+  open();
+  return () => {
+    stopped = true;
+    if (reopen !== null) clearTimeout(reopen);
+    source?.close();
+  };
 }

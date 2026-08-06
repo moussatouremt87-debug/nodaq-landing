@@ -230,4 +230,19 @@ describe("branchement de l'invalidation", () => {
     expect(shell).toContain('subscribeView("validation"');
     expect(shell).toContain('subscribeView("nav"');
   });
+
+  it("la coquille BRANCHE le flux serveur — le seul point de branchement du produit", () => {
+    /*
+     * Le trou que ce test ferme, trouvé par le quatrième passage du gate :
+     * supprimer la ligne `startLiveEvents()` de `shell.tsx` laissait les 48
+     * tests web VERTS. Le flux ne s'ouvrait plus, le produit se comportait
+     * exactement comme avant le ticket, et rien ne rougissait — un bus parfait
+     * ne sert à rien si personne ne l'écoute.
+     */
+    const shell = readFileSync(join(APP, "shell.tsx"), "utf-8");
+    expect(shell).toContain("startLiveEvents(");
+    // Et il suit l'organisation active : branché une fois pour toutes, il
+    // resterait attaché au tenant précédent après un changement d'organisation.
+    expect(shell).toContain("me?.activeOrganizationId");
+  });
 });

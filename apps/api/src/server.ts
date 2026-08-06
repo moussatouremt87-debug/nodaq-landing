@@ -111,6 +111,15 @@ const stopRetentionSweep = startRetentionSweep({
         "retention sweep truncated — transcripts remain",
       );
     }
+    // Même raison, troisième arriéré : des événements transmis restent hors
+    // durée. Muet, ce cas conservait de la donnée au-delà de son horizon en
+    // laissant croire que la table avait été balayée.
+    if (result.outboxTruncated) {
+      app.log.warn(
+        { tenants: result.tenants, outboxSupprimes: result.outboxSupprimes },
+        "retention sweep truncated — delivered events remain",
+      );
+    }
     // Un passage qui n'a RIEN fait ne se journalise pas… sauf s'il a échoué
     // quelque part : un échec silencieux et un tenant propre se ressemblent
     // trop pour qu'on les confonde.
@@ -161,10 +170,23 @@ app.addHook("onClose", async () => stopRetentionSweep());
 const { startOutboxRelay } = await import("./outboxRelay.js");
 app.log.warn(
   {},
-  "outbox relay: single-replica only — a second API instance would silently swallow invalidations",
+  "outbox relay: single-replica only — a second API instance would silently swallow invalidations; " +
+    "max_scale=1 holds this for a revision, NOT during a rolling deploy where two revisions overlap",
 );
 const stopOutboxRelay = startOutboxRelay({
-  onError: (name, tenantId) => app.log.warn({ err: name, tenantId }, "outbox relay failed"),
+  onError: (name, tenantId) => {
+    // Zéro tenant n'est pas un échec : sur une base fraîche c'est la vérité,
+    // et le journaliser comme une panne enverrait chercher là où il n'y a
+    // rien. On le dit pour ce que c'est — deux lectures, aucune inventée.
+    if (name === "outbox_relay_zero_tenants") {
+      app.log.warn(
+        {},
+        "outbox relay: zero tenants discovered — empty database, or discovery is broken",
+      );
+      return;
+    }
+    app.log.warn({ err: name, tenantId }, "outbox relay failed");
+  },
   // Des compteurs, jamais un type d'objet ni un identifiant : ce journal
   // tourne toutes les 2 s, et il ne doit rien apprendre à qui le lit.
   onRelay: (result) => {

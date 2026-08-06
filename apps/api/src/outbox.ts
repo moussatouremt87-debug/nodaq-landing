@@ -98,8 +98,19 @@ const OBJECT_TYPES = [
 /** Levée quand un appelant tente de faire porter de la donnée à un événement. */
 export class OutboxContentError extends Error {}
 
-/** UUID ou identifiant court sans espace : jamais un libellé. */
-const OPAQUE_ID = /^[A-Za-z0-9_:.-]{1,64}$/;
+/**
+ * UUID, et rien d'autre.
+ *
+ * La première version acceptait toute chaîne sans espace de 64 caractères.
+ * C'était une classe de caractères présentée comme une garantie d'opacité :
+ * `jean.dupont`, un IBAN, un SIRET, un numéro de téléphone la traversaient
+ * sans un mot — et `objectId` part vers TOUS les abonnés d'un tenant sur un
+ * canal ouvert en permanence. Le coût des deux erreurs est asymétrique :
+ * refuser un identifiant exotique casse un appel en développement, l'accepter
+ * diffuse de la PII en silence. Toutes les clés du produit sont des UUID ; un
+ * jour où ce ne sera plus vrai, l'élargissement devra être délibéré.
+ */
+const OPAQUE_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 /**
  * Vérifie qu'un événement ne transporte que de quoi RELIRE. PURE.
@@ -131,7 +142,7 @@ export function assertNoBusinessData(emit: OutboxEmit): void {
   }
   if (emit.objectId !== undefined && emit.objectId !== null && !OPAQUE_ID.test(emit.objectId)) {
     throw new OutboxContentError(
-      "objectId doit être un identifiant OPAQUE : un libellé diffuserait de la donnée à tous les abonnés",
+      "objectId doit être un UUID : un libellé diffuserait de la donnée à tous les abonnés du tenant",
     );
   }
   // Un type inconnu du registre ne périmerait aucune vue : l'événement serait

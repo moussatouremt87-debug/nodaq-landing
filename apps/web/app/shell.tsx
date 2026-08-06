@@ -203,9 +203,13 @@ export function Shell({ children }: { children: ReactNode }) {
    * Ce qui arrive est réinjecté dans le bus local, qui périme les vues selon
    * le registre — donc AUCUN écran n'a à connaître l'existence de ce flux.
    *
-   * C'est le dernier maillon du bug 2.21 : jusqu'ici, une écriture venue
-   * d'ailleurs — l'agent, un autre onglet, un collègue — laissait l'écran
-   * afficher des chiffres périmés sans le dire.
+   * PÉRIMÈTRE RÉEL — PR A pose la CANALISATION, pas encore tous les robinets.
+   * Le serveur n'émet aujourd'hui que sur la file de validation (approbation,
+   * rejet) : trois sites d'appel de `emitOutbox`, sur vingt-trois événements
+   * au registre. Une photo déposée par un collègue, un import FEC, un webhook
+   * ne traversent pas encore ce flux — c'est le travail de PR B. Écrire ici
+   * « le dernier maillon du 2.21 » empêcherait le prochain lecteur de chercher
+   * les maillons qui manquent.
    */
   useEffect(() => {
     /*

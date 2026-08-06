@@ -207,15 +207,32 @@ resource "scaleway_container" "api" {
   # des utilisateurs, en silence.
   #
   # Le code le documentait déjà en affirmant « le déploiement est
-  # mono-réplique » — c'était faux, ce fichier autorisait 2. Un commentaire ne
-  # garde rien ; cette ligne, si.
+  # mono-réplique » — c'était faux, ce fichier autorisait 2.
+  #
+  # CE QUE CETTE LIGNE NE GARDE PAS, et il faut le dire : `max_scale` borne les
+  # instances d'UNE révision, pas les processus vivants pendant le REMPLACEMENT
+  # d'une révision. Un déploiement sans coupure implique par construction un
+  # recouvrement — donc deux relais, donc le scénario ci-dessus, pendant
+  # quelques dizaines de secondes à chaque `deploy-staging`. Cette ligne fait
+  # passer la fenêtre de « permanente » à « le temps d'un déploiement ». Ce
+  # n'est pas la même chose qu'un absolu, et le prochain lecteur doit le savoir.
   #
   # CE QUI LÈVERA LA CONTRAINTE : un canal partagé (`LISTEN/NOTIFY` PostgreSQL)
   # qui rend le registre en mémoire inutile. Un verrou entre répliques ne
   # suffirait PAS — la réplique gagnante marquerait les événements transmis
   # sans servir les abonnés de l'autre.
-  max_scale          = 1
-  privacy            = "public"
+  max_scale = 1
+  # PLAFOND DE CONCURRENCE EXPLICITE, conséquence directe de `max_scale = 1`.
+  #
+  # Le bus ajoute une connexion PERMANENTE par onglet (jusqu'à 4 par
+  # utilisateur, tenues 30 min). Avec une seule instance, ces sockets occupent
+  # la même enveloppe de concurrence que les requêtes ordinaires : au défaut du
+  # provider, quelques dizaines d'onglets suffiraient à mettre EN FILE les
+  # requêtes de tous les tenants. On pose donc la valeur au lieu de la subir.
+  # Elle est haute parce qu'un flux SSE est presque toujours au repos : il
+  # occupe un socket, pas un cœur.
+  max_concurrency = 200
+  privacy         = "public"
   # Même politique que litellm : le moteur natif Prisma (lib .so) tourne dans
   # la sandbox v2 (micro-VM), compatibilité maximale.
   sandbox = "v2"
