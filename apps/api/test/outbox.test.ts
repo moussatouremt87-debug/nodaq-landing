@@ -177,3 +177,162 @@ describe("isolation", () => {
     }
   });
 });
+
+describe("le relais transmet, et il transmet AU MOINS une fois", () => {
+  it("un abonné reçoit l'événement de SON tenant, et rien d'autre", async () => {
+    const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
+    const recusA: string[] = [];
+    const recusB: string[] = [];
+    const offA = subscribeOutbox(tenantA, (d) => recusA.push(d.type));
+    const offB = subscribeOutbox(tenantB, (d) => recusB.push(d.type));
+    try {
+      await withTenant(tenantA, (tx) =>
+        emitOutbox(tx, tenantA, { type: "rh.modifie", objectType: "employe" }),
+      );
+      await relayTenantOutbox(tenantA);
+      expect(recusA).toContain("rh.modifie");
+      // L'abonné de l'AUTRE tenant n'a rien vu : le registre est clé par
+      // tenant, et le tenantId vient de la chaîne d'autorisation.
+      expect(recusB).not.toContain("rh.modifie");
+    } finally {
+      offA();
+      offB();
+    }
+  });
+
+  it("un événement transmis ne l'est pas DEUX fois", async () => {
+    /*
+     * Sans marquage, chaque passage du relais rejouerait tout l'historique :
+     * le cockpit clignoterait toutes les deux secondes et l'API servirait des
+     * rechargements pour rien. Le rejeu ne doit avoir lieu qu'après un crash,
+     * pas à chaque tour.
+     */
+    const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
+    const recus: string[] = [];
+    const off = subscribeOutbox(tenantA, (d) => recus.push(d.id));
+    try {
+      await withTenant(tenantA, (tx) =>
+        emitOutbox(tx, tenantA, { type: "avis.modifie", objectType: "avis" }),
+      );
+      const premier = await relayTenantOutbox(tenantA);
+      expect(premier.relayed).toBeGreaterThanOrEqual(1);
+      const taille = recus.length;
+
+      const second = await relayTenantOutbox(tenantA);
+      expect(second.relayed).toBe(0);
+      expect(recus).toHaveLength(taille);
+    } finally {
+      off();
+    }
+  });
+
+  it("SANS abonné, l'événement est quand même marqué transmis", async () => {
+    /*
+     * Ne traiter que les tenants abonnés laisserait un arriéré grossir sans
+     * fin chez les autres, et le premier abonné à se connecter recevrait trois
+     * jours d'invalidations d'un coup. Un écran fermé n'a rien à périmer : il
+     * relira en s'ouvrant. C'est la sémantique juste, pas un raccourci.
+     */
+    const { relayTenantOutbox } = await import("../src/outboxRelay.js");
+    await withTenant(tenantB, (tx) =>
+      emitOutbox(tx, tenantB, { type: "module.bascule", objectType: "module" }),
+    );
+    const res = await relayTenantOutbox(tenantB);
+    expect(res.relayed).toBeGreaterThanOrEqual(1);
+    const restants = await withTenant(tenantB, (tx) =>
+      tx.outboxEvent.count({ where: { deliveredAt: null } }),
+    );
+    expect(restants).toBe(0);
+  });
+
+  it("un abonné qui JETTE n'empêche pas les autres d'être servis", async () => {
+    const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
+    const recus: string[] = [];
+    const offCasse = subscribeOutbox(tenantA, () => {
+      throw new Error("connexion morte");
+    });
+    const offSain = subscribeOutbox(tenantA, (d) => recus.push(d.type));
+    try {
+      await withTenant(tenantA, (tx) =>
+        emitOutbox(tx, tenantA, { type: "echeance.modifiee", objectType: "echeance" }),
+      );
+      await relayTenantOutbox(tenantA);
+      expect(recus).toContain("echeance.modifiee");
+    } finally {
+      offCasse();
+      offSain();
+    }
+  });
+
+  it("l'événement livré ne porte AUCUNE donnée métier", async () => {
+    // La garde d'émission borne ce qui entre ; celle-ci borne ce qui SORT.
+    // Une livraison enrichie « pour éviter une requête » au consommateur
+    // rouvrirait le trou par l'autre bout.
+    const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
+    const livraisons: Record<string, unknown>[] = [];
+    const off = subscribeOutbox(tenantA, (d) => livraisons.push({ ...d }));
+    try {
+      await withTenant(tenantA, (tx) =>
+        emitOutbox(tx, tenantA, { type: "cout.modifie", objectType: "cost_entry" }),
+      );
+      await relayTenantOutbox(tenantA);
+      const derniere = livraisons.at(-1) ?? {};
+      expect(Object.keys(derniere).sort()).toEqual([
+        "id",
+        "objectId",
+        "objectType",
+        "occurredAt",
+        "type",
+      ]);
+    } finally {
+      off();
+    }
+  });
+
+  it("un passage TRONQUÉ le dit, au lieu de se croire à jour", async () => {
+    const { relayTenantOutbox } = await import("../src/outboxRelay.js");
+    for (let i = 0; i < 3; i += 1) {
+      await withTenant(tenantB, (tx) =>
+        emitOutbox(tx, tenantB, { type: "stock.modifie", objectType: "stock_item" }),
+      );
+    }
+    const res = await relayTenantOutbox(tenantB, { maxPages: 1, pageSize: 1 });
+    expect(res.relayed).toBe(1);
+    expect(res.truncated).toBe(true);
+  });
+
+  it("une dernière page PLEINE mais rien derrière ne crie PAS au loup", async () => {
+    /*
+     * Déduire la troncature de « la dernière page autorisée était pleine »
+     * signale un arriéré inexistant dès que le nombre d'événements tombe pile
+     * sur un multiple de la page — et un drapeau qui se lève pour rien est un
+     * drapeau qu'on cesse de regarder. On SONDE ce qui reste.
+     */
+    const { relayTenantOutbox } = await import("../src/outboxRelay.js");
+    // On vide d'abord : la troncature ne doit dépendre que de CE qu'on sème.
+    await relayTenantOutbox(tenantB);
+    await withTenant(tenantB, (tx) =>
+      emitOutbox(tx, tenantB, { type: "document.ajoute", objectType: "classeur_document" }),
+    );
+
+    const res = await relayTenantOutbox(tenantB, { maxPages: 1, pageSize: 1 });
+
+    expect(res.relayed).toBe(1);
+    expect(res.truncated).toBe(false);
+  });
+
+  it("le désabonnement coupe vraiment la livraison", async () => {
+    const { relayTenantOutbox, subscribeOutbox, outboxSubscriberCount } = await import(
+      "../src/outboxRelay.js"
+    );
+    const recus: string[] = [];
+    const off = subscribeOutbox(tenantA, (d) => recus.push(d.type));
+    off();
+    expect(outboxSubscriberCount(tenantA)).toBe(0);
+    await withTenant(tenantA, (tx) =>
+      emitOutbox(tx, tenantA, { type: "profil.modifie", objectType: "profil" }),
+    );
+    await relayTenantOutbox(tenantA);
+    expect(recus).toHaveLength(0);
+  });
+});
