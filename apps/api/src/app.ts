@@ -5705,6 +5705,24 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         };
       });
       if (outcome === null) return reply.code(404).send({ error: "prospect not found" });
+      /*
+       * TRACE DE REDEVABILITÉ (art. 5.2) — des compteurs, jamais un nom.
+       *
+       * Le compte rendu rendu à l'écran n'est pas persisté : c'est une réponse
+       * HTTP. Sans cette ligne, la seule preuve qu'un effacement a eu lieu
+       * serait la prise de notes de l'owner. Le nom en est absent — journaliser
+       * l'identité qu'on vient d'effacer serait la recréer dans les logs.
+       */
+      request.log.info(
+        {
+          affairesAnonymisees: outcome.anonymisees,
+          affairesConservees: outcome.conservees.length,
+          contratsAnonymises: outcome.contratsAnonymises,
+          contratsConserves: outcome.contratsConserves.length,
+          conversationsEffacees: outcome.transcripts,
+        },
+        "prospect erased (art. 17)",
+      );
       return {
         deleted: true,
         affairesAnonymisees: outcome.anonymisees,

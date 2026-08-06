@@ -127,8 +127,21 @@ export interface ProspectionPlan {
    * Fiches OPPOSÉES elles aussi périmées (audit 2.12). Sorties du pipeline,
    * elles échappaient à toute alerte : conservées indéfiniment sans jamais
    * être signalées, l'exact contraire de « ne jamais garder sans le dire ».
-   * Un compte suffit — les nommer contredirait l'exclusion.
+   *
+   * DÉCISION RÉVISÉE. La version d'origine disait « un compte suffit — les
+   * nommer contredirait l'exclusion », et elle avait raison sur les NOMS : une
+   * liste nominative d'opposés est la porte par laquelle ils reviennent dans
+   * une campagne. Mais un compte seul ne résolvait qu'à moitié le problème
+   * qu'il énonce — le jour où un écran a enfin permis d'effacer une fiche, il
+   * annonçait « 3 fiches opposées sont périmées » sans aucun moyen de dire
+   * lesquelles. Un compteur qui envoie chercher sans dire où n'est pas un
+   * signalement, c'est une inquiétude.
+   *
+   * On rend donc les IDS, exactement comme `retentionAlerts` et pour la même
+   * raison : un identifiant opaque n'est pas un nom, et il ne sert qu'à
+   * l'écran qui possède déjà la fiche. Aucune liste nominative n'est produite.
    */
+  expiredOptedOut: { id: string; daysSinceContact: number }[];
   expiredOptedOutCount: number;
   /** Fiches ignorées faute de données lisibles (étape ou date invalide). */
   unusableCount: number;
@@ -176,7 +189,7 @@ export function buildProspectionPlan(
   const followups: ProspectFollowup[] = [];
   const retentionAlerts: ProspectionPlan["retentionAlerts"] = [];
   let optedOutCount = 0;
-  let expiredOptedOutCount = 0;
+  const expiredOptedOut: ProspectionPlan["expiredOptedOut"] = [];
   let unusableCount = 0;
 
   for (const prospect of prospects) {
@@ -197,7 +210,7 @@ export function buildProspectionPlan(
     // pipeline ne doit pas valoir droit d'être conservée pour toujours.
     if (prospect.optedOut) {
       optedOutCount += 1;
-      if (expired) expiredOptedOutCount += 1;
+      if (expired) expiredOptedOut.push({ id: prospect.id, daysSinceContact });
       continue;
     }
     pipeline[prospect.stage] += 1;
@@ -246,6 +259,7 @@ export function buildProspectionPlan(
   // Le plus ancien d'abord : c'est celui qu'on perd.
   followups.sort((a, b) => b.daysSinceContact - a.daysSinceContact);
   retentionAlerts.sort((a, b) => b.daysSinceContact - a.daysSinceContact);
+  expiredOptedOut.sort((a, b) => b.daysSinceContact - a.daysSinceContact);
 
   return {
     rulesVersion: PROSPECTION_RULES_VERSION,
@@ -253,7 +267,8 @@ export function buildProspectionPlan(
     followups,
     retentionAlerts,
     optedOutCount,
-    expiredOptedOutCount,
+    expiredOptedOut,
+    expiredOptedOutCount: expiredOptedOut.length,
     unusableCount,
     label:
       "Relances proposées sur un délai écoulé, pas sur une intention supposée. " +

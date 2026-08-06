@@ -1080,6 +1080,16 @@ export const ProspectionPlan = z.object({
   ),
   retentionAlerts: z.array(z.object({ id: z.string(), daysSinceContact: z.number() })),
   optedOutCount: z.number(),
+  /* IDS SEULEMENT, comme `retentionAlerts`. Un compte seul disait « 3 fiches
+   * opposées sont périmées » sans permettre de dire lesquelles : un compteur
+   * qui envoie chercher sans dire où n'est pas un signalement. */
+  /* `.optional()` avec défaut vide : en déploiement progressif, un web en
+   * avance sur l'API ferait échouer le parse ENTIER du plan, et l'encart de
+   * rétention disparaîtrait sans un mot — le compteur muet que ce ticket
+   * combat, produit par le ticket lui-même. */
+  expiredOptedOut: z
+    .array(z.object({ id: z.string(), daysSinceContact: z.number() }))
+    .optional(),
   expiredOptedOutCount: z.number(),
   unusableCount: z.number(),
   label: z.string().min(1),
