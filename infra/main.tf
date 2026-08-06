@@ -222,17 +222,25 @@ resource "scaleway_container" "api" {
   # suffirait PAS — la réplique gagnante marquerait les événements transmis
   # sans servir les abonnés de l'autre.
   max_scale = 1
-  # PLAFOND DE CONCURRENCE EXPLICITE, conséquence directe de `max_scale = 1`.
+  # CONCURRENCE — RISQUE CONNU, DÉLIBÉRÉMENT NON RÉGLÉ ICI.
   #
   # Le bus ajoute une connexion PERMANENTE par onglet (jusqu'à 4 par
   # utilisateur, tenues 30 min). Avec une seule instance, ces sockets occupent
-  # la même enveloppe de concurrence que les requêtes ordinaires : au défaut du
-  # provider, quelques dizaines d'onglets suffiraient à mettre EN FILE les
-  # requêtes de tous les tenants. On pose donc la valeur au lieu de la subir.
-  # Elle est haute parce qu'un flux SSE est presque toujours au repos : il
-  # occupe un socket, pas un cœur.
-  max_concurrency = 200
-  privacy         = "public"
+  # la même enveloppe de concurrence que les requêtes ordinaires : quelques
+  # dizaines d'onglets pourraient mettre en file les requêtes de tous les
+  # tenants.
+  #
+  # `max_concurrency` a été essayé puis RETIRÉ : l'argument existe en provider
+  # 2.49 mais a disparu des versions suivantes, et `versions.tf` épingle
+  # `~> 2.49` SANS fichier de verrouillage — un `terraform init` en CI peut
+  # donc résoudre une version où l'argument n'existe plus et faire échouer le
+  # déploiement. Poser une valeur invalide dans un fichier qu'aucun test ne
+  # couvre pour se prémunir d'une saturation encore théorique est un mauvais
+  # échange. Le remplaçant est `scaling_option { concurrent_requests_threshold }`,
+  # qui est un seuil de MISE À L'ÉCHELLE — donc inopérant tant que
+  # `max_scale = 1`. La vraie réponse est la même que ci-dessus : `LISTEN/NOTIFY`,
+  # qui lève le plafond de réplique et rend la question sans objet.
+  privacy = "public"
   # Même politique que litellm : le moteur natif Prisma (lib .so) tourne dans
   # la sandbox v2 (micro-VM), compatibilité maximale.
   sandbox = "v2"
