@@ -5,6 +5,7 @@ import {
   ApiError,
   createProspect,
   deleteProspect,
+  getMe,
   getProspectionPlan,
   getProspects,
   logProspectInteraction,
@@ -74,11 +75,15 @@ export default function ProspectsPage() {
   const [email, setEmail] = useState("");
   const [source, setSource] = useState("");
   /*
-   * L'effacement est réservé au dirigeant (`ownerRoute`). Optimiste, comme
-   * ailleurs : on montre le bouton, et un 403 le retire. Le cacher d'emblée
-   * demanderait un appel de plus au chargement de chaque écran.
+   * L'effacement est réservé au dirigeant, et le rôle est LU, pas supposé.
+   *
+   * Le patron optimiste (afficher, retirer sur 403) convient à un bouton
+   * anodin. Pas ici : un membre franchissait une confirmation détaillée
+   * d'action irréversible sur données personnelles pour ne récolter qu'un 403
+   * — une répétition générale d'un article 17 offerte à qui n'y a pas droit,
+   * alors que le rôle est déjà disponible côté client.
    */
-  const [isOwner, setIsOwner] = useState(true);
+  const [isOwner, setIsOwner] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   /** Compte rendu du dernier effacement — il RESTE tant qu'on ne le ferme pas. */
   const [rapport, setRapport] = useState<{ nom: string; res: ProspectDeletion } | null>(null);
@@ -96,7 +101,23 @@ export default function ProspectsPage() {
 
   useEffect(() => {
     void refresh();
+    void getMe()
+      .then((session) => {
+        const active = session.memberships.find(
+          (m) => m.tenantId === session.activeOrganizationId,
+        );
+        setIsOwner(active?.role === "owner");
+      })
+      .catch(() => setIsOwner(false));
   }, [refresh]);
+
+  /*
+   * Le compte rendu porte le NOM qu'on vient d'effacer (« Fiche de X
+   * effacée ») et des libellés de chantiers qui le contiennent souvent. Il est
+   * légitime — l'owner doit finir le travail — mais il n'a aucune raison de
+   * survivre à la sortie de l'écran.
+   */
+  useEffect(() => () => setRapport(null), []);
   useViewRefresh(["prospects"], () => void refresh());
 
   async function add(): Promise<void> {
@@ -157,10 +178,22 @@ export default function ProspectsPage() {
     const confirmed = window.confirm(
       `Effacer définitivement la fiche de ${prospect.name} ?\n\n` +
         "• sa fiche et son journal de contacts sont supprimés\n" +
+        "• les relances la concernant encore en attente de validation sont rejetées\n" +
         "• son nom et son adresse sont retirés des chantiers jamais contractés\n" +
         "• les chantiers portant une trace d'exécution sont CONSERVÉS, et listés ensuite\n" +
-        "• les contrats liés perdent son nom, pour qu'il ne revienne pas\n" +
-        "• les conversations avec l'assistant sont effacées : le chat repart à zéro\n\n" +
+        // La route conserve le nom d'un contrat ACTIF ou dont dérive une
+        // affaire conservée. Promettre l'inconditionnel ici, quand la puce du
+        // dessus annonce déjà une conservation, serait une asymétrie
+        // trompeuse : le compte rendu rattrape APRÈS, la décision se prend
+        // AVANT.
+        "• les contrats liés perdent son nom et leurs notes, SAUF ceux en cours " +
+        "ou portant une exécution — ceux-là sont conservés et listés ensuite\n" +
+        // Le rayon réel de `purgeAgentTranscripts` : tout le tenant, tous les
+        // utilisateurs. « Le chat repart à zéro » se lisait spontanément
+        // « les conversations concernant cette personne » — c'est une
+        // destruction irréversible de données d'autrui.
+        "• TOUTES les conversations avec l'assistant sont effacées — " +
+        "pour tous les utilisateurs du compte, y compris celles sans rapport avec cette fiche\n\n" +
         "Cette action ne peut pas être annulée.",
     );
     if (!confirmed) return;
@@ -358,9 +391,16 @@ export default function ProspectsPage() {
           )}
           {rapport.res.contratsSansFiche > 0 && (
             <p className="warn">
-              {rapport.res.contratsSansFiche} contrat(s) portent un nom de client sans lien vers
-              une fiche : aucun effacement ne peut les atteindre. Rattachez-les depuis l&apos;écran
-              Contrats.
+              {/*
+                LE CAVEAT DE LA ROUTE, REPRIS TEL QUEL. Ce compte est
+                tenant-wide : il inclut des contrats qui n'ont jamais concerné
+                cette personne, et ceux qu'on vient de conserver puis de
+                détacher. L'afficher sous un titre « fiche effacée » sans le
+                dire en ferait une conséquence de CET effacement.
+              */}
+              {rapport.res.contratsSansFiche} contrat(s) de tout le compte portent un nom de
+              client sans lien vers une fiche : aucun effacement ne peut les atteindre. Ce nombre
+              ne dit rien de la personne effacée. Rattachez-les depuis l&apos;écran Contrats.
             </p>
           )}
 
@@ -426,7 +466,7 @@ export default function ProspectsPage() {
                       <>
                         {" "}
                         <button
-                          disabled={busyId === prospect.id}
+                          disabled={busyId !== null}
                           onClick={() => void effacer(prospect)}
                         >
                           Effacer définitivement
@@ -455,7 +495,7 @@ export default function ProspectsPage() {
                     <button onClick={() => void oppose(prospect)}>Ne plus contacter</button>{" "}
                     {isOwner && (
                       <button
-                        disabled={busyId === prospect.id}
+                        disabled={busyId !== null}
                         onClick={() => void effacer(prospect)}
                       >
                         Effacer définitivement

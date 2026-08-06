@@ -378,17 +378,35 @@ la liste **motivée** de ce qu'elle avait dû conserver. Ce compte rendu est tou
 la justification de ne pas trancher sur les cas ambigus, et il n'avait pas de
 destinataire : la garde restait théorique.
 
-**La confirmation dit ce qui va se passer**, pas « êtes-vous sûr ». Les cinq
-effets sont énumérés avant le clic — y compris celui qui surprendrait tout le
-monde : les conversations avec l'assistant sont effacées, donc le chat repart à
-zéro pour l'équipe entière. Le taire ferait passer un effacement volontaire pour
-une panne au message suivant.
+**La confirmation dit ce qui va se passer**, pas « êtes-vous sûr » — et elle dit
+le **rayon réel**, pas une version rassurante.
+
+La revue a trouvé deux écarts entre le texte et la route, tous deux dans la
+direction confortable. « Le chat repart à zéro » se lisait spontanément « les
+conversations concernant cette personne », alors que `purgeAgentTranscripts`
+efface **toutes** les conversations du tenant, de tous les utilisateurs, y
+compris sans rapport avec la fiche : faire signer une destruction de données
+d'autrui sous un libellé ambigu n'est pas un consentement éclairé. Et « les
+contrats liés perdent son nom » était **inconditionnel**, alors qu'un contrat
+`ACTIF` ou portant une exécution est conservé — asymétrie d'autant plus visible
+que la puce du dessus annonçait déjà la conservation des chantiers. Le compte
+rendu rattrape *après* ; la décision se prend *avant*.
+
+Deux effets se taisaient aussi : les `notes` des contrats anonymisés (champ
+libre de 2 000 caractères) et le rejet des relances encore en file.
 
 **Le compte rendu reste à l'écran** jusqu'à ce que l'owner le referme : chantiers
 conservés avec leur référence et leur motif, contrats conservés, contrats hors de
 portée, conversations effacées. Il n'est **pas persisté** — c'est une réponse
 HTTP, pas une tâche — et l'écran le dit, plutôt que de laisser un rechargement
 emporter une liste à traiter à la main.
+
+**Le rôle est LU, pas supposé.** Le patron optimiste — afficher, retirer sur 403
+— convient à un bouton anodin. Pas ici : un membre franchissait une confirmation
+détaillée d'action irréversible sur données personnelles pour ne récolter qu'un
+403, c'est-à-dire une répétition générale d'un article 17 offerte à qui n'y a pas
+droit. La route est owner-only et testée comme telle ; ce n'était pas une faille,
+c'était une invitation.
 
 **Le bouton existe aussi sur une fiche opposée.** L'opposition minimise (on garde
 de quoi ne plus contacter), l'effacement supprime : une personne qui s'est
@@ -419,7 +437,25 @@ comme `freshness-wiring` : elle ne prouve pas que l'écran s'affiche, elle prouv
 que le branchement et l'affichage du compte rendu n'ont pas disparu du code.
 C'est exactement la régression qui se produirait sans bruit : l'appel retiré au
 détour d'un refactor, l'API toujours verte, et plus personne pour lire ce qui
-reste. Le fil n'est pas « la ligne est-elle partie »
+reste.
+
+**Sa première version était creuse, et la revue l'a démontré par simulation.**
+Elle cherchait ses symboles n'importe où dans le fichier : retirer la puce
+« conversations » du dialogue la laissait VERTE, parce que
+`conversationsEffacees` apparaît aussi dans le compte rendu — donc *après*
+l'effacement — et que `window.confirm` sert aussi à l'opposition. Deux symboles
+présents dans le même fichier ne prouvent rien de leur proximité. Et chercher
+`deleteProspect` était satisfait par la seule ligne d'`import` : une fonction
+`effacer` morte, jamais reliée à un `onClick`, passait toute la suite.
+
+Les assertions portent désormais sur le **corps** de `async function effacer`,
+délimité en comptant les accolades. Ce qu'on affirme du dialogue ne peut plus
+être satisfait par du texte qui vit ailleurs.
+
+**Une trace d'audit** (art. 5.2) est journalisée au succès : des compteurs, et
+**jamais le nom** — journaliser l'identité qu'on vient d'effacer serait la
+recréer dans les logs. Le compte rendu à l'écran n'étant pas persisté, c'était
+sinon la prise de notes de l'owner qui portait seule la redevabilité. Le fil n'est pas « la ligne est-elle partie »
 mais « le produit tient-il ce qu'il affirme » : chaque test vérifie qu'un dérivé
 précis (libellé, montant, adresse, coordonnées) a bien disparu, et que ce qui
 survit — la trace d'une décision, une affaire sous contrat — survit **pour une
