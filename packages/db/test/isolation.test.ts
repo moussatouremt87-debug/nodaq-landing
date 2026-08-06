@@ -924,6 +924,29 @@ describe("garde-fou préalable", () => {
     expect(rows[0]?.relforcerowsecurity).toBe(true);
   });
 
+  it("la RLS est activée ET forcée sur outbox", async () => {
+    const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'outbox'
+    `;
+    expect(rows[0]?.relrowsecurity).toBe(true);
+    expect(rows[0]?.relforcerowsecurity).toBe(true);
+  });
+
+  it("l'index du relais est PARTIEL, et il existe", async () => {
+    /*
+     * Prisma ne sait pas exprimer un index partiel : celui-ci vit dans la
+     * migration, et le modèle n'en déclare aucun. La dérive est donc muette
+     * dans les deux sens — un `migrate dev` proposerait de le remplacer par un
+     * index plein sur une table qui grossit sans fin. Ce test est le seul
+     * endroit où sa disparition rougirait.
+     */
+    const rows = await admin.$queryRaw<{ indexdef: string }[]>`
+      SELECT indexdef FROM pg_indexes WHERE tablename = 'outbox' AND indexname = 'outbox_undelivered_idx'
+    `;
+    expect(rows[0]?.indexdef, "index partiel du relais absent").toBeDefined();
+    expect(rows[0]?.indexdef).toContain("delivered_at IS NULL");
+  });
+
   it("la RLS est activée ET forcée sur fec_imports", async () => {
     const rows = await admin.$queryRaw<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'fec_imports'

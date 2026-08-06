@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { ApiError, getMe, getModules, listPendingActions } from "../lib/api";
 import { subscribeView } from "../lib/freshness";
+import { startLiveEvents } from "../lib/liveEvents";
 import type { Me } from "../lib/api";
 
 /*
@@ -193,6 +194,38 @@ export function Shell({ children }: { children: ReactNode }) {
   // Basculer un module doit retirer (ou rendre) sa page tout de suite : la nav
   // est une VUE comme une autre.
   useEffect(() => subscribeView("nav", loadModules), [loadModules]);
+
+  /*
+   * ÉCOUTE DU BUS SERVEUR — un seul point de branchement pour tout le produit.
+   *
+   * La coquille enveloppe tous les écrans : ouvrir le flux ici évite qu'un
+   * écran l'oublie, et évite surtout autant de connexions que d'écrans montés.
+   * Ce qui arrive est réinjecté dans le bus local, qui périme les vues selon
+   * le registre — donc AUCUN écran n'a à connaître l'existence de ce flux.
+   *
+   * PÉRIMÈTRE RÉEL — PR A pose la CANALISATION, pas encore tous les robinets.
+   * Le serveur n'émet aujourd'hui que sur la file de validation (approbation,
+   * rejet) : trois sites d'appel de `emitOutbox`, sur vingt-trois événements
+   * au registre. Une photo déposée par un collègue, un import FEC, un webhook
+   * ne traversent pas encore ce flux — c'est le travail de PR B. Écrire ici
+   * « le dernier maillon du 2.21 » empêcherait le prochain lecteur de chercher
+   * les maillons qui manquent.
+   */
+  useEffect(() => {
+    /*
+     * LE FLUX SUIT LA SESSION ET L'ORGANISATION ACTIVE.
+     *
+     * Ouvert une fois pour la vie de la coquille, il avait deux défauts
+     * silencieux. Sur `/login`, il partait AVANT toute session : 401, et
+     * `EventSource` n'a pas le droit de reprendre sur un statut != 200 — donc
+     * mort définitif, jamais rouvert après connexion. Et après un changement
+     * d'organisation active, il restait attaché au tenant PRÉCÉDENT :
+     * invalidations parasites d'un côté, aucun événement de la nouvelle
+     * organisation de l'autre.
+     */
+    if (!me?.activeOrganizationId) return;
+    return startLiveEvents();
+  }, [me?.activeOrganizationId]);
 
   const activeOrg = me?.memberships.find((m) => m.tenantId === me.activeOrganizationId);
   // Fail-closed for real: business pages only mount once the session is

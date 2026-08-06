@@ -111,6 +111,15 @@ const stopRetentionSweep = startRetentionSweep({
         "retention sweep truncated — transcripts remain",
       );
     }
+    // Même raison, troisième arriéré : des événements transmis restent hors
+    // durée. Muet, ce cas conservait de la donnée au-delà de son horizon en
+    // laissant croire que la table avait été balayée.
+    if (result.outboxTruncated) {
+      app.log.warn(
+        { tenants: result.tenants, outboxSupprimes: result.outboxSupprimes },
+        "retention sweep truncated — delivered events remain",
+      );
+    }
     // Un passage qui n'a RIEN fait ne se journalise pas… sauf s'il a échoué
     // quelque part : un échec silencieux et un tenant propre se ressemblent
     // trop pour qu'on les confonde.
@@ -122,6 +131,7 @@ const stopRetentionSweep = startRetentionSweep({
       // transcriptions sans en réduire une seule. Le seul compteur qui compte
       // des lignes DÉTRUITES était le seul à ne pas être journalisé.
       result.conversationsSupprimees === 0 &&
+      result.outboxSupprimes === 0 &&
       result.failed === 0 &&
       result.unclassified.length === 0
     ) {
@@ -135,6 +145,7 @@ const stopRetentionSweep = startRetentionSweep({
         rejected: result.rejected,
         reduced: result.reduced,
         conversationsSupprimees: result.conversationsSupprimees,
+        outboxSupprimes: result.outboxSupprimes,
         // Types d'action qu'aucun groupe ne réclame : ils ne sont PAS balayés,
         // et le dire est la seule façon qu'ils finissent par l'être.
         unclassified: result.unclassified,
@@ -144,6 +155,57 @@ const stopRetentionSweep = startRetentionSweep({
   },
 });
 app.addHook("onClose", async () => stopRetentionSweep());
+
+/*
+ * RELAIS DU BUS D'ÉVÉNEMENTS (4.4, PR A).
+ *
+ * En processus, comme les deux ordonnanceurs ci-dessus, et pour la même
+ * raison : l'outbox porte déjà l'atomicité et le rejeu que le ticket
+ * attendait d'une file. Une file distribuée s'introduira le jour où un
+ * consommateur devra tourner HORS de l'API.
+ *
+ * Cadence à 2 s : le critère du ticket est « écrans à jour en moins de 5 s »,
+ * et le relais ne lit que les non-transmis, servis par un index partiel.
+ */
+const { startOutboxRelay } = await import("./outboxRelay.js");
+app.log.warn(
+  {},
+  "outbox relay: single-replica only — a second API instance would silently swallow invalidations; " +
+    "max_scale=1 holds this for a revision, NOT during a rolling deploy where two revisions overlap",
+);
+const stopOutboxRelay = startOutboxRelay({
+  onError: (name, tenantId) => {
+    // Zéro tenant n'est pas un échec : sur une base fraîche c'est la vérité,
+    // et le journaliser comme une panne enverrait chercher là où il n'y a
+    // rien. On le dit pour ce que c'est — deux lectures, aucune inventée.
+    if (name === "outbox_relay_zero_tenants") {
+      app.log.warn(
+        {},
+        "outbox relay: zero tenants discovered — empty database, or discovery is broken",
+      );
+      return;
+    }
+    app.log.warn({ err: name, tenantId }, "outbox relay failed");
+  },
+  // Des compteurs, jamais un type d'objet ni un identifiant : ce journal
+  // tourne toutes les 2 s, et il ne doit rien apprendre à qui le lit.
+  onRelay: (result) => {
+    if (result.failed > 0 || result.truncated || result.tenants === 0) {
+      app.log.warn(
+        {
+          relayed: result.relayed,
+          failed: result.failed,
+          truncated: result.truncated,
+          // `tenants` était calculé, remonté… et jamais journalisé. C'est ce
+          // compteur-là qui aurait révélé la découverte aveuglée par la RLS.
+          tenants: result.tenants,
+        },
+        "outbox relay incomplete",
+      );
+    }
+  },
+});
+app.addHook("onClose", async () => stopOutboxRelay());
 
 // Canal support (2.18) : polling IMAP -> Object Storage -> triage -> brouillons.
 // Tout est optionnel : boîte OU stockage absents = canal inactif, app intacte.

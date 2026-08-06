@@ -52,6 +52,8 @@ import {
   serializeAffaire,
   toPrismaData,
 } from "./affaires.js";
+import { emitOutbox } from "./outbox.js";
+import { subscribeOutbox } from "./outboxRelay.js";
 import { sniffAudioFormat, transcribe, TRANSCRIPTION_MAX_BYTES } from "@nodaq/llm";
 // Importée, JAMAIS recopiée : la borne de la route doit être exactement celle
 // du schéma de l'outil, sinon la troncature « propre » de l'une devient la
@@ -319,6 +321,245 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   });
 
   /** Current session: user, active organization and memberships. */
+  /** Plafond de flux simultanés par utilisateur et par tenant. */
+  const MAX_STREAMS_PER_USER = 4;
+  /**
+   * Battement, et revalidation de l'appartenance.
+   *
+   * Injectable par en-tête EN TEST uniquement : sans cela, éprouver la
+   * revalidation demandait d'attendre 25 s, donc personne ne l'éprouvait — et
+   * la seule « garde » écrite était une lecture du source par expression
+   * régulière, qui prouve que le code est écrit, pas qu'il s'exécute.
+   */
+  const STREAM_HEARTBEAT_MS = 25_000;
+  const heartbeatMsFor = (request: FastifyRequest): number => {
+    /*
+     * OPT-IN EXPLICITE, pas opt-out sur `NODE_ENV`.
+     *
+     * La première version ouvrait la porte partout où `NODE_ENV` n'était pas
+     * `"production"` — un `node dist/server.js` lancé à la main, une démo, un
+     * conteneur hors Terraform. C'est-à-dire une garde dont l'OUBLI ouvre,
+     * exactement ce que le même commit reprochait au rôle par défaut de
+     * `subscribeOutbox`. Ici il faut poser la variable pour ouvrir.
+     *
+     * PLANCHER À 1 s. Sans borne inférieure, un en-tête à `1` faisait tourner
+     * deux lectures en base par milliseconde et par flux, sans attendre le
+     * tour précédent : quatre flux suffisaient à épuiser le pool Prisma du
+     * processus, donc à mettre à genoux TOUS les tenants depuis un compte
+     * membre ordinaire.
+     */
+    if (process.env.ALLOW_TEST_HEARTBEAT !== "1") return STREAM_HEARTBEAT_MS;
+    const raw = Number(request.headers["x-test-heartbeat-ms"]);
+    if (!Number.isFinite(raw) || raw < 1_000) return STREAM_HEARTBEAT_MS;
+    return Math.min(raw, STREAM_HEARTBEAT_MS);
+  };
+  const openStreams = new Map<string, number>();
+  /** Au-delà, on coupe : `EventSource` reconnecte et refait toute la chaîne. */
+  const STREAM_MAX_LIFETIME_MS = 30 * 60_000;
+  /**
+   * Même porte que le battement : une durée de vie de trente minutes est
+   * intestable en l'état, et une branche non testée est une branche dont on
+   * ignore si elle marche. Le gate a montré que `STREAM_MAX_LIFETIME_MS`
+   * pouvait être supprimé sans qu'un seul test rougisse.
+   */
+  const lifetimeMsFor = (request: FastifyRequest): number => {
+    if (process.env.ALLOW_TEST_HEARTBEAT !== "1") return STREAM_MAX_LIFETIME_MS;
+    const raw = Number(request.headers["x-test-lifetime-ms"]);
+    if (!Number.isFinite(raw) || raw < 100) return STREAM_MAX_LIFETIME_MS;
+    return Math.min(raw, STREAM_MAX_LIFETIME_MS);
+  };
+  /*
+   * Registre des flux ouverts, pour l'ARRÊT PROPRE. Une requête SSE n'est
+   * jamais « idle » : avec le défaut Fastify, `app.close()` attendait
+   * indéfiniment tant qu'un flux vivait — et le battement les maintient
+   * vivants. Sans ce registre, un redéploiement ne se terminait pas.
+   */
+  const openConnections = new Set<() => void>();
+  app.addHook("onClose", async () => {
+    for (const fermer of [...openConnections]) fermer();
+  });
+
+  /*
+   * FLUX D'INVALIDATION (4.4, PR A) — le consommateur du bus.
+   *
+   * CE QUE ÇA CORRIGE. Chaque écran se rafraîchit déjà après SA propre
+   * mutation ; ce qui manquait, c'est l'écriture venue d'AILLEURS — l'agent
+   * dans le chat, un autre onglet, un webhook, un collègue. Le patron voyait
+   * alors des chiffres d'il y a dix minutes sans que rien ne le dise.
+   *
+   * AUCUNE DONNÉE MÉTIER NE TRAVERSE. Le flux ne porte que le TYPE de
+   * l'événement et l'objet visé : l'écran relit par ses routes habituelles,
+   * qui repassent toutes par la chaîne d'autorisation. Un flux qui
+   * transporterait les valeurs ferait fuir sur un canal long, ouvert en
+   * permanence, et bien plus difficile à auditer qu'une requête.
+   *
+   * LE TENANT VIENT DE LA SESSION. `businessRoute` a déjà tranché
+   * l'appartenance quand on arrive ici ; l'abonnement est clé par
+   * `request.tenantId`, jamais par un paramètre.
+   */
+  app.get("/events", { preHandler: businessRoute }, async (request, reply) => {
+    /*
+     * PLAFOND PAR UTILISATEUR. Chaque flux retient un socket, une minuterie et
+     * une entrée de registre pour une durée non bornée : sans plafond, un
+     * script ou un onglet qui recharge en boucle épuise le processus sans
+     * jamais franchir une garde d'authentification.
+     */
+    const streamKey = `${request.tenantId}:${request.authSession.user.id}`;
+    const ouverts = openStreams.get(streamKey) ?? 0;
+    if (ouverts >= MAX_STREAMS_PER_USER) {
+      return reply.code(429).send({ error: "trop de flux ouverts" });
+    }
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      // Un proxy qui bufferise transformerait un flux temps réel en flux
+      // livré par paquets de 4 ko — donc en rien du tout.
+      "x-accel-buffering": "no",
+    });
+    /*
+     * DÉLAI DE REPRISE DIT, pas laissé au navigateur. Chaque intervalle sans
+     * flux est une fenêtre d'invalidations émises pour personne (le relais
+     * marque transmis sans abonné) ; le client la referme en rechargeant tout
+     * à la reconnexion, mais plus elle est courte, moins il recharge. Les
+     * navigateurs choisissent seuls entre 3 s et un recul exponentiel après
+     * plusieurs échecs : on fixe la valeur au lieu de la subir.
+     */
+    reply.raw.write("retry: 3000\n\n");
+    // Incrémenté APRÈS `writeHead` : si celui-ci jette, le compteur ne doit
+    // pas garder un slot pour un flux qui n'a jamais existé — l'utilisateur
+    // serait verrouillé à quatre flux définitivement.
+    openStreams.set(streamKey, ouverts + 1);
+
+    let closed = false;
+    /*
+     * CONTRE-PRESSION. `write` rend `false` quand le tampon du noyau est
+     * plein : l'ignorer laisse la mémoire du processus grossir sans borne
+     * derrière un client lent. Une invalidation est périssable — mieux vaut
+     * couper que gonfler.
+     */
+    const push = (frame: string): void => {
+      if (closed) return;
+      try {
+        if (!reply.raw.write(frame)) fermer();
+      } catch {
+        fermer();
+      }
+    };
+
+    const registration = subscribeOutbox(
+      request.tenantId,
+      (delivery) => push(`data: ${JSON.stringify(delivery)}\n\n`),
+      request.membershipRole,
+    );
+    openConnections.add(fermerRef);
+
+    /*
+     * BATTEMENT DE CŒUR — ET REVALIDATION DE L'APPARTENANCE.
+     *
+     * Sans octet sur le fil, un proxy ou un mobile en veille ferme une
+     * connexion inactive, et l'écran cesse d'être averti sans jamais
+     * l'apprendre. Mais le battement sert surtout à corriger le défaut le plus
+     * grave de la première version : l'autorisation n'était vérifiée QU'À la
+     * connexion. Un utilisateur exclu de l'organisation, déconnecté ou dont la
+     * session avait expiré continuait de recevoir les événements de ses
+     * anciens collègues jusqu'à fermer l'onglet. Toutes les autres routes du
+     * produit recontrôlent l'appartenance à chaque requête ; celle-ci ne le
+     * faisait jamais.
+     *
+     * On relit donc le membership à chaque battement — et on relit aussi le
+     * RÔLE, pour qu'une rétrogradation coupe les événements owner-only sans
+     * attendre une reconnexion. Le délai est celui du battement : en
+     * production, un propriétaire rétrogradé peut recevoir des événements
+     * owner-only pendant AU PLUS 25 s. Ce n'est pas une garantie immédiate, et
+     * un besoin d'immédiateté passerait par une révocation poussée, pas par un
+     * battement plus rapide.
+     */
+    const heartbeat = setInterval(() => {
+      void (async () => {
+        const membership = await prisma.membership
+          .findUnique({
+            where: {
+              tenantId_userId: {
+                tenantId: request.tenantId,
+                userId: request.authSession.user.id,
+              },
+            },
+            select: { role: true },
+          })
+          .catch(() => null);
+        if (!membership) {
+          fermer();
+          return;
+        }
+        /*
+         * LA SESSION AUSSI. Relire l'appartenance seule ne couvrait qu'un
+         * tiers du défaut annoncé corrigé : une déconnexion, une session
+         * expirée ou révoquée laissaient le flux vivant tant que
+         * l'appartenance existait — c'est-à-dire dans le cas le plus banal.
+         *
+         * `disableRefresh` N'EST PAS UN DÉTAIL. Sans lui, better-auth REPOUSSE
+         * l'expiration de la session à chaque lecture passé `updateAge` : un
+         * onglet laissé ouvert, qui relit toutes les 25 s, maintiendrait sa
+         * session vivante indéfiniment. Le contrôle censé DURCIR la route
+         * aurait supprimé l'expiration par inactivité pour tout poste non
+         * verrouillé — on relit l'autorisation, on ne la renouvelle pas.
+         */
+        const session = await auth.api
+          .getSession({ headers: toWebHeaders(request), query: { disableRefresh: true } })
+          .catch(() => null);
+        if (!session) {
+          fermer();
+          return;
+        }
+        registration.setRole(membership.role);
+        push(": ping\n\n");
+      })();
+    }, heartbeatMsFor(request));
+
+    function fermer(): void {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      clearTimeout(maxLife);
+      registration.unsubscribe();
+      openConnections.delete(fermerRef);
+      const restants = (openStreams.get(streamKey) ?? 1) - 1;
+      if (restants <= 0) openStreams.delete(streamKey);
+      else openStreams.set(streamKey, restants);
+      try {
+        reply.raw.end();
+      } catch {
+        /* socket déjà partie */
+      }
+    }
+    function fermerRef(): void {
+      fermer();
+    }
+
+    /*
+     * DURÉE DE VIE ABSOLUE. Même revalidé, un flux qui vit des jours accumule
+     * un état que rien ne remet à zéro. `EventSource` reconnecte tout seul et
+     * rejoue toute la chaîne d'autorisation depuis le début.
+     *
+     * CE QUE ÇA COÛTE VRAIMENT — la version précédente de ce commentaire
+     * disait « une reconnexion », ce qui était faux. Pendant les ~3 s de
+     * reprise, le relais marque transmis des événements que PERSONNE ne
+     * reçoit, et ne les représentera jamais. La coupure coûte donc aussi un
+     * rechargement complet des vues montées, que le client déclenche à chaque
+     * ouverture de flux (`liveEvents.ts`). Sans lui, cette ligne fabriquerait
+     * un écran faux toutes les trente minutes.
+     */
+    const maxLife = setTimeout(fermer, lifetimeMsFor(request));
+    maxLife.unref();
+
+    request.raw.on("close", fermer);
+    // Une erreur de socket ne remonte PAS en exception synchrone : sans cet
+    // écouteur, le `try/catch` autour de `write` ne couvrait qu'une partie du
+    // cas qu'il prétendait traiter.
+    reply.raw.on("error", fermer);
+  });
+
   app.get("/me", { preHandler: [requireAuth] }, async (request) => {
     const memberships = await prisma.membership.findMany({
       where: { userId: request.authSession.user.id },
@@ -620,22 +861,50 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     },
   );
 
+  /*
+   * `decide` n'a plus qu'un appelant, `/reject`. Garder un paramètre
+   * `decision` qui écrit le statut mais ne pilote plus le type d'événement
+   * était un piège : un futur `decide("approved")` aurait écrit le bon statut
+   * et émis le mauvais événement. Le paramètre part avec la branche.
+   */
   const decide =
-    (decision: "approved" | "rejected") => async (request: FastifyRequest, reply: FastifyReply) => {
+    () => async (request: FastifyRequest, reply: FastifyReply) => {
       const params = z.object({ id: Uuid }).safeParse(request.params);
       if (!params.success) {
         return reply.code(400).send({ error: "invalid pending action id" });
       }
-      const { count } = await withTenant(request.tenantId, (tx) =>
-        tx.pendingAction.updateMany({
+      /*
+       * L'ÉVÉNEMENT DANS LA TRANSACTION QUI ÉCRIT LE STATUT.
+       *
+       * La première version émettait plus bas, dans la transaction qui réduit
+       * le payload — donc une SECONDE transaction. Un crash entre les deux
+       * laissait l'action décidée sans événement : exactement la panne que ce
+       * module affirme rendre impossible par construction, et le commentaire
+       * qui l'accompagnait prétendait le contraire.
+       */
+      const { count } = await withTenant(request.tenantId, async (tx) => {
+        const claimed = await tx.pendingAction.updateMany({
           where: { id: params.data.id, status: "pending" },
           data: {
-            status: decision,
+            status: "rejected",
             validatedBy: request.authSession.user.id,
             validatedAt: new Date(),
           },
-        }),
-      );
+        });
+        if (claimed.count > 0) {
+          await emitOutbox(tx, request.tenantId, {
+            // `decide` n'a qu'un appelant, `/reject` : la branche « approved »
+            // était du code mort qui laissait croire à un chemin d'émission
+            // inexistant. `/approve` a son propre handler, plus bas.
+            type: "action.rejetee",
+            objectType: "pending_action",
+            objectId: params.data.id,
+            changedFields: ["status"],
+            correlationId: request.id,
+          });
+        }
+        return claimed;
+      });
       if (count === 0) {
         // RLS-scoped: an id from another tenant is indistinguishable from a
         // missing one (404); an already-processed one is a conflict (409).
@@ -679,16 +948,55 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       }
       // Atomic claim pending -> approved: exactly ONE approval wins, so the
       // execution below runs exactly once (double-approve => 409, no re-run).
-      const { count } = await withTenant(request.tenantId, (tx) =>
-        tx.pendingAction.updateMany({
+      /*
+       * L'ÉVÉNEMENT DÈS LA REVENDICATION, pas seulement à la fin.
+       *
+       * La version précédente n'émettait que dans la transaction finale : un
+       * crash entre la revendication et l'exécution laissait une action
+       * `approved` sortie du compteur « à valider » SANS aucun événement, et un
+       * crash après une écriture d'exécuteur laissait un mouvement de stock ou
+       * une immobilisation écrits sans que rien ne périme les écrans. Le
+       * message de commit affirmait l'atomicité pour ce chemin ; elle n'était
+       * vraie que du dernier tiers.
+       *
+       * CE QUE ÇA COUVRE, ET CE QUE ÇA NE COUVRE PAS. Le message de commit
+       * précédent affirmait que cela fermait aussi le cas « l'exécuteur a
+       * écrit puis a planté » : c'EST FAUX, et la revue l'a montré. Cet
+       * événement part AVANT que l'exécuteur n'écrive, donc les écrans
+       * relisent des chiffres encore anciens ; si l'exécuteur écrit puis
+       * plante avant la transaction finale, aucun événement ne périmera ses
+       * écritures. Fermer ce cas-là demande que CHAQUE exécuteur émette dans
+       * SA propre transaction d'écriture — c'est un travail de PR B, pas une
+       * ligne à ajouter ici.
+       *
+       * Ce qui est couvert : un crash entre la revendication et la fin laisse
+       * une action sortie du compteur « à valider », et les écrans le savent.
+       *
+       * COÛT ASSUMÉ : deux vagues d'invalidation de 13 vues par approbation,
+       * dont la première n'apprend rien sur les effets de l'exécuteur.
+       * « Idempotent » n'est pas « gratuit » — mais une invalidation en trop
+       * coûte un rechargement, une invalidation manquante coûte un écran faux.
+       */
+      const { count } = await withTenant(request.tenantId, async (tx) => {
+        const claimed = await tx.pendingAction.updateMany({
           where: { id: params.data.id, status: "pending" },
           data: {
             status: "approved",
             validatedBy: request.authSession.user.id,
             validatedAt: new Date(),
           },
-        }),
-      );
+        });
+        if (claimed.count > 0) {
+          await emitOutbox(tx, request.tenantId, {
+            type: "action.validee",
+            objectType: "pending_action",
+            objectId: params.data.id,
+            changedFields: ["status"],
+            correlationId: request.id,
+          });
+        }
+        return claimed;
+      });
       if (count === 0) {
         const exists = await withTenant(request.tenantId, (tx) =>
           tx.pendingAction.findUnique({ where: { id: params.data.id }, select: { status: true } }),
@@ -724,8 +1032,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       // Minimisation : une action terminée n'a plus besoin de porter la
       // facture complète du client (elle a servi à reconstruire le document).
       const reduced = reduceFinishedPayload(action.type, action.payload);
-      const updated = await withTenant(request.tenantId, (tx) =>
-        tx.pendingAction.update({
+      const updated = await withTenant(request.tenantId, async (tx) => {
+        const row = await tx.pendingAction.update({
           where: { id: params.data.id },
           data: {
             status: outcome.status,
@@ -742,8 +1050,29 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             executedAt: true,
             result: true,
           },
-        }),
-      );
+        });
+        /*
+         * L'ÉVÉNEMENT D'ORIGINE DU 2.21, émis DANS la transaction.
+         *
+         * C'est ici que le bug se voyait : le patron validait une action, la
+         * base changeait, et tous les AUTRES écrans — un second onglet, le
+         * poste d'un collègue — continuaient d'afficher les anciens chiffres
+         * jusqu'à un rechargement manuel. L'écran qui valide se rafraîchit
+         * déjà tout seul ; c'est ailleurs que le produit mentait.
+         *
+         * Une action ÉCHOUÉE émet aussi : son statut a changé, donc la file
+         * et le compteur du cockpit sont périmés. Ne pas émettre laisserait
+         * l'échec invisible partout sauf sur l'écran qui l'a déclenché.
+         */
+        await emitOutbox(tx, request.tenantId, {
+          type: outcome.status === "executed" ? "action.validee" : "action.echouee",
+          objectType: "pending_action",
+          objectId: row.id,
+          changedFields: ["status", "executedAt"],
+          correlationId: request.id,
+        });
+        return row;
+      });
       return reply.send(updated);
     },
   );
@@ -751,7 +1080,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.post(
     "/pending-actions/:id/reject",
     { preHandler: [...businessRoute, requireRole(["owner"])] },
-    decide("rejected"),
+    decide(),
   );
 
   /**

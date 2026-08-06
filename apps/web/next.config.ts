@@ -12,6 +12,19 @@ const API_URL = process.env.API_URL ?? "http://localhost:8080";
 
 const BUSINESS_PREFIXES = [
   "me",
+  // Flux d'invalidation (4.4). Son absence ici ne se voyait NULLE PART : la
+  // requête tombait sur le 404 HTML de Next, et `EventSource` n'a pas le droit
+  // de reprendre sur un statut != 200 — donc le flux mourait définitivement,
+  // en silence, et le produit se comportait comme avant le ticket.
+  "events",
+  // Le brief du matin. Jamais proxifié depuis sa livraison : `getMorningBrief`
+  // appelle `/brief`, la route existe côté API, et l'écran tombait sur le 404
+  // de Next en déployé. Trouvé par la garde ci-contre une fois qu'elle a su
+  // lire les appels faits via `call()`.
+  "brief",
+  // Manquaient aussi, écart préexistant révélé par la même revue.
+  "affaires",
+  "contrats",
   "cockpit",
   "pending-actions",
   "employees",

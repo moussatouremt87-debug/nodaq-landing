@@ -63,6 +63,7 @@ model Tenant {
 
   @@map("tenants")
   @@schema("public")
+  outboxEvents      OutboxEvent[]
 }
 
 /// Tables d'authentification (better-auth) : users, sessions, accounts, verifications.
@@ -370,6 +371,37 @@ model PendingAction {
   /// délai de transaction.
   @@index([tenantId, createdAt, id])
   @@map("pending_actions")
+  @@schema("public")
+}
+
+/// Domain event outbox (ticket 4.4) — written INSIDE the business transaction,
+/// so the event exists if and only if the write was committed. Carries what is
+/// needed to RE-READ (type, object kind, opaque id), never business values.
+/// Sealed by RLS (see the migration `outbox`).
+model OutboxEvent {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  /// Type d'événement de domaine — valeurs du registre partagé `@nodaq/shared`.
+  type          String
+  /// Nature de l'objet touché. Jamais son contenu.
+  objectType    String    @map("object_type")
+  objectId      String?   @map("object_id")
+  /// Des NOMS de champs, jamais des valeurs : un événement circule dans des
+  /// files, des journaux et des rejeux.
+  changedFields String[]  @map("changed_fields")
+  occurredAt    DateTime  @default(now()) @map("occurred_at")
+  correlationId String?   @map("correlation_id")
+  /// `null` = à relayer. Posé par le relais ; un rejeu reprend où il en était.
+  deliveredAt   DateTime? @map("delivered_at")
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// ATTENTION — l'index réel est PARTIEL (`WHERE delivered_at IS NULL`) et vit
+  /// dans la migration `20260806090000_outbox` : Prisma ne sait pas exprimer un
+  /// index partiel. Le déclarer ici en index plein créait une DÉRIVE muette —
+  /// le prochain `migrate dev` aurait proposé un index plein sur une table qui
+  /// grossit sans fin, en supprimant le partiel qui sert le relais. Il n'est
+  /// donc PAS déclaré ; c'est un test de `packages/db` qui garantit sa présence.
+  @@map("outbox")
   @@schema("public")
 }
 
