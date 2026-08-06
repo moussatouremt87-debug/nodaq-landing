@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { ApiError, getMe, getModules, listPendingActions } from "../lib/api";
 import { subscribeView } from "../lib/freshness";
+import { startLiveEvents } from "../lib/liveEvents";
 import type { Me } from "../lib/api";
 
 /*
@@ -193,6 +194,20 @@ export function Shell({ children }: { children: ReactNode }) {
   // Basculer un module doit retirer (ou rendre) sa page tout de suite : la nav
   // est une VUE comme une autre.
   useEffect(() => subscribeView("nav", loadModules), [loadModules]);
+
+  /*
+   * ÉCOUTE DU BUS SERVEUR — un seul point de branchement pour tout le produit.
+   *
+   * La coquille enveloppe tous les écrans : ouvrir le flux ici évite qu'un
+   * écran l'oublie, et évite surtout autant de connexions que d'écrans montés.
+   * Ce qui arrive est réinjecté dans le bus local, qui périme les vues selon
+   * le registre — donc AUCUN écran n'a à connaître l'existence de ce flux.
+   *
+   * C'est le dernier maillon du bug 2.21 : jusqu'ici, une écriture venue
+   * d'ailleurs — l'agent, un autre onglet, un collègue — laissait l'écran
+   * afficher des chiffres périmés sans le dire.
+   */
+  useEffect(() => startLiveEvents(), []);
 
   const activeOrg = me?.memberships.find((m) => m.tenantId === me.activeOrganizationId);
   // Fail-closed for real: business pages only mount once the session is

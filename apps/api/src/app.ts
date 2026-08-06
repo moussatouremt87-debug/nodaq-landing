@@ -52,6 +52,8 @@ import {
   serializeAffaire,
   toPrismaData,
 } from "./affaires.js";
+import { emitOutbox } from "./outbox.js";
+import { subscribeOutbox } from "./outboxRelay.js";
 import { sniffAudioFormat, transcribe, TRANSCRIPTION_MAX_BYTES } from "@nodaq/llm";
 // Importée, JAMAIS recopiée : la borne de la route doit être exactement celle
 // du schéma de l'outil, sinon la troncature « propre » de l'une devient la
@@ -319,6 +321,65 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   });
 
   /** Current session: user, active organization and memberships. */
+  /*
+   * FLUX D'INVALIDATION (4.4, PR A) — le consommateur du bus.
+   *
+   * CE QUE ÇA CORRIGE. Chaque écran se rafraîchit déjà après SA propre
+   * mutation ; ce qui manquait, c'est l'écriture venue d'AILLEURS — l'agent
+   * dans le chat, un autre onglet, un webhook, un collègue. Le patron voyait
+   * alors des chiffres d'il y a dix minutes sans que rien ne le dise.
+   *
+   * AUCUNE DONNÉE MÉTIER NE TRAVERSE. Le flux ne porte que le TYPE de
+   * l'événement et l'objet visé : l'écran relit par ses routes habituelles,
+   * qui repassent toutes par la chaîne d'autorisation. Un flux qui
+   * transporterait les valeurs ferait fuir sur un canal long, ouvert en
+   * permanence, et bien plus difficile à auditer qu'une requête.
+   *
+   * LE TENANT VIENT DE LA SESSION. `businessRoute` a déjà tranché
+   * l'appartenance quand on arrive ici ; l'abonnement est clé par
+   * `request.tenantId`, jamais par un paramètre.
+   */
+  app.get("/events", { preHandler: businessRoute }, async (request, reply) => {
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      // Un proxy qui bufferise transformerait un flux temps réel en flux
+      // livré par paquets de 4 ko — donc en rien du tout.
+      "x-accel-buffering": "no",
+    });
+
+    const unsubscribe = subscribeOutbox(request.tenantId, (delivery) => {
+      // `write` peut échouer sur une connexion déjà fermée : c'est le cas
+      // NORMAL (onglet fermé), pas une erreur à faire remonter.
+      try {
+        reply.raw.write(`data: ${JSON.stringify(delivery)}\n\n`);
+      } catch {
+        /* connexion partie ; le désabonnement suit sur "close" */
+      }
+    });
+
+    /*
+     * BATTEMENT DE CŒUR. Sans octet sur le fil, un proxy ou un mobile en
+     * veille ferme une connexion inactive au bout de quelques dizaines de
+     * secondes — et l'écran cesse d'être averti sans jamais l'apprendre. Un
+     * commentaire SSE (`:`) n'est pas un événement : aucun client ne le
+     * confond avec une invalidation.
+     */
+    const heartbeat = setInterval(() => {
+      try {
+        reply.raw.write(": ping\n\n");
+      } catch {
+        /* même raison que ci-dessus */
+      }
+    }, 25_000);
+
+    request.raw.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
+  });
+
   app.get("/me", { preHandler: [requireAuth] }, async (request) => {
     const memberships = await prisma.membership.findMany({
       where: { userId: request.authSession.user.id },
@@ -658,6 +719,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             data: { payload: reduced },
           });
         }
+        // Même raison que sur l'approbation : décider fait sortir l'action du
+        // compteur « à valider » de TOUS les écrans, pas seulement de celui
+        // qui a cliqué.
+        await emitOutbox(tx, request.tenantId, {
+          type: decision === "approved" ? "action.validee" : "action.rejetee",
+          objectType: "pending_action",
+          objectId: row.id,
+          changedFields: ["status"],
+          correlationId: request.id,
+        });
         return {
           id: row.id,
           type: row.type,
@@ -724,8 +795,8 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       // Minimisation : une action terminée n'a plus besoin de porter la
       // facture complète du client (elle a servi à reconstruire le document).
       const reduced = reduceFinishedPayload(action.type, action.payload);
-      const updated = await withTenant(request.tenantId, (tx) =>
-        tx.pendingAction.update({
+      const updated = await withTenant(request.tenantId, async (tx) => {
+        const row = await tx.pendingAction.update({
           where: { id: params.data.id },
           data: {
             status: outcome.status,
@@ -742,8 +813,29 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
             executedAt: true,
             result: true,
           },
-        }),
-      );
+        });
+        /*
+         * L'ÉVÉNEMENT D'ORIGINE DU 2.21, émis DANS la transaction.
+         *
+         * C'est ici que le bug se voyait : le patron validait une action, la
+         * base changeait, et tous les AUTRES écrans — un second onglet, le
+         * poste d'un collègue — continuaient d'afficher les anciens chiffres
+         * jusqu'à un rechargement manuel. L'écran qui valide se rafraîchit
+         * déjà tout seul ; c'est ailleurs que le produit mentait.
+         *
+         * Une action ÉCHOUÉE émet aussi : son statut a changé, donc la file
+         * et le compteur du cockpit sont périmés. Ne pas émettre laisserait
+         * l'échec invisible partout sauf sur l'écran qui l'a déclenché.
+         */
+        await emitOutbox(tx, request.tenantId, {
+          type: outcome.status === "executed" ? "action.validee" : "action.rejetee",
+          objectType: "pending_action",
+          objectId: row.id,
+          changedFields: ["status", "executedAt"],
+          correlationId: request.id,
+        });
+        return row;
+      });
       return reply.send(updated);
     },
   );

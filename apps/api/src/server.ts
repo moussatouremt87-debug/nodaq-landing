@@ -145,6 +145,33 @@ const stopRetentionSweep = startRetentionSweep({
 });
 app.addHook("onClose", async () => stopRetentionSweep());
 
+/*
+ * RELAIS DU BUS D'ÉVÉNEMENTS (4.4, PR A).
+ *
+ * En processus, comme les deux ordonnanceurs ci-dessus, et pour la même
+ * raison : l'outbox porte déjà l'atomicité et le rejeu que le ticket
+ * attendait d'une file. Une file distribuée s'introduira le jour où un
+ * consommateur devra tourner HORS de l'API.
+ *
+ * Cadence à 2 s : le critère du ticket est « écrans à jour en moins de 5 s »,
+ * et le relais ne lit que les non-transmis, servis par un index partiel.
+ */
+const { startOutboxRelay } = await import("./outboxRelay.js");
+const stopOutboxRelay = startOutboxRelay({
+  onError: (name, tenantId) => app.log.warn({ err: name, tenantId }, "outbox relay failed"),
+  // Des compteurs, jamais un type d'objet ni un identifiant : ce journal
+  // tourne toutes les 2 s, et il ne doit rien apprendre à qui le lit.
+  onRelay: (result) => {
+    if (result.failed > 0 || result.truncated) {
+      app.log.warn(
+        { relayed: result.relayed, failed: result.failed, truncated: result.truncated },
+        "outbox relay incomplete",
+      );
+    }
+  },
+});
+app.addHook("onClose", async () => stopOutboxRelay());
+
 // Canal support (2.18) : polling IMAP -> Object Storage -> triage -> brouillons.
 // Tout est optionnel : boîte OU stockage absents = canal inactif, app intacte.
 const { createImapMailSource } = await import("./support/imap.js");

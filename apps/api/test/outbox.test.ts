@@ -336,3 +336,77 @@ describe("le relais transmet, et il transmet AU MOINS une fois", () => {
     expect(recus).toHaveLength(0);
   });
 });
+
+describe("le bout en bout : valider une action périme les écrans des AUTRES", () => {
+  it("approuver émet un événement, et le relais le transmet", async () => {
+    /*
+     * LE CRITÈRE D'ACCEPTATION DU TICKET, et le bug d'origine du 2.21 :
+     * l'écran qui valide se rafraîchit déjà tout seul ; c'est ailleurs — un
+     * second onglet, le poste d'un collègue — que le produit affichait des
+     * chiffres d'il y a dix minutes sans le dire.
+     *
+     * On éprouve la chaîne complète : écriture métier -> événement dans la
+     * MÊME transaction -> relais -> abonné.
+     */
+    const { buildApp } = await import("../src/app.js");
+    const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
+    const app = buildApp();
+    await app.ready();
+    try {
+      const signup = await app.inject({
+        method: "POST",
+        url: "/api/auth/sign-up/email",
+        payload: {
+          email: `outbox-e2e-${RUN}@example.com`,
+          password: "a-strong-password-123",
+          name: "Outbox E2E",
+        },
+      });
+      const raw = signup.headers["set-cookie"];
+      const cookie = (Array.isArray(raw) ? raw : [raw])
+        .map((c) => String(c).split(";")[0])
+        .join("; ");
+      const org = await app.inject({
+        method: "POST",
+        url: "/api/auth/organization/create",
+        headers: { cookie },
+        payload: { name: `Org Outbox ${RUN}`, slug: `org-outbox-${RUN}` },
+      });
+      const tenantId = org.json().id as string;
+
+      const action = await withTenant(tenantId, (tx) =>
+        tx.pendingAction.create({
+          data: {
+            tenantId,
+            type: "record_prospect_contact",
+            status: "pending",
+            employee: "compta",
+            payload: {},
+          },
+        }),
+      );
+
+      const recus: string[] = [];
+      const off = subscribeOutbox(tenantId, (d) => recus.push(d.type));
+      try {
+        const rejet = await app.inject({
+          method: "POST",
+          url: `/pending-actions/${action.id}/reject`,
+          headers: { cookie },
+        });
+        expect(rejet.statusCode).toBe(200);
+
+        // Rien n'est transmis TANT QUE le relais n'est pas passé : la
+        // transaction dépose, elle ne pousse pas.
+        expect(recus).toHaveLength(0);
+
+        await relayTenantOutbox(tenantId);
+        expect(recus).toContain("action.rejetee");
+      } finally {
+        off();
+      }
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
+});
