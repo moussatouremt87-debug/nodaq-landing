@@ -159,6 +159,10 @@ app.addHook("onClose", async () => stopRetentionSweep());
  * et le relais ne lit que les non-transmis, servis par un index partiel.
  */
 const { startOutboxRelay } = await import("./outboxRelay.js");
+app.log.warn(
+  {},
+  "outbox relay: single-replica only — a second API instance would silently swallow invalidations",
+);
 const stopOutboxRelay = startOutboxRelay({
   onError: (name, tenantId) => app.log.warn({ err: name, tenantId }, "outbox relay failed"),
   // Des compteurs, jamais un type d'objet ni un identifiant : ce journal

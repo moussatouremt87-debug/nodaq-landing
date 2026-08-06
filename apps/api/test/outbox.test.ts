@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma, withTenant } from "@nodaq/db";
 import { createAdminClient } from "@nodaq/db/admin";
@@ -184,8 +183,8 @@ describe("le relais transmet, et il transmet AU MOINS une fois", () => {
     const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
     const recusA: string[] = [];
     const recusB: string[] = [];
-    const { unsubscribe: offA } = subscribeOutbox(tenantA, (d) => recusA.push(d.type));
-    const { unsubscribe: offB } = subscribeOutbox(tenantB, (d) => recusB.push(d.type));
+    const { unsubscribe: offA } = subscribeOutbox(tenantA, (d) => recusA.push(d.type), "owner");
+    const { unsubscribe: offB } = subscribeOutbox(tenantB, (d) => recusB.push(d.type), "owner");
     try {
       await withTenant(tenantA, (tx) =>
         emitOutbox(tx, tenantA, { type: "rh.modifie", objectType: "employe" }),
@@ -249,10 +248,14 @@ describe("le relais transmet, et il transmet AU MOINS une fois", () => {
   it("un abonné qui JETTE n'empêche pas les autres d'être servis", async () => {
     const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
     const recus: string[] = [];
-    const { unsubscribe: offCasse } = subscribeOutbox(tenantA, () => {
-      throw new Error("connexion morte");
-    });
-    const { unsubscribe: offSain } = subscribeOutbox(tenantA, (d) => recus.push(d.type));
+    const { unsubscribe: offCasse } = subscribeOutbox(
+      tenantA,
+      () => {
+        throw new Error("connexion morte");
+      },
+      "owner",
+    );
+    const { unsubscribe: offSain } = subscribeOutbox(tenantA, (d) => recus.push(d.type), "owner");
     try {
       await withTenant(tenantA, (tx) =>
         emitOutbox(tx, tenantA, { type: "echeance.modifiee", objectType: "echeance" }),
@@ -271,7 +274,7 @@ describe("le relais transmet, et il transmet AU MOINS une fois", () => {
     // rouvrirait le trou par l'autre bout.
     const { relayTenantOutbox, subscribeOutbox } = await import("../src/outboxRelay.js");
     const livraisons: Record<string, unknown>[] = [];
-    const { unsubscribe: off } = subscribeOutbox(tenantA, (d) => livraisons.push({ ...d }));
+    const { unsubscribe: off } = subscribeOutbox(tenantA, (d) => livraisons.push({ ...d }), "owner");
     try {
       await withTenant(tenantA, (tx) =>
         emitOutbox(tx, tenantA, { type: "cout.modifie", objectType: "cost_entry" }),
@@ -474,38 +477,97 @@ describe("la route /events — la surface réellement exposée", () => {
 });
 
 describe("l'autorisation est revérifiée pendant la vie du flux", () => {
-  it("le battement RELIT l'appartenance et le rôle", async () => {
+  it("une appartenance RÉVOQUÉE ferme le flux, sans attendre l'onglet", async () => {
     /*
-     * LE BLOQUANT DE LA REVUE. `businessRoute` tranchait à la connexion, puis
-     * plus jamais : ni révocation d'appartenance, ni déconnexion, ni
-     * expiration de session ne fermaient le flux, et aucune durée de vie
-     * maximale n'était posée. Un utilisateur exclu de l'organisation
-     * continuait de recevoir les événements de ses anciens collègues jusqu'à
-     * fermer l'onglet. Toutes les autres routes du produit recontrôlent
-     * l'appartenance à CHAQUE requête ; celle-ci ne le faisait jamais.
+     * LE BLOQUANT DU PREMIER AUDIT, éprouvé POUR DE VRAI cette fois.
      *
-     * On éprouve ici la garde par sa surface testable : le battement doit
-     * interroger `membership` et refléter le rôle relu sur l'abonnement.
+     * La garde précédente lisait le source de `app.ts` par expression
+     * régulière : elle prouvait que le code était écrit, pas qu'il
+     * s'exécutait. Le second audit a montré qu'un mutant remplaçant le
+     * `fermer()` de la branche `!membership` par un `return` la laissait
+     * VERTE — parce que `fermer()` réapparaît plus bas dans le fichier.
+     *
+     * Ici on ouvre une vraie connexion, on révoque l'appartenance en base, et
+     * on vérifie que l'abonné DISPARAÎT du registre. Le battement est injecté
+     * par en-tête pour ne pas attendre 25 secondes.
      */
-    const source = readFileSync(
-      new URL("../src/app.ts", import.meta.url).pathname,
-      "utf8",
-    );
-    const start = source.indexOf('app.get("/events"');
-    expect(start).toBeGreaterThan(-1);
-    const bloc = source.slice(start, source.indexOf("\n  app.get(\"/me\"", start));
+    const { buildApp } = await import("../src/app.js");
+    const { outboxSubscriberCount } = await import("../src/outboxRelay.js");
+    const app = buildApp();
+    await app.ready();
+    try {
+      const signup = await app.inject({
+        method: "POST",
+        url: "/api/auth/sign-up/email",
+        payload: {
+          email: `revoke-${RUN}@example.com`,
+          password: "a-strong-password-123",
+          name: "Revoke",
+        },
+      });
+      const raw = signup.headers["set-cookie"];
+      const cookie = (Array.isArray(raw) ? raw : [raw])
+        .map((c) => String(c).split(";")[0])
+        .join("; ");
+      const org = await app.inject({
+        method: "POST",
+        url: "/api/auth/organization/create",
+        headers: { cookie },
+        payload: { name: `Org Revoke ${RUN}`, slug: `org-revoke-${RUN}` },
+      });
+      const tenantId = org.json().id as string;
 
-    // L'appartenance est RELUE, pas supposée.
-    expect(bloc).toMatch(/membership[\s\S]*findUnique/);
-    // Un membership disparu FERME le flux — sinon relire ne servirait à rien.
-    expect(bloc).toMatch(/if \(!membership\) \{[\s\S]*fermer\(\)/);
-    // Le rôle relu est propagé : une rétrogradation coupe les événements
-    // owner-only sans attendre une reconnexion.
-    expect(bloc).toContain("registration.setRole(membership.role)");
-    // Et le plafond de flux existe : sans lui, un onglet qui recharge en
-    // boucle épuise le processus sans franchir aucune garde.
-    expect(bloc).toContain("MAX_STREAMS_PER_USER");
-  });
+      // Connexion réelle, battement à 40 ms.
+      const stream = app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie, "x-test-heartbeat-ms": "40" },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      expect(outboxSubscriberCount(tenantId)).toBeGreaterThan(0);
+
+      // On révoque l'appartenance : le prochain battement doit couper.
+      await admin.membership.deleteMany({ where: { tenantId } });
+      await new Promise((r) => setTimeout(r, 400));
+      expect(outboxSubscriberCount(tenantId)).toBe(0);
+      await stream.catch(() => undefined);
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
+});
+
+describe("le passage COMPLET du relais — découverte comprise", () => {
+  it("un tour complet transmet, sans qu'on lui donne le tenant", async () => {
+    /*
+     * LA RÉGRESSION LA PLUS GRAVE DE CE TICKET, et elle venait d'un correctif.
+     *
+     * Pour éviter une transaction par tenant toutes les 2 s, la découverte
+     * avait été réécrite en `SELECT DISTINCT tenant_id FROM outbox` HORS
+     * `withTenant`. Or `outbox` est scellée (ENABLE + FORCE) et `app_user` est
+     * NOBYPASSRLS : sans le GUC, la policy compare `tenant_id = NULL`, donc
+     * AUCUNE ligne. Mesuré : 0 vue là où 35 existaient. Le relais ne
+     * transmettait plus rien en déployé, et `onRelay` ne se déclenchant qu'à
+     * partir d'un événement relayé, pas un journal ne l'aurait dit.
+     *
+     * Tous les tests appelaient `relayTenantOutbox(tenantId)` avec un tenant
+     * DÉJÀ connu : aucun ne passait par la découverte. Celui-ci le fait.
+     */
+    const { runOutboxRelayOnce, subscribeOutbox } = await import("../src/outboxRelay.js");
+    const recus: string[] = [];
+    const { unsubscribe } = subscribeOutbox(tenantA, (d) => recus.push(d.type), "owner");
+    try {
+      await withTenant(tenantA, (tx) =>
+        emitOutbox(tx, tenantA, { type: "avis.modifie", objectType: "avis" }),
+      );
+      const res = await runOutboxRelayOnce();
+      expect(res.tenants).toBeGreaterThan(0);
+      expect(res.relayed).toBeGreaterThanOrEqual(1);
+      expect(recus).toContain("avis.modifie");
+    } finally {
+      unsubscribe();
+    }
+  }, 60_000);
 });
 
 describe("le filtre de rôle — une fuite par canal auxiliaire", () => {

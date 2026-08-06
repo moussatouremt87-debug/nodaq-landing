@@ -34,17 +34,42 @@ function sources(): string[] {
   return found;
 }
 
-/** Premiers segments appelés derrière `/backend/`, tels qu'écrits dans le code. */
+/**
+ * Premiers segments réellement appelés — deux formes, pas une.
+ *
+ * La première version ne captait que les littéraux `"/backend/xxx"`. Or 95 %
+ * des appels passent par `call(schema, "/chemin")`, qui préfixe lui-même
+ * (`lib/api.ts`). Mesuré : 7 préfixes détectés contre 25 déclarés — et
+ * `affaires` et `contrats`, les deux manques que la revue avait trouvés, sont
+ * appelés par `call()` donc étaient INVISIBLES à la garde. Elle n'aurait pas
+ * trouvé ce qu'elle prétendait garder, et ne trouvera pas le prochain.
+ */
 function usedPrefixes(): Set<string> {
   const used = new Set<string>();
   for (const source of sources()) {
+    // `fetch("/backend/xxx")` — appels directs.
     for (const match of source.matchAll(/["'`]\/backend\/([a-z0-9-]+)/g)) {
+      const prefix = match[1];
+      if (prefix) used.add(prefix);
+    }
+    // `call(Schema, "/xxx/...")` — la forme majoritaire. Le chemin est le
+    // second argument, littéral ou gabarit.
+    for (const match of source.matchAll(/\bcall\s*\([^,]+,\s*["'`]\/([a-z0-9-]+)/g)) {
       const prefix = match[1];
       if (prefix) used.add(prefix);
     }
   }
   return used;
 }
+
+/**
+ * Les webhooks ont leur propre bloc de réécriture, volontairement restreint à
+ * deux sous-chemins d'administration : la route de RÉCEPTION est publique et
+ * ne passe pas par le proxy. Les compter comme un préfixe manquant ferait
+ * crier la garde sur une décision délibérée — et une garde qui crie pour rien
+ * finit ignorée.
+ */
+const HANDLED_ELSEWHERE = new Set(["webhooks"]);
 
 function declaredPrefixes(): Set<string> {
   const config = readFileSync(join(WEB, "next.config.ts"), "utf8");
@@ -58,13 +83,24 @@ function declaredPrefixes(): Set<string> {
 describe("tout chemin /backend appelé par le code est proxifié", () => {
   it("aucun préfixe utilisé n'est absent de la configuration", () => {
     const declared = declaredPrefixes();
-    const manquants = [...usedPrefixes()].filter((prefix) => !declared.has(prefix));
+    const manquants = [...usedPrefixes()].filter(
+      (prefix) => !declared.has(prefix) && !HANDLED_ELSEWHERE.has(prefix),
+    );
     // Le message porte la liste : « un test rouge » sans dire QUOI ferait
     // chercher dans vingt fichiers.
     expect(manquants, `préfixes appelés mais non proxifiés : ${manquants.join(", ")}`).toEqual([]);
   });
 
-  it("le flux d'invalidation en fait partie — c'est celui qui est mort en silence", () => {
-    expect(declaredPrefixes().has("events")).toBe(true);
+  it("la garde VOIT les appels faits via `call()`, pas seulement les fetch directs", () => {
+    /*
+     * Sans cette assertion, la garde pouvait redevenir aveugle sans que rien
+     * ne rougisse : c'est précisément l'état dans lequel elle a été livrée.
+     * `affaires` et `contrats` ne sont atteints que par `call()`.
+     */
+    const used = usedPrefixes();
+    expect(used.has("affaires")).toBe(true);
+    expect(used.has("contrats")).toBe(true);
+    // …et le flux, atteint par un `fetch` direct.
+    expect(used.has("events")).toBe(true);
   });
 });

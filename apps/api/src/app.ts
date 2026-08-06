@@ -323,9 +323,23 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   /** Current session: user, active organization and memberships. */
   /** Plafond de flux simultanés par utilisateur et par tenant. */
   const MAX_STREAMS_PER_USER = 4;
-  /** Battement, et revalidation de l'appartenance. */
+  /**
+   * Battement, et revalidation de l'appartenance.
+   *
+   * Injectable par en-tête EN TEST uniquement : sans cela, éprouver la
+   * revalidation demandait d'attendre 25 s, donc personne ne l'éprouvait — et
+   * la seule « garde » écrite était une lecture du source par expression
+   * régulière, qui prouve que le code est écrit, pas qu'il s'exécute.
+   */
   const STREAM_HEARTBEAT_MS = 25_000;
+  const heartbeatMsFor = (request: FastifyRequest): number => {
+    if (process.env.NODE_ENV === "production") return STREAM_HEARTBEAT_MS;
+    const raw = Number(request.headers["x-test-heartbeat-ms"]);
+    return Number.isFinite(raw) && raw > 0 ? raw : STREAM_HEARTBEAT_MS;
+  };
   const openStreams = new Map<string, number>();
+  /** Au-delà, on coupe : `EventSource` reconnecte et refait toute la chaîne. */
+  const STREAM_MAX_LIFETIME_MS = 30 * 60_000;
   /*
    * Registre des flux ouverts, pour l'ARRÊT PROPRE. Une requête SSE n'est
    * jamais « idle » : avec le défaut Fastify, `app.close()` attendait
@@ -435,15 +449,29 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           fermer();
           return;
         }
+        /*
+         * LA SESSION AUSSI. Relire l'appartenance seule ne couvrait qu'un
+         * tiers du défaut annoncé corrigé : une déconnexion, une session
+         * expirée ou révoquée laissaient le flux vivant tant que
+         * l'appartenance existait — c'est-à-dire dans le cas le plus banal.
+         */
+        const session = await auth.api
+          .getSession({ headers: toWebHeaders(request) })
+          .catch(() => null);
+        if (!session) {
+          fermer();
+          return;
+        }
         registration.setRole(membership.role);
         push(": ping\n\n");
       })();
-    }, STREAM_HEARTBEAT_MS);
+    }, heartbeatMsFor(request));
 
     function fermer(): void {
       if (closed) return;
       closed = true;
       clearInterval(heartbeat);
+      clearTimeout(maxLife);
       registration.unsubscribe();
       openConnections.delete(fermerRef);
       const restants = (openStreams.get(streamKey) ?? 1) - 1;
@@ -458,6 +486,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     function fermerRef(): void {
       fermer();
     }
+
+    /*
+     * DURÉE DE VIE ABSOLUE. Même revalidé, un flux qui vit des jours accumule
+     * un état que rien ne remet à zéro. `EventSource` reconnecte tout seul :
+     * couper périodiquement ne coûte qu'une reconnexion et rejoue toute la
+     * chaîne d'autorisation depuis le début.
+     */
+    const maxLife = setTimeout(fermer, STREAM_MAX_LIFETIME_MS);
+    maxLife.unref();
 
     request.raw.on("close", fermer);
     // Une erreur de socket ne remonte PAS en exception synchrone : sans cet
@@ -793,7 +830,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         });
         if (claimed.count > 0) {
           await emitOutbox(tx, request.tenantId, {
-            type: decision === "approved" ? "action.validee" : "action.rejetee",
+            // `decide` n'a qu'un appelant, `/reject` : la branche « approved »
+            // était du code mort qui laissait croire à un chemin d'émission
+            // inexistant. `/approve` a son propre handler, plus bas.
+            type: "action.rejetee",
             objectType: "pending_action",
             objectId: params.data.id,
             changedFields: ["status"],
@@ -845,16 +885,41 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       }
       // Atomic claim pending -> approved: exactly ONE approval wins, so the
       // execution below runs exactly once (double-approve => 409, no re-run).
-      const { count } = await withTenant(request.tenantId, (tx) =>
-        tx.pendingAction.updateMany({
+      /*
+       * L'ÉVÉNEMENT DÈS LA REVENDICATION, pas seulement à la fin.
+       *
+       * La version précédente n'émettait que dans la transaction finale : un
+       * crash entre la revendication et l'exécution laissait une action
+       * `approved` sortie du compteur « à valider » SANS aucun événement, et un
+       * crash après une écriture d'exécuteur laissait un mouvement de stock ou
+       * une immobilisation écrits sans que rien ne périme les écrans. Le
+       * message de commit affirmait l'atomicité pour ce chemin ; elle n'était
+       * vraie que du dernier tiers.
+       *
+       * Deux événements pour une approbation, donc — et c'est correct : le
+       * consommateur d'invalidation est idempotent, recharger deux fois rend
+       * la même chose.
+       */
+      const { count } = await withTenant(request.tenantId, async (tx) => {
+        const claimed = await tx.pendingAction.updateMany({
           where: { id: params.data.id, status: "pending" },
           data: {
             status: "approved",
             validatedBy: request.authSession.user.id,
             validatedAt: new Date(),
           },
-        }),
-      );
+        });
+        if (claimed.count > 0) {
+          await emitOutbox(tx, request.tenantId, {
+            type: "action.validee",
+            objectType: "pending_action",
+            objectId: params.data.id,
+            changedFields: ["status"],
+            correlationId: request.id,
+          });
+        }
+        return claimed;
+      });
       if (count === 0) {
         const exists = await withTenant(request.tenantId, (tx) =>
           tx.pendingAction.findUnique({ where: { id: params.data.id }, select: { status: true } }),

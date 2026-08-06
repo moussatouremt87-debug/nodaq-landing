@@ -110,7 +110,22 @@ describe("registre des mutations", () => {
     for (const file of walkApi(apiSrc)) {
       const source = readFileSync(file, "utf-8");
       for (const event of Object.keys(EVENT_VIEWS) as DomainEvent[]) {
-        if (source.includes(`"${event}"`)) emitted.add(event);
+        /*
+         * Le littéral À L'INTÉRIEUR d'un appel `emitOutbox`, pas n'importe où.
+         *
+         * La première version acceptait le littéral n'importe où dans
+         * `apps/api/src` — si bien que `OWNER_ONLY_EVENTS`, une liste
+         * d'INTERDICTION, valait preuve d'émission pour les quatre événements
+         * qu'elle refuse de livrer aux membres. Une garde qui prend une liste
+         * de refus pour un émetteur ne garde rien.
+         *
+         * La fenêtre couvre le ternaire (`type: ok ? "a" : "b"`), qui est un
+         * chemin d'émission légitime — la resserrer sur `type: "<event>"`
+         * aurait poussé à déplier le code pour satisfaire le test.
+         */
+        if (new RegExp(`emitOutbox\\([\\s\\S]{0,400}?"${event}"`).test(source)) {
+          emitted.add(event);
+        }
       }
     }
     for (const file of pageFiles(APP)) {

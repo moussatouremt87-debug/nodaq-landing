@@ -86,7 +86,12 @@ const subscribers = new Map<string, Set<Registration>>();
 export function subscribeOutbox(
   tenantId: string,
   subscriber: Subscriber,
-  role = "owner",
+  /*
+   * Défaut FAIL-CLOSED. `"owner"` par défaut faisait qu'un futur appelant
+   * omettant le rôle recevait les événements RH : une garde dont l'oubli
+   * ouvre est une garde à l'envers.
+   */
+  role = "member",
 ): { unsubscribe: () => void; setRole: (role: string) => void } {
   const registration: Registration = { deliver: subscriber, role };
   const set = subscribers.get(tenantId) ?? new Set<Registration>();
@@ -115,6 +120,25 @@ export const OUTBOX_RELAY_PAGE_SIZE = 200;
 
 /** Coût borné d'un passage, par tenant. */
 export const OUTBOX_RELAY_MAX_PAGES = 50;
+
+/*
+ * PAS DE VERROU CONSULTATIF, et c'est un refus motivé.
+ *
+ * La revue demandait un `pg_try_advisory_lock` pour empêcher deux répliques de
+ * relayer. Essayé, puis RETIRÉ : un verrou consultatif est lié à la SESSION
+ * PostgreSQL, et Prisma répartit les requêtes sur un pool. Rien ne garantit
+ * que la prise et le relâchement tombent sur la même connexion — un
+ * relâchement émis ailleurs échoue silencieusement, le verrou fuit, et le
+ * relais s'arrête DÉFINITIVEMENT au premier tour. C'est-à-dire un mode de
+ * défaillance pire que le danger gardé, et déclenché en fonctionnement normal
+ * plutôt qu'en cas de mauvaise configuration.
+ *
+ * La bonne réponse est un bail en base (propriétaire + expiration, revendiqué
+ * par un UPDATE conditionnel) ou un canal partagé (`LISTEN/NOTIFY`), qui rend
+ * le verrou inutile en supprimant le besoin d'unicité. Les deux dépassent
+ * cette PR. En attendant, la contrainte mono-réplique est écrite ci-dessus et
+ * journalisée au démarrage : dite plutôt que gardée, mais dite.
+ */
 
 export interface OutboxRelayResult {
   readonly relayed: number;
@@ -198,6 +222,46 @@ export async function relayTenantOutbox(
   return { relayed, truncated };
 }
 
+/**
+ * UN passage complet du relais — découverte des tenants comprise.
+ *
+ * Exporté parce que c'est le seul chemin qui exerce la DÉCOUVERTE, et que
+ * c'est précisément là que la régression la plus grave de ce ticket s'était
+ * logée : une requête `SELECT DISTINCT tenant_id FROM outbox` hors
+ * `withTenant` rendait zéro ligne (table scellée, `app_user` NOBYPASSRLS),
+ * donc le relais ne transmettait plus rien — sans qu'un seul journal le dise.
+ * Tous les tests appelaient `relayTenantOutbox(tenantId)` avec un tenant déjà
+ * connu : aucun ne passait par ici.
+ */
+export async function runOutboxRelayOnce(
+  onError: (name: string, tenantId?: string) => void = () => undefined,
+): Promise<OutboxRelayResult & { tenants: number; failed: number }> {
+  {
+    /*
+     * `tenants` — PLAN AUTH, sans RLS. C'est ce que lisent déjà `push.ts` et
+     * `retention.ts`, les deux ordonnanceurs pris pour modèle. Interroger
+     * `outbox` ici contournerait une table scellée et, en pratique, ne
+     * rendrait rien du tout.
+     */
+    const tenants = await prisma.tenant.findMany({ select: { id: true } });
+    let relayed = 0;
+    let failed = 0;
+    let truncated = false;
+    for (const tenant of tenants) {
+      try {
+        const result = await relayTenantOutbox(tenant.id);
+        relayed += result.relayed;
+        truncated ||= result.truncated;
+      } catch (error) {
+        // Un tenant cassé n'arrête pas les autres — mais jamais en silence.
+        failed += 1;
+        onError(error instanceof Error ? error.name : "unknown", tenant.id);
+      }
+    }
+    return { relayed, truncated, tenants: tenants.length, failed };
+  }
+}
+
 export interface OutboxRelayOptions {
   /** Cadence. Le critère du ticket est « moins de 5 s » : 2 s laisse la marge. */
   intervalMs?: number;
@@ -221,37 +285,8 @@ export function startOutboxRelay(options: OutboxRelayOptions = {}): () => void {
     if (running) return;
     running = true;
     try {
-      /*
-       * Ne parcourir QUE les tenants qui ont des non-transmis.
-       *
-       * La première version ouvrait au moins une transaction `withTenant` par
-       * tenant toutes les 2 secondes, même sans abonné et même sans le
-       * moindre événement : à mille tenants, des centaines de transactions par
-       * seconde dont l'essentiel ne rend rien. Une seule requête agrégée
-       * remplace tout ça — elle traverse la RLS par nécessité (elle ne lit
-       * aucune donnée, seulement des identifiants de tenant à réveiller) et
-       * c'est le même plan d'autorisation que `prisma.tenant.findMany`.
-       */
-      const pending = await prisma.$queryRaw<{ tenant_id: string }[]>`
-        SELECT DISTINCT tenant_id FROM outbox WHERE delivered_at IS NULL`;
-      const tenants = pending.map((row) => ({ id: row.tenant_id }));
-      let relayed = 0;
-      let failed = 0;
-      let truncated = false;
-      for (const tenant of tenants) {
-        try {
-          const result = await relayTenantOutbox(tenant.id);
-          relayed += result.relayed;
-          truncated ||= result.truncated;
-        } catch (error) {
-          // Un tenant cassé n'arrête pas les autres — mais jamais en silence.
-          failed += 1;
-          onError(error instanceof Error ? error.name : "unknown", tenant.id);
-        }
-      }
-      if (relayed > 0 || failed > 0) {
-        options.onRelay?.({ relayed, truncated, tenants: tenants.length, failed });
-      }
+      const result = await runOutboxRelayOnce(onError);
+      if (result.relayed > 0 || result.failed > 0) options.onRelay?.(result);
     } catch (error) {
       onError(error instanceof Error ? error.name : "unknown");
     } finally {
